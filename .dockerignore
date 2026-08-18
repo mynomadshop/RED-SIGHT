@@ -1,0 +1,15 @@
+.repair-backups/
+**/*.bak
+**/*.bak.*
+**/*.orig
+**/*.old
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+.coverage
+compose-validated.txt
+.venv/
+venv/

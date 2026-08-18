@@ -1,0 +1,168 @@
+# ============================================================
+# RedSight - Git exclusions
+# ============================================================
+
+# ------------------------------------------------------------
+# Secrets
+# ------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+credentials.json
+secrets.json
+
+# ------------------------------------------------------------
+# Python virtual environments
+# ------------------------------------------------------------
+.venv/
+.venv-ui/
+.venv-actions/
+venv/
+env/
+
+# ------------------------------------------------------------
+# Python caches
+# ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ------------------------------------------------------------
+# Repair/runtime artifacts
+# ------------------------------------------------------------
+.repair-backups/
+runtime/
+.runtime/
+logs/
+tmp/
+temp/
+*.log
+
+# ------------------------------------------------------------
+# Databases / persistent state
+# ------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+qdrant_storage/
+qdrant-data/
+storage/
+
+# ------------------------------------------------------------
+# Personal RedSight/Hermes runtime heritage
+# ------------------------------------------------------------
+data/heritage/
+data/memory/
+data/memories/
+data/sessions/
+data/runtime/
+data/qdrant/
+
+# ------------------------------------------------------------
+# AI models / checkpoints
+# ------------------------------------------------------------
+*.gguf
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+
+models/
+checkpoints/
+
+# ------------------------------------------------------------
+# Node
+# ------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ------------------------------------------------------------
+# IDE
+# ------------------------------------------------------------
+.vscode/
+.idea/
+
+# ------------------------------------------------------------
+# Build output
+# ------------------------------------------------------------
+build/
+dist/
+*.egg-info/
+
+# ------------------------------------------------------------
+# OS
+# ------------------------------------------------------------
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ------------------------------------------------------------
+# Local Docker backups
+# ------------------------------------------------------------
+*.tar
+*.tar.gz
+docker-backups/
+# ============================================================
+# RedSight private/runtime exclusions
+# ============================================================
+
+# Runtime memories and sessions
+data/memory_exports/
+data/memory/
+data/memories/
+data/sessions/
+
+# Runtime/system scan outputs
+outputs/
+data/test_benchmarks/results.json
+
+# Repair / temporary files
+*.bak
+*.backup-*
+*.before
+*.tmp
+*.temp
+*.old
+*.orig
+*~
+redsight-ui-detection.txt
+
+# Runtime logs
+*.log
+logs/
+
+# Repair backups
+.repair-backups/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Python environments
+.venv/
+.venv-ui/
+.venv-actions/
+
+# Models
+*.gguf
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+
+# Secrets
+.env
+.env.*
+!.env.example

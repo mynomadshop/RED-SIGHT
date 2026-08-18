@@ -1,0 +1,48 @@
+services:
+
+  qdrant:
+    build:
+      context: .
+      dockerfile: Dockerfile.qdrant
+    image: redsight-qdrant:v1.19.0
+
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://localhost:6333/readyz
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redsight:
+    gpus: all
+    volumes:
+      - type: bind
+        source: "C:/Users/walim"
+        target: /host/user
+        read_only: true
+      - type: bind
+        source: "D:/"
+        target: /host/d
+        read_only: true
+      - "./data/heritage:/heritage:ro"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      NVIDIA_VISIBLE_DEVICES: "all"
+      VECTOR_BACKEND_URL: ""
+      VECTOR_BACKEND_HOST: "qdrant"
+      VECTOR_BACKEND_PORT: "6333"
+      VECTOR_BACKEND_EMBEDDED: "false"
+
+      QDRANT_URL: "http://qdrant:6333"
+
+      LM_STUDIO_URL: "http://host.docker.internal:1234"
+      LM_STUDIO_BASE_URL: "http://host.docker.internal:1234/v1"
+
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
