@@ -233,6 +233,29 @@ Assert-True  -Name 'kills a process that exceeds its timeout' -Condition $r.Time
 Assert-Equal -Name 'timed-out process reports exit code -1'   -Expected -1 -Actual $r.ExitCode
 
 # ==========================================================================
+Write-Host "`n== Test-RsVenvImports ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Exercise the import probe against whatever Python is on this machine. This is
+# the check the installer uses to decide whether .venv-ui is usable, so a bug
+# here reports a broken install on a perfectly good one.
+$localPy = $null
+foreach ($n in @('python3', 'python')) {
+    $c = Get-RsCommand -Name $n
+    if ($c) { $localPy = $c.Source; break }
+}
+if (-not $localPy) {
+    Write-Host '  SKIP  no local Python available for the import probe' -ForegroundColor DarkGray
+} else {
+    Assert-True -Name 'import probe accepts modules that exist' `
+                -Condition (Test-RsVenvImports -VenvPython $localPy -Modules @('json', 'sys', 'os'))
+    Assert-True -Name 'import probe rejects a missing module' `
+                -Condition (-not (Test-RsVenvImports -VenvPython $localPy -Modules @('json', 'definitely_not_a_real_module_xyz')))
+    Assert-True -Name 'import probe rejects an unusable interpreter path' `
+                -Condition (-not (Test-RsVenvImports -VenvPython (Join-Path $tmpRoot 'no-python.exe') -Modules @('json')))
+}
+
+# ==========================================================================
 Write-Host "`n== Expand-RsArchive ==" -ForegroundColor Cyan
 # ==========================================================================
 
@@ -255,6 +278,55 @@ Assert-True -Name 'archive expands top-level files' `
 Expand-RsArchive -Path $zipPath -Destination $outDir | Out-Null
 Assert-True -Name 'expanding twice is safe' `
             -Condition (Test-Path -LiteralPath (Join-Path $outDir 'tools/python.exe'))
+
+# ==========================================================================
+Write-Host "`n== Install-RsBundledPython ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Build a synthetic bundle with the same layout as the official CPython nuget
+# package, then drive the real provisioning path: hash verification, expansion
+# and promotion to {app}\runtime\python.
+$bundleProj = Join-Path $tmpRoot 'BundleProj'
+$bundleDir = Join-Path $bundleProj 'runtime\bundle'
+New-Item -ItemType Directory -Path $bundleDir -Force | Out-Null
+
+$fakeSrc = Join-Path $tmpRoot 'fakepy'
+New-Item -ItemType Directory -Path (Join-Path $fakeSrc 'tools\Lib\venv') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $fakeSrc 'tools\Lib\ensurepip') -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $fakeSrc 'tools\python.exe') -Value 'stub' -Encoding ascii
+Set-Content -LiteralPath (Join-Path $fakeSrc 'tools\Lib\venv\__init__.py') -Value '# venv' -Encoding ascii
+Set-Content -LiteralPath (Join-Path $fakeSrc 'tools\Lib\ensurepip\__init__.py') -Value '# ensurepip' -Encoding ascii
+
+$fakeNupkg = Join-Path $bundleDir 'python-3.12.10-win-x64.nupkg'
+[System.IO.Compression.ZipFile]::CreateFromDirectory($fakeSrc, $fakeNupkg)
+$fakeHash = (Get-FileHash -LiteralPath $fakeNupkg -Algorithm SHA256).Hash.ToLowerInvariant()
+
+# Correct manifest -> provisioning succeeds.
+@{ python = @{ version = '3.12.10'; file = 'python-3.12.10-win-x64.nupkg'; sha256 = $fakeHash } } |
+    ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $bundleDir 'bundle-manifest.json') -Encoding utf8
+
+$provisioned = Install-RsBundledPython -ProjectRoot $bundleProj
+Assert-True -Name 'bundled python provisioned from the package' -Condition ($null -ne $provisioned)
+Assert-True -Name 'runtime python.exe is in place' `
+            -Condition (Test-Path -LiteralPath (Join-Path $bundleProj 'runtime\python\python.exe'))
+Assert-True -Name 'runtime carries the venv module' `
+            -Condition (Test-Path -LiteralPath (Join-Path $bundleProj 'runtime\python\Lib\venv\__init__.py'))
+Assert-True -Name 'nuget tools\ prefix is stripped' `
+            -Condition (-not (Test-Path -LiteralPath (Join-Path $bundleProj 'runtime\python\tools')))
+
+# Tampered manifest -> provisioning must refuse rather than ship a bad runtime.
+@{ python = @{ version = '3.12.10'; file = 'python-3.12.10-win-x64.nupkg'
+               sha256 = '0000000000000000000000000000000000000000000000000000000000000000' } } |
+    ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $bundleDir 'bundle-manifest.json') -Encoding utf8
+$refused = $false
+try { Install-RsBundledPython -ProjectRoot $bundleProj -Force | Out-Null } catch { $refused = $true }
+Assert-True -Name 'a hash mismatch is refused' -Condition $refused
+
+# Missing bundle -> returns null so the caller can fall back to a download.
+$emptyProj = Join-Path $tmpRoot 'EmptyProj'
+New-Item -ItemType Directory -Path $emptyProj -Force | Out-Null
+Assert-True -Name 'absent bundle returns null (caller falls back)' `
+            -Condition ($null -eq (Install-RsBundledPython -ProjectRoot $emptyProj))
 
 # ==========================================================================
 Write-Host "`n== Get-RsFileHashSafe ==" -ForegroundColor Cyan

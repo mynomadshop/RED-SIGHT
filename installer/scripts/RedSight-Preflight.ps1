@@ -86,9 +86,10 @@ function Get-RsDownloadCache {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$ProjectRoot)
     # Downloads live outside the app dir so an uninstall/reinstall can reuse
-    # them and so a read-only Program Files install still works.
-    $dir = Join-Path $env:ProgramData 'RedSight\downloads'
-    if (-not $env:ProgramData) { $dir = Join-Path $ProjectRoot 'runtime\downloads' }
+    # them and so a read-only Program Files install still works. Test the
+    # variable before joining: Join-Path throws on a null Path.
+    $dir = if ($env:ProgramData) { Join-Path $env:ProgramData 'RedSight\downloads' }
+           else { Join-Path $ProjectRoot 'runtime\downloads' }
     New-Item -ItemType Directory -Path $dir -Force -ErrorAction SilentlyContinue | Out-Null
     return $dir
 }
@@ -435,8 +436,17 @@ function Test-RsVenvImports {
         [Parameter(Mandatory)][string[]]$Modules
     )
     if (-not (Test-Path -LiteralPath $VenvPython)) { return $false }
-    $code = 'import importlib,sys
-missing=[m for m in sys.argv[1:] if importlib.util.find_spec(m) is None]
+    # Import for real rather than probing with importlib.util.find_spec: a
+    # present-but-broken package (missing native DLLs, half-installed wheel)
+    # must count as missing. Note that "import importlib" alone does not expose
+    # importlib.util, which made an earlier find_spec version always fail.
+    $code = 'import sys
+missing = []
+for name in sys.argv[1:]:
+    try:
+        __import__(name)
+    except Exception as exc:
+        missing.append("%s(%s)" % (name, type(exc).__name__))
 print("MISSING=" + ",".join(missing))
 sys.exit(1 if missing else 0)'
     $r = Invoke-RsProcess -FilePath $VenvPython -Arguments (@('-c', $code) + $Modules) -TimeoutSeconds 180 -Quiet

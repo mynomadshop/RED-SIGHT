@@ -191,7 +191,21 @@ function Invoke-RsProcess {
     $proc.StartInfo = $psi
 
     try {
-        [void]$proc.Start()
+        try {
+            [void]$proc.Start()
+        } catch {
+            # A missing, corrupt or non-executable target must not blow up the
+            # caller: report it like any other failed command so probes such as
+            # Get-RsPythonVersion can simply treat it as unusable.
+            Write-RsLog "could not start process: $shown :: $($_.Exception.Message)" -Level DEBUG
+            return [pscustomobject]@{
+                ExitCode = -1
+                TimedOut = $false
+                StdOut   = ''
+                StdErr   = $_.Exception.Message
+                Command  = $shown
+            }
+        }
 
         # Drain both pipes with .NET async reads rather than PowerShell events:
         # Register-ObjectEvent handlers only run when the engine pumps its event
