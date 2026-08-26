@@ -54,6 +54,10 @@ jobs:
         shell: pwsh
         run: pwsh -NoLogo -NoProfile -File installer/tests/Test-RedSightSetup.ps1
 
+      - name: Lint the Inno Setup script
+        shell: pwsh
+        run: pwsh -NoLogo -NoProfile -File installer/tests/Test-IssScript.ps1
+
       - name: Check every script parses
         shell: pwsh
         run: |

@@ -209,7 +209,7 @@ Write-Host "`n== Invoke-RsProcess ==" -ForegroundColor Cyan
 $isWin = ($PSVersionTable.PSEdition -eq 'Desktop') -or
          [bool](Get-Variable -Name IsWindows -ValueOnly -ErrorAction SilentlyContinue)
 if ($isWin) {
-    $shell = Join-Path $env:WINDIR 'System32\cmd.exe'
+    $shell = Get-RsSystem32 'cmd.exe'
     $okArgs = @('/c', 'echo hello')
     $failArgs = @('/c', 'exit 7')
     $slowArgs = @('/c', 'ping -n 12 127.0.0.1 >nul')

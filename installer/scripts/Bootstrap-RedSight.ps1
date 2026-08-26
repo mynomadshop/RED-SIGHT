@@ -349,7 +349,7 @@ Set-RsSummary -Key 'warnings' -Value $warnings
 Set-RsSummary -Key 'rebootRequired' -Value $rebootRequired
 Set-RsSummary -Key 'finishedAt' -Value (Get-Date -Format 'o')
 
-$summaryPath = Join-Path $env:LOCALAPPDATA 'RedSight\setup-summary.json'
+$summaryPath = Join-Path (Get-RsLocalAppData) 'RedSight\setup-summary.json'
 Save-RsSummary -Path $summaryPath
 
 Write-RsLog ('=' * 70)
@@ -382,7 +382,7 @@ if ($Launch -and -not $failures.Count -and -not $rebootRequired) {
     $start = Join-Path $ProjectRoot 'START-REDSIGHT.ps1'
     if (Test-Path -LiteralPath $start) {
         Write-RsLog 'launching RedSight' -Level STEP
-        $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $ps = Get-RsPowerShellExe
         Start-Process -FilePath $ps -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $start) | Out-Null
     }
 }

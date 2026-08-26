@@ -29,10 +29,10 @@ function Initialize-RsLog {
     [CmdletBinding()]
     param(
         [string]$Name = 'bootstrap',
-        [string]$LogDir = (Join-Path $env:LOCALAPPDATA 'RedSight\logs')
+        [string]$LogDir
     )
 
-    if (-not $LogDir) { $LogDir = Join-Path $env:TEMP 'RedSight\logs' }
+    if (-not $LogDir) { $LogDir = Join-Path (Get-RsLocalAppData) 'RedSight\logs' }
     New-Item -ItemType Directory -Path $LogDir -Force -ErrorAction SilentlyContinue | Out-Null
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $script:RsLogPath = Join-Path $LogDir ("{0}-{1}.log" -f $Name, $stamp)
@@ -137,6 +137,47 @@ function Test-RsOnline {
         }
     }
     return $false
+}
+
+function Get-RsSystemDir {
+    <#
+        %WINDIR% with fallbacks. Windows always sets it, but a stripped
+        environment (a service account, a test harness, a non-Windows host) may
+        not, and Join-Path throws on a null path - which used to abort setup
+        before it could report anything useful.
+    #>
+    [CmdletBinding()] param()
+    if ($env:WINDIR)     { return $env:WINDIR }
+    if ($env:SystemRoot) { return $env:SystemRoot }
+    return 'C:\Windows'
+}
+
+function Get-RsSystem32 {
+    <#
+        Full path to a System32 executable, e.g. Get-RsSystem32 'dism.exe'.
+        Built with [IO.Path]::Combine rather than Join-Path: Join-Path resolves
+        the path through the PowerShell provider stack and fails on a drive the
+        current host does not have, which is exactly what happens when these
+        scripts are exercised off Windows.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Leaf)
+    return [System.IO.Path]::Combine((Get-RsSystemDir), 'System32', $Leaf)
+}
+
+function Get-RsPowerShellExe {
+    <# Windows PowerShell 5.1, which is what the installer invokes scripts with. #>
+    [CmdletBinding()] param()
+    return [System.IO.Path]::Combine([string[]]@(
+        (Get-RsSystemDir), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+}
+
+function Get-RsLocalAppData {
+    <# %LOCALAPPDATA% with a temp-dir fallback. #>
+    [CmdletBinding()] param()
+    if ($env:LOCALAPPDATA) { return $env:LOCALAPPDATA }
+    if ($env:APPDATA)      { return $env:APPDATA }
+    return ([System.IO.Path]::GetTempPath())
 }
 
 function Get-RsCommand {
@@ -497,7 +538,7 @@ function Register-RsResumeAfterReboot {
     }
 
     $cmd = '"{0}" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "{1}" -Resume {2}' -f `
-        (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'), $script, $ExtraArguments
+        (Get-RsPowerShellExe), $script, $ExtraArguments
 
     try {
         $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'

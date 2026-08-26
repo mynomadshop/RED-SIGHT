@@ -156,7 +156,8 @@ function Find-RsSystemPython {
     }
 
     # Common per-machine / per-user install locations, in case PATH is not set.
-    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs'))) {
+    $userPrograms = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs' } else { $null }
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $userPrograms)) {
         if (-not $base) { continue }
         foreach ($v in @('312', '313')) {
             $p = Join-Path $base "Python\Python$v\python.exe"
@@ -481,7 +482,7 @@ function Get-RsWslState {
             $f = Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction Stop
             $enabled = ($f.State -eq 'Enabled')
         } catch {
-            $r = Invoke-RsProcess -FilePath (Join-Path $env:WINDIR 'System32\dism.exe') `
+            $r = Invoke-RsProcess -FilePath (Get-RsSystem32 'dism.exe') `
                                   -Arguments @('/online', '/get-featureinfo', "/featurename:$feature") `
                                   -TimeoutSeconds 180 -Quiet
             $enabled = ($r.StdOut -match 'State\s*:\s*Enabled')
@@ -526,7 +527,7 @@ function Enable-RsWsl2 {
         return $result
     }
 
-    $dism = Join-Path $env:WINDIR 'System32\dism.exe'
+    $dism = Get-RsSystem32 'dism.exe'
     foreach ($feature in @('Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform')) {
         $already = if ($feature -eq 'Microsoft-Windows-Subsystem-Linux') { $state.SubsystemEnabled } else { $state.VirtualMachinePlatform }
         if ($already) {
@@ -657,7 +658,7 @@ function Install-RsDockerDesktop {
     # Membership in docker-users is what lets a non-admin user run docker.
     try {
         $user = "$env:USERDOMAIN\$env:USERNAME"
-        $r2 = Invoke-RsProcess -FilePath (Join-Path $env:WINDIR 'System32\net.exe') `
+        $r2 = Invoke-RsProcess -FilePath (Get-RsSystem32 'net.exe') `
                                -Arguments @('localgroup', 'docker-users', $user, '/add') -TimeoutSeconds 120 -Quiet
         if ($r2.ExitCode -eq 0) { Write-RsLog "added $user to the docker-users group" -Level OK }
     } catch { }
@@ -775,7 +776,7 @@ function Install-RsNode {
     Save-RsDownload -Uri $uri -Destination $msi -Description "Node.js $version MSI" | Out-Null
 
     Write-RsLog "installing Node.js $version" -Level STEP
-    $r = Invoke-RsProcess -FilePath (Join-Path $env:WINDIR 'System32\msiexec.exe') `
+    $r = Invoke-RsProcess -FilePath (Get-RsSystem32 'msiexec.exe') `
                           -Arguments @('/i', $msi, '/qn', '/norestart', 'ADDLOCAL=ALL') -TimeoutSeconds 1800
     if ($r.ExitCode -notin @(0, 3010)) { throw "Node.js MSI failed with exit code $($r.ExitCode)" }
 
@@ -902,7 +903,7 @@ function Install-RsShortcuts {
         Write-RsLog 'shortcut installer not found - skipping' -Level WARN
         return $false
     }
-    $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $ps = Get-RsPowerShellExe
     $r = Invoke-RsProcess -FilePath $ps -Arguments @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script) `
                           -TimeoutSeconds 300
     if ($r.ExitCode -ne 0) {
