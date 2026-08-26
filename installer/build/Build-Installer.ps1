@@ -261,21 +261,107 @@ if ($StageOnly) {
 # ==========================================================================
 
 function Find-Iscc {
+    <#
+        Locates the Inno Setup command-line compiler.
+
+        Inno Setup can be installed anywhere, so a fixed list of directories is
+        not enough: the registry entry it writes at install time is the
+        authoritative source, and the .iss "Compile" shell verb is a good
+        second opinion. Conventional and Chocolatey locations are checked last.
+    #>
     param([string]$Explicit)
+
     if ($Explicit) {
-        if (Test-Path -LiteralPath $Explicit) { return (Resolve-Path -LiteralPath $Explicit).Path }
-        throw "ISCC not found at the supplied path: $Explicit"
-    }
-    $cmd = Get-RsCommand -Name 'ISCC'
-    if ($cmd) { return $cmd.Source }
-    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-        if (-not $base) { continue }
-        foreach ($v in @('6', '5')) {
-            $p = Join-Path $base "Inno Setup $v\ISCC.exe"
+        if (Test-Path -LiteralPath $Explicit) {
+            $p = (Resolve-Path -LiteralPath $Explicit).Path
+            # Accept either ISCC.exe itself or the directory holding it.
+            if ((Get-Item -LiteralPath $p).PSIsContainer) { $p = Join-Path $p 'ISCC.exe' }
             if (Test-Path -LiteralPath $p) { return $p }
         }
+        throw "ISCC.exe not found at the supplied -IsccPath: $Explicit"
     }
-    throw 'ISCC.exe (the Inno Setup compiler) was not found. Install Inno Setup 6 or pass -IsccPath.'
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $searched = New-Object System.Collections.Generic.List[string]
+
+    # 1. On PATH.
+    $cmd = Get-RsCommand -Name 'ISCC'
+    if ($cmd) { return $cmd.Source }
+    $searched.Add('PATH')
+
+    # 2. The uninstall registry entry Inno Setup creates, which records its
+    #    install directory wherever the user chose to put it.
+    foreach ($key in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+                       'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+                       'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')) {
+        $searched.Add($key)
+        $subs = @(Get-ChildItem -Path $key -ErrorAction SilentlyContinue |
+                  Where-Object { $_.PSChildName -like 'Inno Setup*' })
+        foreach ($sub in $subs) {
+            $props = Get-ItemProperty -Path $sub.PSPath -ErrorAction SilentlyContinue
+            if ($props -and $props.PSObject.Properties['InstallLocation']) {
+                $loc = $props.InstallLocation
+                if ($loc) { $candidates.Add((Join-Path $loc.Trim('"', ' ') 'ISCC.exe')) }
+            }
+        }
+    }
+
+    # 3. The "Compile" shell verb registered for .iss files points at Compil32.exe,
+    #    which lives beside ISCC.exe.
+    foreach ($shellKey in @('HKLM:\SOFTWARE\Classes\InnoSetupScriptFile\Shell\Compile\Command',
+                            'HKCU:\SOFTWARE\Classes\InnoSetupScriptFile\Shell\Compile\Command')) {
+        $searched.Add($shellKey)
+        $props = Get-ItemProperty -Path $shellKey -ErrorAction SilentlyContinue
+        if (-not $props) { continue }
+        foreach ($name in @('(default)', '(Default)')) {
+            if (-not $props.PSObject.Properties[$name]) { continue }
+            $value = [string]$props.$name
+            $m = [regex]::Match($value, '"?([A-Za-z]:\\[^"]*?\\)Compil32\.exe')
+            if ($m.Success) { $candidates.Add((Join-Path $m.Groups[1].Value 'ISCC.exe')) }
+        }
+    }
+
+    # 4. Conventional install roots, including versioned folder names.
+    $roots = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($r) { $roots.Add($r) }
+    }
+    if ($env:LOCALAPPDATA) { $roots.Add((Join-Path $env:LOCALAPPDATA 'Programs')) }
+    foreach ($root in $roots) {
+        $searched.Add((Join-Path $root 'Inno Setup*'))
+        $dirs = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'Inno Setup*' -ErrorAction SilentlyContinue)
+        foreach ($d in $dirs) { $candidates.Add((Join-Path $d.FullName 'ISCC.exe')) }
+    }
+
+    # 5. Chocolatey keeps a copy under its lib tree.
+    $choco = 'C:\ProgramData\chocolatey\lib'
+    if (Test-Path -LiteralPath $choco) {
+        $searched.Add("$choco\innosetup")
+        $found = @(Get-ChildItem -LiteralPath $choco -Filter 'ISCC.exe' -Recurse -Depth 4 -File -ErrorAction SilentlyContinue)
+        foreach ($f in $found) { $candidates.Add($f.FullName) }
+    }
+
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path -LiteralPath $c)) {
+            return (Resolve-Path -LiteralPath $c).Path
+        }
+    }
+
+    $message = @(
+        'ISCC.exe (the Inno Setup command-line compiler) was not found.',
+        '',
+        'Looked in:',
+        ($searched | ForEach-Object { "  - $_" }),
+        '',
+        'Install Inno Setup 6, then re-run:',
+        '  winget install --id JRSoftware.InnoSetup --accept-package-agreements --accept-source-agreements',
+        '',
+        'or download it from https://jrsoftware.org/isdl.php',
+        '',
+        'If it is already installed somewhere unusual, point at it directly:',
+        '  -IsccPath "D:\path\to\Inno Setup 6\ISCC.exe"'
+    ) | ForEach-Object { $_ }
+    throw ($message -join [Environment]::NewLine)
 }
 
 $iscc = Find-Iscc -Explicit $IsccPath
