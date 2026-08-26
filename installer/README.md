@@ -22,6 +22,7 @@ installer/
     Verify-RedSightSetup.ps1    health check ("can RedSight launch right now?")
   tests/
     Test-RedSightSetup.ps1      cross-platform tests for the setup logic
+    Test-IssScript.ps1          static checks for RedSight.iss
   docs/
     README.template.txt         becomes README.txt in the release zip
   legacy/
@@ -115,14 +116,17 @@ snapshot; that class of leftover is now removed by pattern rather than by hand.
 ## Testing
 
 ```bash
-pwsh -File installer/tests/Test-RedSightSetup.ps1
+pwsh -File installer/tests/Test-RedSightSetup.ps1   # 66 assertions
+pwsh -File installer/tests/Test-IssScript.ps1       # 30 static checks
 ```
 
-57 assertions covering version parsing and gating, the install-path rewriter
+66 assertions covering version parsing and gating, the install-path rewriter
 (plain, JSON-escaped and forward-slash forms, exclusions, idempotency), `.env`
-seeding, retry/backoff behaviour, process timeout and exit-code handling,
-archive expansion, hashing and the logging/summary plumbing. These run on Linux
-too, which is why they gate the Windows build job.
+seeding, retry/backoff behaviour, process timeout and exit-code handling, the
+venv import probe, bundled-Python provisioning (hash verification, tamper
+refusal, absent-bundle fallback), archive expansion, hashing and the
+logging/summary plumbing. These run on Linux too, which is why they gate the
+Windows build job.
 
 The Windows job then does what unit tests cannot: it installs the freshly built
 installer silently, asserts the bundled Python expanded and reports 3.12.x, that
