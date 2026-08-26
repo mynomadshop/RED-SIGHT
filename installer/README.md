@@ -135,6 +135,20 @@ Docker Desktop cannot be installed on a hosted runner (no nested
 virtualisation), so the Docker and WSL2 provisioning paths are covered only for
 graceful detection there; they need a real Windows machine to exercise fully.
 
+### Compiler compatibility
+
+`RedSight.iss` was cross-checked against the Inno Setup **6.7.0** source (the
+version that built 11.2.0), not just against the docs: every `[Setup]`
+directive it uses (34), every `Flags:` value (13) and every Pascal-script
+function it calls (16) exists in that release, and the two `var`-parameter
+signatures match exactly -
+`GetSpaceOnDisk(const DriveRoot: String; const InMegabytes: Boolean; var Free, Total: Cardinal)`
+and `LoadStringFromFile(const FileName: String; var S: AnsiString)`.
+
+Worth knowing: 6.5 reworked `WizardStyle` so it now also carries the light/dark
+options, but `modern` is still an accepted value, so the directive compiles on
+6.3 through 6.7 alike.
+
 ## Notes and constraints
 
 - **Docker Desktop is not bundled.** Its installer is ~1.6 GB and its licence
