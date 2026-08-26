@@ -70,10 +70,10 @@ jobs:
           $saved = $env:PATH
           $env:PATH = $minimal
 
-          $args = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOCANCEL',
+          $setupArgs = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOCANCEL',
                     "/DIR=$dest", '/NOICONS', '/TASKS=', "/LOG=$log")
-          Write-Host "Running: $exe $($args -join ' ')"
-          $p = Start-Process -FilePath $exe -ArgumentList $args -PassThru
+          Write-Host "Running: $exe $($setupArgs -join ' ')"
+          $p = Start-Process -FilePath $exe -ArgumentList $setupArgs -PassThru
           if (-not $p.WaitForExit(900000)) {
             Write-Host 'Installer still running after 15m - killing (files are already extracted).'
             try { $p.Kill($true) } catch { }
@@ -118,7 +118,6 @@ jobs:
             'scripts/windows/Uninstall-RedSightDocker.ps1',
             'LAUNCH-REDSIGHT-DESKTOP.ps1',
             'LAUNCH-REDSIGHT-COMMAND-CENTER.ps1',
-            'START-REDSIGHT.psti',
             'START-REDSIGHT.ps1',
             'requirements-desktop-stage11.txt',
             'requirements-stage111-actions.txt',

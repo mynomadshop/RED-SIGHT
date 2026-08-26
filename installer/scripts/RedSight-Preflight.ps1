@@ -271,9 +271,9 @@ function Install-RsPythonFromWeb {
                     -Description "Python $($script:RsPython.Version) installer" | Out-Null
 
     Write-RsLog 'running the Python installer silently' -Level STEP
-    $args = @('/quiet', 'InstallAllUsers=1', 'PrependPath=1', 'Include_test=0',
+    $pyArgs = @('/quiet', 'InstallAllUsers=1', 'PrependPath=1', 'Include_test=0',
               'Include_launcher=1', 'AssociateFiles=0', 'Shortcuts=0', 'Include_doc=0')
-    $r = Invoke-RsProcess -FilePath $installer -Arguments $args -TimeoutSeconds 1800
+    $r = Invoke-RsProcess -FilePath $installer -Arguments $pyArgs -TimeoutSeconds 1800
 
     # 3010 = success, reboot required.
     if ($r.ExitCode -notin @(0, 3010)) {
@@ -646,8 +646,8 @@ function Install-RsDockerDesktop {
 
     Write-RsLog 'installing Docker Desktop silently (this takes several minutes)' -Level STEP
     # "install" subcommand + --quiet is Docker's documented unattended mode.
-    $args = @('install', '--quiet', '--accept-license', '--backend=wsl-2')
-    $r = Invoke-RsProcess -FilePath $installer -Arguments $args -TimeoutSeconds 5400
+    $dockerArgs = @('install', '--quiet', '--accept-license', '--backend=wsl-2')
+    $r = Invoke-RsProcess -FilePath $installer -Arguments $dockerArgs -TimeoutSeconds 5400
 
     if ($r.ExitCode -notin @(0, 3010)) {
         throw "Docker Desktop installer failed with exit code $($r.ExitCode)"

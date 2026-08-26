@@ -104,15 +104,15 @@ jobs:
       - name: Build installer and release zip
         shell: pwsh
         run: |
-          $args = @(
+          $buildArgs = @(
             '-NoLogo', '-NoProfile', '-File', 'installer/build/Build-Installer.ps1',
             '-LegacyInstaller', 'installer/legacy/RedSight-Setup-11.2.0.exe',
             '-Version', '${{ env.RS_VERSION }}',
             '-OutputDir', 'dist',
             '-IsccPath', "$env:ISCC"
           )
-          if ('${{ github.event.inputs.include_all_wheels }}' -eq 'true') { $args += '-IncludeAllWheels' }
-          & pwsh @args
+          if ('${{ github.event.inputs.include_all_wheels }}' -eq 'true') { $buildArgs += '-IncludeAllWheels' }
+          & pwsh @buildArgs
           if ($LASTEXITCODE -ne 0) { throw "build failed with exit code $LASTEXITCODE" }
 
       - name: Show build artefacts
