@@ -1,0 +1,273 @@
+name: Build Windows installer
+
+# Builds the RedSight Windows installer on a real Windows runner, then installs
+# it silently on that runner and verifies the auto-provisioning actually works.
+#
+# Docker Desktop cannot be installed on a hosted GitHub runner (no nested
+# virtualisation), so the install test covers the "core" component: the bundled
+# Python runtime, pip, the virtual environments, the install-path rewrite and
+# the health check. The Docker/WSL2 paths are exercised for graceful detection
+# only. Everything else is genuinely executed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 11.3.0)'
+        required: false
+        default: '11.3.0'
+      include_all_wheels:
+        description: 'Bundle every Python wheel for a fully offline installer (adds ~1 GB)'
+        type: boolean
+        required: false
+        default: false
+      create_release:
+        description: 'Publish the zip as a GitHub Release'
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches:
+      - 'claude/redsight-windows-installer-**'
+    paths:
+      - 'installer/**'
+      - '.github/workflows/build-windows-installer.yml'
+
+permissions:
+  contents: write
+
+env:
+  RS_VERSION: ${{ github.event.inputs.version || '11.3.0' }}
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Fast gate: the platform-independent setup logic, before spending a Windows
+  # runner on a build that a unit test would have caught.
+  # --------------------------------------------------------------------------
+  logic-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run setup logic tests
+        shell: pwsh
+        run: pwsh -NoLogo -NoProfile -File installer/tests/Test-RedSightSetup.ps1
+
+      - name: Check every script parses
+        shell: pwsh
+        run: |
+          $bad = 0
+          foreach ($f in (Get-ChildItem installer -Recurse -Filter *.ps1)) {
+            $errs = $null; $toks = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$toks, [ref]$errs)
+            if ($errs) {
+              $bad++
+              Write-Host "::error file=$($f.FullName)::$($errs[0].Message)"
+            }
+          }
+          if ($bad) { throw "$bad script(s) failed to parse" }
+          Write-Host 'all setup scripts parse'
+
+  # --------------------------------------------------------------------------
+  # Build on Windows, then install what we built and verify it.
+  # --------------------------------------------------------------------------
+  build:
+    needs: logic-tests
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report toolchain
+        shell: pwsh
+        run: |
+          Write-Host "OS   : $([System.Environment]::OSVersion.VersionString)"
+          Write-Host "PWSH : $($PSVersionTable.PSVersion)"
+          Write-Host "Ver  : ${{ env.RS_VERSION }}"
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress 2>&1 | Select-Object -Last 10
+          $iscc = Get-ChildItem 'C:\Program Files (x86)\Inno Setup 6','C:\Program Files\Inno Setup 6' `
+                    -Filter ISCC.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) { throw 'ISCC.exe not found after installing Inno Setup' }
+          Write-Host "ISCC: $($iscc.FullName)"
+          "ISCC=$($iscc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & $iscc.FullName /? 2>&1 | Select-Object -First 3
+
+      - name: Build installer and release zip
+        shell: pwsh
+        run: |
+          $args = @(
+            '-NoLogo', '-NoProfile', '-File', 'installer/build/Build-Installer.ps1',
+            '-LegacyInstaller', 'installer/legacy/RedSight-Setup-11.2.0.exe',
+            '-Version', '${{ env.RS_VERSION }}',
+            '-OutputDir', 'dist',
+            '-IsccPath', "$env:ISCC"
+          )
+          if ('${{ github.event.inputs.include_all_wheels }}' -eq 'true') { $args += '-IncludeAllWheels' }
+          & pwsh @args
+          if ($LASTEXITCODE -ne 0) { throw "build failed with exit code $LASTEXITCODE" }
+
+      - name: Show build artefacts
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -File | Format-Table Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
+          Get-Content (Get-ChildItem dist -Filter 'manifest-v*.json' | Select-Object -First 1).FullName
+
+      # ----------------------------------------------------------------------
+      # Install test. This is the point of building on Windows: the installer we
+      # just produced is actually run, and its auto-provisioning is checked.
+      # ----------------------------------------------------------------------
+      - name: Install silently (core component)
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem dist -Filter 'RedSight-Setup-*.exe' | Select-Object -First 1).FullName
+          $dest = 'C:\RedSightTest'
+          $log = 'C:\rs-setup.log'
+          Write-Host "installing $exe -> $dest"
+
+          # core only: Docker Desktop cannot run on a hosted runner.
+          $p = Start-Process -FilePath $exe -PassThru -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCANCEL',
+            "/DIR=$dest", '/COMPONENTS=core', "/LOG=$log"
+          )
+          if (-not $p.WaitForExit(3600000)) { $p.Kill($true); throw 'installer did not finish within 60 minutes' }
+          Write-Host "installer exit code: $($p.ExitCode)"
+
+          if (Test-Path $log) {
+            Write-Host '=== setup log (tail) ==='
+            Get-Content $log -Tail 40
+          }
+          $bootstrapLog = Get-ChildItem "$env:LOCALAPPDATA\RedSight\logs" -Filter 'bootstrap-*.log' -ErrorAction SilentlyContinue |
+                          Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($bootstrapLog) {
+            Write-Host "=== bootstrap log: $($bootstrapLog.Name) ==="
+            Get-Content $bootstrapLog.FullName
+          } else {
+            throw 'no bootstrap log was produced - first-run setup did not run'
+          }
+
+          # 0 = clean, 2 = optional steps skipped (expected: no Docker here).
+          if ($p.ExitCode -notin @(0, 2)) { throw "setup returned $($p.ExitCode)" }
+
+      - name: Verify the provisioned install
+        shell: pwsh
+        run: |
+          $dest = 'C:\RedSightTest'
+          $fail = 0
+          function Check($name, $ok, $detail = '') {
+            if ($ok) { Write-Host "  PASS  $name $detail" -ForegroundColor Green }
+            else { Write-Host "  FAIL  $name $detail" -ForegroundColor Red; $script:fail++ }
+          }
+
+          Check 'app tree installed'   (Test-Path "$dest\docker-compose.yml")
+          Check 'setup scripts overlaid' (Test-Path "$dest\scripts\windows\RedSight-Preflight.ps1")
+
+          # The bundled Python must have been expanded and be the right version.
+          $py = "$dest\runtime\python\python.exe"
+          Check 'bundled python expanded' (Test-Path $py) $py
+          if (Test-Path $py) {
+            $v = & $py -c "import sys; print('%d.%d.%d' % sys.version_info[:3])"
+            Check 'bundled python is 3.12.x' ($v -like '3.12.*') "(got $v)"
+            $venvOk = & $py -c "import venv, ensurepip, ssl, sqlite3; print('ok')"
+            Check 'bundled python has venv/ensurepip/ssl/sqlite3' ($venvOk -eq 'ok')
+          }
+
+          # The desktop environment is what the shortcut runs, so it must import.
+          $uiPy = "$dest\.venv-ui\Scripts\python.exe"
+          Check '.venv-ui created' (Test-Path $uiPy)
+          if (Test-Path $uiPy) {
+            & $uiPy -c "import PySide6, qasync, httpx, pydantic; print('imports ok')"
+            Check '.venv-ui imports PySide6/qasync/httpx/pydantic' ($LASTEXITCODE -eq 0)
+          }
+
+          # No build-machine paths may survive anywhere in the install.
+          $leaks = Get-ChildItem $dest -Recurse -File -Include *.py,*.ps1,*.json,*.bat,*.cmd,*.yml `
+                     -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -notmatch '\\(\.venv-ui|\.venv-actions|runtime)\\' } |
+                   Select-String -Pattern 'C:\\+Users\\+walim' -List -ErrorAction SilentlyContinue
+          Check 'no build-machine paths remain' (-not $leaks) "($(@($leaks).Count) file(s))"
+          if ($leaks) { $leaks | Select-Object -First 10 | ForEach-Object { Write-Host "        $($_.Path)" } }
+
+          Check '.env seeded' (Test-Path "$dest\.env")
+          Check 'setup summary written' (Test-Path "$env:LOCALAPPDATA\RedSight\setup-summary.json")
+
+          if (Test-Path "$env:LOCALAPPDATA\RedSight\setup-summary.json") {
+            $s = Get-Content "$env:LOCALAPPDATA\RedSight\setup-summary.json" -Raw | ConvertFrom-Json
+            Write-Host "  summary: python=$($s.pythonVersion) rewritten=$($s.pathsRewritten)"
+            Check 'summary records a python version' ([bool]$s.pythonVersion)
+          }
+
+          # The health check must run and classify Docker's absence, not crash.
+          & powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+              -File "$dest\scripts\windows\Verify-RedSightSetup.ps1"
+          Write-Host "health check exit code: $LASTEXITCODE (1 is expected here: no Docker on the runner)"
+          Check 'health check ran to completion' ($LASTEXITCODE -in @(0, 1))
+
+          if ($fail) { throw "$fail install verification check(s) failed" }
+          Write-Host 'all install verification checks passed' -ForegroundColor Green
+
+      - name: Verify idempotent re-run
+        shell: pwsh
+        run: |
+          # Re-running setup must repair rather than duplicate or break.
+          & powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+              -File 'C:\RedSightTest\scripts\windows\Bootstrap-RedSight.ps1' `
+              -ProjectRoot 'C:\RedSightTest' -SkipDocker -SkipShortcut
+          Write-Host "second run exit code: $LASTEXITCODE"
+          if ($LASTEXITCODE -notin @(0, 2)) { throw "re-run returned $LASTEXITCODE" }
+          if (-not (Test-Path 'C:\RedSightTest\.venv-ui\Scripts\python.exe')) {
+            throw '.venv-ui disappeared on re-run'
+          }
+
+      - name: Verify uninstall
+        shell: pwsh
+        run: |
+          $unins = Get-ChildItem 'C:\RedSightTest' -Filter 'unins*.exe' | Select-Object -First 1
+          if (-not $unins) { throw 'no uninstaller was created' }
+          $p = Start-Process -FilePath $unins.FullName -PassThru `
+                 -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+          if (-not $p.WaitForExit(900000)) { $p.Kill($true); throw 'uninstall timed out' }
+          Write-Host "uninstall exit code: $($p.ExitCode)"
+          if (Test-Path 'C:\RedSightTest\.venv-ui') { throw '.venv-ui survived the uninstall' }
+          Write-Host 'uninstall removed the virtual environments'
+
+      - name: Upload release zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: RedSightDesktopWindows-${{ env.RS_VERSION }}
+          path: |
+            dist/*.zip
+            dist/*.exe
+            dist/SHA256SUMS-*.txt
+            dist/manifest-*.json
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload setup logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup-logs-${{ env.RS_VERSION }}
+          path: |
+            C:\rs-setup.log
+            dist/_logs/**
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Publish GitHub Release
+        if: github.event.inputs.create_release == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "v${{ env.RS_VERSION }}"
+          $zip = (Get-ChildItem dist -Filter '*.zip' | Select-Object -First 1).FullName
+          $notes = "Automated build of the RedSight Windows installer $tag.`n`n" +
+                   "Setup provisions Python 3.12 (bundled), pip, the virtual environments, " +
+                   "WSL2, Docker Desktop and the container images automatically. " +
+                   "See README.txt inside the zip for details."
+          gh release create $tag $zip --title "RedSight Desktop $tag" --notes $notes
