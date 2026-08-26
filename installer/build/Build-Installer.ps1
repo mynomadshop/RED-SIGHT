@@ -63,6 +63,28 @@ if (-not $AppSource -and -not $LegacyInstaller) {
     throw 'supply either -AppSource <dir> or -LegacyInstaller <setup.exe>'
 }
 
+# What never belongs in the payload. Declared here rather than at the prune
+# step so the copy can skip these outright: copying a large tree only to delete
+# it wastes minutes, and rebasing deep paths (cloned skill repos under
+# data\skills carry git object paths) onto the longer staging prefix is exactly
+# what makes robocopy fail.
+
+# Junk wherever it appears in the tree.
+$junkDirNames = @('.git', '.github', '.venv', '.venv-ui', '.venv-actions', '.venv-release-test',
+                  'node_modules', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache',
+                  '.repair-backups')
+
+# Pruned at a specific location, named by path so that (for example) data\skills
+# is dropped while the application's own app\skills package is kept.
+$prunePaths = @(
+    'backups', 'release', 'dist', 'build', 'qdrant_storage', 'storage',
+    'outputs',                          # local filesystem scan results
+    'data\runtime',                     # runtime state
+    'data\memory_exports',              # exported chat sessions
+    'data\skills',                      # downloaded third-party skill sources
+    'redsight_remote\state'             # private WhatsApp session auth
+)
+
 if (Test-Path -LiteralPath $StagingDir) {
     Write-RsLog 'clearing the previous staging tree' -Level STEP
     Remove-Item -LiteralPath $StagingDir -Recurse -Force
@@ -76,13 +98,22 @@ if ($AppSource) {
     # files, and /XD prunes the heavy directories before they are ever copied.
     $robocopy = Get-RsSystem32 'robocopy.exe'
     if ([System.IO.File]::Exists($robocopy)) {
-        $excludeDirs = @('.git', '.github', '.venv', '.venv-ui', '.venv-actions', '.venv-release-test',
-                         'node_modules', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache',
-                         'backups', 'release', 'dist', 'build')
-        $copyArgs = @($src, $StagingDir, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/R:1', '/W:1', '/XD') + $excludeDirs
+        # Bare names exclude by name anywhere; full paths exclude one location.
+        $excludeDirs = @($junkDirNames) + @($prunePaths | ForEach-Object { Join-Path $src $_ })
+        # /XJ leaves junctions and symlinks alone instead of recursing through
+        # them into unrelated trees.
+        $copyArgs = @($src, $StagingDir, '/E', '/XJ', '/NFL', '/NDL', '/NJH', '/NJS', '/NP',
+                      '/R:1', '/W:1', '/XD') + $excludeDirs
         $r = Invoke-RsProcess -FilePath $robocopy -Arguments $copyArgs -TimeoutSeconds 3600
         # robocopy uses a bit field: < 8 means success (files copied / extra files).
-        if ($r.ExitCode -ge 8) { throw "robocopy failed with exit code $($r.ExitCode)" }
+        if ($r.ExitCode -ge 8) {
+            foreach ($l in (($r.StdOut + "`n" + $r.StdErr) -split "`r?`n")) {
+                if ($l -match 'ERROR') { Write-RsLog "    $($l.Trim())" -Level FAIL }
+            }
+            throw ("robocopy failed with exit code $($r.ExitCode). If the errors above name very " +
+                   'long destination paths, re-run with a shorter -StagingDir (for example ' +
+                   '-StagingDir C:\rs-stage).')
+        }
     } else {
         # Copy the contents, not the directory itself: Copy-Item of a folder
         # into an existing folder would nest it one level deeper.
@@ -129,17 +160,9 @@ if ($AppSource) {
 
 Write-RsLog 'pruning virtualenvs, caches, backups and private data' -Level STEP
 
-$pruneDirs = @(
-    '.git', '.github', '.venv', '.venv-ui', '.venv-actions', '.venv-release-test',
-    '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache',
-    'backups', 'release', 'dist', 'build', 'qdrant_storage', 'storage',
-    'outputs',                          # local filesystem scan results
-    'data\runtime',                     # runtime state
-    'data\memory_exports',              # exported chat sessions
-    'data\skills',                      # downloaded third-party skill sources
-    'redsight_remote\state',            # private WhatsApp session auth
-    'node_modules', '.repair-backups'
-)
+# The legacy-installer path does not get robocopy's exclusions, and a source
+# tree may still contain nested copies, so prune both lists here regardless.
+$pruneDirs = @($prunePaths) + @($junkDirNames)
 $prunedDirs = 0
 foreach ($rel in $pruneDirs) {
     $p = Join-Path $StagingDir $rel
@@ -150,7 +173,7 @@ foreach ($rel in $pruneDirs) {
 }
 # Nested copies (any __pycache__ / node_modules deeper in the tree).
 Get-ChildItem -LiteralPath $StagingDir -Recurse -Directory -Force -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -in @('__pycache__', 'node_modules', '.pytest_cache', '.mypy_cache', '.ruff_cache') } |
+    Where-Object { $junkDirNames -contains $_.Name } |
     Sort-Object { $_.FullName.Length } -Descending |
     ForEach-Object {
         Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
