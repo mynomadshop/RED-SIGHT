@@ -222,7 +222,11 @@ $hw = Invoke-RsStep -Name 'Scanning this machine' -Action {
     Write-RsLog "    cpu            : $($h.cpu.name) ($($h.cpu.cores) cores)"
     Write-RsLog "    memory         : $($h.memoryGB) GB"
     Write-RsLog "    form factor    : $(if ($h.chassis.isLaptop) { 'laptop / portable' } else { 'desktop' })"
-    Write-RsLog "    cuda capable   : $($h.gpu.cudaCapable) (max VRAM $($h.gpu.maxVramGB) GB)"
+    $gpuCount = if ($h.gpu.PSObject.Properties['nvidiaGpuCount']) { $h.gpu.nvidiaGpuCount } else { 0 }
+    Write-RsLog "    cuda capable   : $($h.gpu.cudaCapable) - $gpuCount NVIDIA GPU(s), max VRAM $($h.gpu.maxVramGB) GB"
+    foreach ($g in @($h.gpu.nvidia)) {
+        if ($g) { Write-RsLog "      GPU          : $($g.Name) ($($g.VramGB) GB, driver $($g.Driver))" }
+    }
     Write-RsLog "    virtualization : $($h.virtualization.available) / wsl2 capable: $($h.virtualization.wsl2Capable)"
     foreach ($w in @($h.warnings)) { Write-RsLog "    ! $w" -Level WARN }
     return $h
@@ -346,6 +350,24 @@ if (-not $python) {
             if (-not (Test-RsVenvImports -VenvPython $uiPython -Modules $modules)) {
                 throw "the .venv-ui environment is missing required modules ($($modules -join ', '))"
             }
+        } | Out-Null
+
+        # The real question is whether the Command Center starts, not whether a
+        # module list resolves. This imports the actual launcher chain headlessly.
+        Invoke-RsStep -Name 'Testing that the Command Center can start' -Required -Action {
+            $ui = Test-RsUiLaunch -VenvPython $uiPython -ProjectRoot $ProjectRoot
+            Set-RsSummary -Key 'uiLaunchOk' -Value $ui.Ok
+            Set-RsSummary -Key 'uiLaunchDetail' -Value $ui.Detail
+            if (-not $ui.Ok) {
+                if ($ui.Traceback) {
+                    Write-RsLog '    ---- Command Center import failure ----' -Level FAIL
+                    foreach ($l in ($ui.Traceback -split "`r?`n")) { Write-RsLog "    $l" -Level FAIL }
+                    Write-RsLog '    ---------------------------------------' -Level FAIL
+                    Set-RsSummary -Key 'uiLaunchTraceback' -Value $ui.Traceback
+                }
+                throw $ui.Detail
+            }
+            Write-RsLog "    $($ui.Detail)" -Level OK
         } | Out-Null
 
         if ($effectiveRuntime -eq 'native') {
@@ -549,6 +571,8 @@ Write-RsLog "Runtime mode    : $effectiveRuntime$(if ($nativeReason) { " - $nati
 Write-RsLog "Working folder  : $(if ($workspace) { $workspace } else { 'NOT CREATED' })"
 Write-RsLog "Python          : $(if ($after.PythonPath) { "$($after.PythonPath) ($($after.PythonVersion))" } else { 'MISSING' })"
 Write-RsLog "Desktop UI env  : $(if ($after.Venvs.'.venv-ui') { 'ready' } else { 'MISSING' })"
+$uiVerdict = (Get-RsSummary)['uiLaunchOk']
+Write-RsLog "Command Center  : $(if ($uiVerdict) { 'starts cleanly' } else { 'DID NOT START - see the traceback above' })"
 Write-RsLog "Gateway env     : $(if ($after.Venvs.'.venv-actions') { 'ready' } else { 'missing' })"
 if ($effectiveRuntime -eq 'container') {
     Write-RsLog "Docker Desktop  : $(if ($after.DockerInstalled) { 'installed' } else { 'not installed' })"

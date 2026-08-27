@@ -396,10 +396,10 @@ function Resolve-RsPython {
 
     $runtimeExe = Join-Path (Get-RsRuntimePythonDir -ProjectRoot $ProjectRoot) 'python.exe'
 
-    $probes = if ($PreferSystemPython) {
-        @({ Find-RsSystemPython }, { if (Test-Path -LiteralPath $runtimeExe) { $runtimeExe } else { $null } })
+    if ($PreferSystemPython) {
+        $probes = @({ Find-RsSystemPython }, { if (Test-Path -LiteralPath $runtimeExe) { $runtimeExe } else { $null } })
     } else {
-        @({ if (Test-Path -LiteralPath $runtimeExe) { $runtimeExe } else { $null } }, { Find-RsSystemPython })
+        $probes = @({ if (Test-Path -LiteralPath $runtimeExe) { $runtimeExe } else { $null } })
     }
 
     foreach ($probe in $probes) {
@@ -410,7 +410,30 @@ function Resolve-RsPython {
         }
     }
 
-    if ($DetectOnly) { return $null }
+    if ($DetectOnly) { return (Find-RsSystemPython) }
+
+    # Default order: expand the bundled runtime BEFORE falling back to whatever
+    # Python happens to be installed. The bundle is the whole reason the install
+    # is deterministic - a system interpreter may carry a stray PYTHONPATH or
+    # site-packages that the app then inherits. Earlier builds probed the
+    # expanded runtime directory first, found it absent (the bundle ships as a
+    # .nupkg and is expanded here), and silently used the system Python instead,
+    # so the bundle was effectively never used.
+    if (-not $PreferSystemPython) {
+        Write-RsLog 'providing the private bundled Python runtime' -Level STEP
+        $bundled = Install-RsBundledPython -ProjectRoot $ProjectRoot
+        if ($bundled -and (Test-RsPythonUsable -PythonExe $bundled)) {
+            Write-RsLog "using Python: $bundled (private runtime)" -Level OK
+            return $bundled
+        }
+        Write-RsLog 'the bundled runtime is unavailable; falling back to a system Python' -Level WARN
+    }
+
+    $system = Find-RsSystemPython
+    if ($system) {
+        Write-RsLog "using Python: $system (system install)" -Level OK
+        return $system
+    }
 
     Write-RsLog "no suitable Python $($script:RsPython.MinVersion) found - provisioning" -Level STEP
     $bundled = Install-RsBundledPython -ProjectRoot $ProjectRoot
@@ -517,6 +540,90 @@ function Initialize-RsVenv {
     }
 
     return $venvPython
+}
+
+function Test-RsUiLaunch {
+    <#
+        Answers "will the Command Center actually start?" by importing the exact
+        chain launch_redsight_command_center.py imports, in the real environment,
+        with Qt on its offscreen platform so no display is needed.
+
+        A plain module-presence check is not enough here: the UI has repeatedly
+        failed at startup on a fully installed environment (the missing qasync in
+        11.1, a Qt bootstrap raising at import time), and only a real import
+        reproduces that. Returns the traceback so the failure is actionable
+        instead of "the UI did not launch".
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VenvPython,
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [int]$TimeoutSeconds = 300
+    )
+
+    $result = [pscustomobject]@{ Ok = $false; Detail = ''; Traceback = '' }
+    if (-not (Test-Path -LiteralPath $VenvPython)) {
+        $result.Detail = "interpreter not found: $VenvPython"
+        return $result
+    }
+
+    $code = @'
+import os, sys, traceback
+root = sys.argv[1]
+if root not in sys.path:
+    sys.path.insert(0, root)
+# Import Qt headlessly: this must not require a desktop session.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+stage = "start"
+try:
+    stage = "PySide6.QtWidgets"
+    import PySide6.QtWidgets  # noqa: F401
+    stage = "qasync"
+    import qasync  # noqa: F401
+    stage = "app.ui.qt_bootstrap"
+    import app.ui.qt_bootstrap as qb
+    stage = "configure_qt_pre_application"
+    if hasattr(qb, "configure_qt_pre_application"):
+        qb.configure_qt_pre_application()
+    stage = "QApplication"
+    app = PySide6.QtWidgets.QApplication.instance() or PySide6.QtWidgets.QApplication([])
+    stage = "app.ui.command_center"
+    import app.ui.command_center  # noqa: F401
+    print("UI_LAUNCH_OK")
+except Exception:
+    print("UI_LAUNCH_FAILED_AT=" + stage)
+    traceback.print_exc()
+    sys.exit(1)
+'@
+
+    # QT_QPA_PLATFORM is also set on the child so Qt cannot try to open a window.
+    $saved = $env:QT_QPA_PLATFORM
+    $env:QT_QPA_PLATFORM = 'offscreen'
+    try {
+        $r = Invoke-RsProcess -FilePath $VenvPython -Arguments @('-c', $code, $ProjectRoot) `
+                              -WorkingDirectory $ProjectRoot -TimeoutSeconds $TimeoutSeconds -Quiet
+    } finally {
+        if ($null -ne $saved) { $env:QT_QPA_PLATFORM = $saved } else { Remove-Item Env:\QT_QPA_PLATFORM -ErrorAction SilentlyContinue }
+    }
+
+    $out = ($r.StdOut + "`n" + $r.StdErr)
+    if ($r.TimedOut) {
+        $result.Detail = "the UI import test timed out after ${TimeoutSeconds}s"
+        return $result
+    }
+    if ($r.ExitCode -eq 0 -and $out -match 'UI_LAUNCH_OK') {
+        $result.Ok = $true
+        $result.Detail = 'the Command Center import chain loads cleanly'
+        return $result
+    }
+
+    $stageMatch = [regex]::Match($out, 'UI_LAUNCH_FAILED_AT=(\S+)')
+    $failedAt = if ($stageMatch.Success) { $stageMatch.Groups[1].Value } else { 'unknown' }
+    # The last few traceback lines carry the actual exception.
+    $tail = @($out -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 12)
+    $result.Detail = "the Command Center could not load (failed at: $failedAt)"
+    $result.Traceback = ($tail -join [Environment]::NewLine)
+    return $result
 }
 
 function Test-RsVenvImports {

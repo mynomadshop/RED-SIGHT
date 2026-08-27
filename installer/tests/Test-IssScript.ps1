@@ -350,6 +350,39 @@ Assert-True -Name 'hardware scan runs before the profile page' -Condition ($code
 Assert-True -Name 'wizard offers a working-folder page' -Condition ($codeText -match 'CreateInputDirPage')
 Assert-True -Name 'provider pages are skipped for the CUDA profile' -Condition ($codeText -match 'function ShouldSkipPage')
 
+# Inno 6 disables the welcome page by default, so a scan hung off
+# NextButtonClick(wpWelcome) never runs and every hardware value stays false -
+# which sent a WSL2-capable dual-GPU desktop down the native path.
+Assert-True -Name 'hardware scan runs when the profile page is shown' `
+            -Condition ($codeText -match 'CurPageID = ProfilePage\.ID[\s\S]{0,900}ScanHardware\(\)')
+Assert-True -Name 'hardware scan is guaranteed before the args are built' `
+            -Condition ($codeText -match 'function GetBootstrapArgs[\s\S]{0,600}ScanHardware\(\)')
+Assert-True -Name 'the scan is guarded so repeat calls are free' `
+            -Condition ($codeText -match 'if HwScanned then[\s\S]{0,40}Exit')
+
+# 'auto' in the answer file would mean the bootstrap re-derives a decision the
+# wizard already made from a scan the bootstrap may not repeat.
+Assert-True -Name 'runtime mode is decided outright, never left as auto' `
+            -Condition ($codeText -notmatch "runtimeMode=auto")
+Assert-True -Name 'container mode requires both the component and WSL2' `
+            -Condition ($codeText -match "DockerWanted\s*:=\s*WizardIsComponentSelected\('docker'\)\s*and\s*HwWsl2")
+
+# {userdocs} is OneDrive-redirected on many machines; its parent is arbitrary.
+Assert-True -Name 'the workspace default does not derive from {userdocs}' `
+            -Condition ($codeText -notmatch 'userdocs')
+Assert-True -Name 'the workspace default uses the real user profile' `
+            -Condition ($codeText -match '\{%USERPROFILE\}')
+
+# Multi-GPU machines must be reported as such.
+Assert-True -Name 'the wizard reads the NVIDIA GPU count' `
+            -Condition ($codeText -match 'nvidiaGpuCount')
+Assert-True -Name 'the summary names every GPU' -Condition ($codeText -match 'HwGpuNames')
+
+# An unreadable INI must be treated as "no scan", not as a scan full of defaults.
+Assert-True -Name 'the wizard verifies the scan with a sentinel' -Condition ($codeText -match "GetIniString\('hardware', 'scanOk'")
+Assert-True -Name 'a failed scan discards the profile path' -Condition ($codeText -match "HwJsonPath\s*:=\s*''")
+Assert-True -Name 'a failed scan is admitted to the user' -Condition ($codeText -match 'if not HwScanOk then')
+
 # The API key must never reach a command line: Inno logs [Run] parameters.
 Assert-True -Name 'wizard answers go to an answer file' -Condition ($codeText -match 'SaveStringsToFile\(AnswerPath')
 Assert-True -Name 'bootstrap receives -AnswerFile' -Condition ($codeText -match "'-AnswerFile")

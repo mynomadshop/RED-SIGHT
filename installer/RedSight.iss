@@ -16,7 +16,7 @@
 ; ===========================================================================
 
 #ifndef AppVersion
-  #define AppVersion "11.3.0"
+  #define AppVersion "11.4.0"
 #endif
 #ifndef PayloadDir
   #error PayloadDir must be defined (pass /DPayloadDir=... to ISCC)
@@ -211,6 +211,7 @@ var
 
   RebootNeeded:  Boolean;
   HwScanned:     Boolean;
+  HwScanOk:      Boolean;
   HwIniPath:     string;
   HwJsonPath:    string;
   AnswerPath:    string;
@@ -220,6 +221,8 @@ var
   HwWsl2:        Boolean;
   HwLaptop:      Boolean;
   HwGpuName:     string;
+  HwGpuNames:    string;
+  HwGpuCount:    Integer;
   HwVram:        string;
   HwWslBlocker:  string;
   HwRecProfile:  string;
@@ -260,6 +263,7 @@ begin
   if HwScanned then
     Exit;
   HwScanned := True;
+  HwScanOk := False;
 
   { Conservative defaults if anything below fails. }
   HwCudaCapable := False;
@@ -267,6 +271,8 @@ begin
   HwWsl2 := False;
   HwLaptop := False;
   HwGpuName := '';
+  HwGpuNames := '';
+  HwGpuCount := 0;
   HwVram := '0';
   HwWslBlocker := '';
   HwRecProfile := 'api';
@@ -297,20 +303,37 @@ begin
   if not FileExists(HwIniPath) then
   begin
     Log('hardware scan produced no INI at ' + HwIniPath);
+    HwJsonPath := '';
     Exit;
   end;
+
+  { The scanner writes scanOk=1 as the first key. If it does not read back, the
+    INI exists but Windows cannot parse it - which is exactly what a UTF-8 BOM
+    used to cause, making every value below read as its default and reporting a
+    dual-GPU workstation as having neither GPU nor virtualization. Rather than
+    act on defaults, discard the whole scan and let the bootstrap redo it. }
+  if GetIniString('hardware', 'scanOk', '0', HwIniPath) <> '1' then
+  begin
+    Log('hardware INI at ' + HwIniPath + ' is present but unreadable; discarding the scan');
+    HwJsonPath := '';
+    Exit;
+  end;
+  HwScanOk := True;
 
   HwCudaCapable := IniBool('hardware', 'cudaCapable');
   HwNvidiaCard  := IniBool('hardware', 'hasNvidiaHardware');
   HwWsl2        := IniBool('hardware', 'wsl2Capable');
   HwLaptop      := IniBool('hardware', 'isLaptop');
   HwGpuName     := GetIniString('hardware', 'gpuName', '', HwIniPath);
+  HwGpuNames    := GetIniString('hardware', 'gpuNames', '', HwIniPath);
+  HwGpuCount    := StrToIntDef(GetIniString('hardware', 'nvidiaGpuCount', '0', HwIniPath), 0);
   HwVram        := GetIniString('hardware', 'maxVramGB', '0', HwIniPath);
   HwWslBlocker  := GetIniString('hardware', 'wsl2Blocker', '', HwIniPath);
   HwRecProfile  := GetIniString('hardware', 'recommendProfile', 'api', HwIniPath);
   HwRecRuntime  := GetIniString('hardware', 'recommendRuntime', 'native', HwIniPath);
 
   Log('hardware: cuda=' + GetIniString('hardware', 'cudaCapable', '0', HwIniPath) +
+      ' nvidiaGpus=' + IntToStr(HwGpuCount) +
       ' wsl2=' + GetIniString('hardware', 'wsl2Capable', '0', HwIniPath) +
       ' recommend=' + HwRecProfile + '/' + HwRecRuntime);
 end;
@@ -320,19 +343,36 @@ function HardwareSummary(): string;
 var
   S: string;
 begin
+  if not HwScanOk then
+  begin
+    Result := 'Hardware detection did not complete on this computer, so setup cannot tell ' +
+              'whether it has a CUDA GPU or can run WSL2.' + #13#10#13#10 +
+              'Choose the option that matches your machine. Setup will re-check during ' +
+              'installation and adjust automatically, so an incorrect choice here is not fatal.';
+    Exit;
+  end;
+
   S := 'Detected: ';
   if HwLaptop then
     S := S + 'laptop'
   else
     S := S + 'desktop';
 
-  if HwGpuName <> '' then
+  if HwGpuNames <> '' then
+    S := S + ', ' + HwGpuNames
+  else if HwGpuName <> '' then
     S := S + ', ' + HwGpuName;
 
   S := S + #13#10;
 
   if HwCudaCapable then
-    S := S + 'NVIDIA driver responding, ' + HwVram + ' GB VRAM - CUDA acceleration is available.' + #13#10
+  begin
+    if HwGpuCount > 1 then
+      S := S + IntToStr(HwGpuCount) + ' NVIDIA GPUs, driver responding, ' + HwVram +
+           ' GB VRAM on the largest - CUDA acceleration is available.' + #13#10
+    else
+      S := S + 'NVIDIA driver responding, ' + HwVram + ' GB VRAM - CUDA acceleration is available.' + #13#10;
+  end
   else if HwNvidiaCard then
     S := S + 'An NVIDIA GPU is present but its driver did not respond, so CUDA packages would not load.' + #13#10
   else
@@ -402,13 +442,24 @@ begin
     'Setup creates this folder and configures RedSight to use it for projects, generated output, memory and MCP server definitions. It must be writable, so it lives under your user profile rather than in Program Files.',
     False, '');
   WorkspacePage.Add('');
-  WorkspacePage.Values[0] := ExpandConstant('{userdocs}\..\RedSight');
+  { The Documents constant is OneDrive-redirected on many machines, and its
+    parent is then an arbitrary sync folder - one real install landed the
+    workspace in "OneDrive\untitled folder\RedSight". The user profile
+    directory is the real home, and keeping a vector database out of a sync
+    root also avoids conflict copies. }
+  WorkspacePage.Values[0] := ExpandConstant('{%USERPROFILE}\RedSight');
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
   if (ProfilePage <> nil) and (CurPageID = ProfilePage.ID) then
   begin
+    { Scan here rather than on the way out of the welcome page: Inno 6 disables
+      the welcome page by default, so NextButtonClick(wpWelcome) never fires and
+      every Hw* value would still be at its default - which silently reported
+      "no GPU, no WSL2" on machines that had both. The profile page is always
+      shown, and ScanHardware is guarded so this costs nothing on re-entry. }
+    ScanHardware();
     ProfileInfo.Caption := HardwareSummary();
     { Preselect what the hardware actually supports, but leave the choice open. }
     if not ProfilePage.Values[PROFILE_CUDA] and not ProfilePage.Values[PROFILE_API] then
@@ -487,7 +538,12 @@ var
   Count: Integer;
   Slug: string;
   Workspace: string;
+  DockerWanted: Boolean;
 begin
+  { Last-resort guard: a silent install shows no pages at all, so nothing above
+    would have scanned. Never decide Docker/CUDA from unscanned defaults. }
+  ScanHardware();
+
   AnswerPath := ExpandConstant('{tmp}\rs-answers.ini');
 
   SetArrayLength(Lines, 16);
@@ -502,14 +558,20 @@ begin
     Lines[Count] := 'profile=auto';
   Count := Count + 1;
 
-  { Never ask for containers on a machine the scan says cannot run WSL2. }
-  if WizardIsComponentSelected('docker') and HwWsl2 then
-    Lines[Count] := 'runtimeMode=container'
-  else if WizardIsComponentSelected('docker') then
-    Lines[Count] := 'runtimeMode=auto'
-  else
-    Lines[Count] := 'runtimeMode=native';
-  Count := Count + 1;
+  { Containers require BOTH the component and a machine that can run WSL2.
+    Anything else is native - stated outright rather than left as 'auto', so the
+    bootstrap never has to re-derive a decision the wizard already made. }
+  DockerWanted := WizardIsComponentSelected('docker') and HwWsl2;
+  if HwScanOk then
+  begin
+    if DockerWanted then
+      Lines[Count] := 'runtimeMode=container'
+    else
+      Lines[Count] := 'runtimeMode=native';
+    Count := Count + 1;
+  end;
+  { When the scan failed the key is omitted entirely: the bootstrap's default is
+    'auto', which makes it scan for itself rather than inherit a guess. }
 
   Workspace := '';
   if WorkspacePage <> nil then
@@ -551,12 +613,18 @@ begin
 
   Args := '-AnswerFile "' + AnswerPath + '"';
 
-  if WizardIsComponentSelected('docker') and HwWsl2 then
+  if DockerWanted then
+    Args := Args + ' -InstallDocker -EnableWsl'
+  else if HwScanOk then
+    Args := Args + ' -SkipDocker'
+  else if WizardIsComponentSelected('docker') then
+    { Detection failed but Docker was asked for: let the bootstrap's own scan
+      decide, instead of forcing either answer from here. }
     Args := Args + ' -InstallDocker -EnableWsl'
   else
     Args := Args + ' -SkipDocker';
 
-  if WizardIsComponentSelected('images') and HwWsl2 then
+  if DockerWanted and WizardIsComponentSelected('images') then
     Args := Args + ' -BuildImages';
 
   if WizardIsComponentSelected('node') then

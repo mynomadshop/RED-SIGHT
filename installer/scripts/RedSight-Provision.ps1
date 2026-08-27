@@ -54,7 +54,9 @@ function Set-RsEnvValue {
     }
     if (-not $replaced) { $out.Add("$Key=$Value") }
 
-    Set-Content -LiteralPath $Path -Value $out.ToArray() -Encoding utf8
+    # UTF-8 without a BOM: Windows PowerShell 5.1's -Encoding utf8 adds one, and a
+    # BOM in front of the first key trips dotenv parsers and the Windows INI API.
+    [System.IO.File]::WriteAllLines($Path, $out.ToArray(), (New-Object System.Text.UTF8Encoding($false)))
     return $replaced
 }
 
@@ -440,9 +442,8 @@ if (-not (Test-Path -LiteralPath $Python)) {
     throw "RedSight Python environment not found at $Python. Run 'Repair RedSight setup' from the Start Menu."
 }
 
-# Embedded vector store: no server to reach, so do not make the backend wait
-# for one that will never answer.
-$env:QDRANT_URL = ''
+# No Qdrant server runs in native mode: the store fails fast against the closed
+# port and falls back to its embedded, in-process mode.
 $env:REDSIGHT_API_URL = "http://127.0.0.1:$Port"
 $env:REDSIGHT_API_BASE_URL = $env:REDSIGHT_API_URL
 $env:API_BASE_URL = $env:REDSIGHT_API_URL
@@ -485,9 +486,24 @@ if (-not $NoUi) {
         Write-Line 'opening the Command Center'
         $Pythonw = Join-Path $Root '.venv-ui\Scripts\pythonw.exe'
         if (-not (Test-Path -LiteralPath $Pythonw)) { $Pythonw = $Python }
+        # Run through python.exe, not pythonw.exe, when it fails: pythonw
+        # discards the traceback and the shortcut appears to do nothing.
         & $Pythonw $Launcher
+        if ($LASTEXITCODE -ne 0) {
+            Write-Line "Command Center exited with code $LASTEXITCODE - re-running with output captured"
+            $err = Join-Path $LogDir 'ui-error.log'
+            & $Python $Launcher *>> $err
+            Add-Type -AssemblyName PresentationFramework
+            [System.Windows.MessageBox]::Show(
+                "RedSight could not open the Command Center.`n`nDetails:`n$err`n`nRun 'RedSight health check' from the Start Menu for a diagnosis.",
+                'RedSight') | Out-Null
+        }
     } else {
         Write-Line "Command Center launcher not found at $Launcher"
+        Add-Type -AssemblyName PresentationFramework
+        [System.Windows.MessageBox]::Show(
+            "RedSight is not fully installed: $Launcher is missing.`n`nRun 'Repair RedSight setup' from the Start Menu.",
+            'RedSight') | Out-Null
     }
 }
 '@
@@ -514,8 +530,10 @@ function Set-RsRuntimeMode {
 
     if ($Mode -eq 'native') {
         New-RsNativeLauncher -ProjectRoot $ProjectRoot -WorkspaceDir $WorkspaceDir | Out-Null
-        # Embedded vector store lives in the workspace, not in a container volume.
-        Set-RsEnvValue -Path $envFile -Key 'QDRANT_URL' -Value '' | Out-Null
+        # QDRANT_URL is deliberately left as shipped. The store tries the server,
+        # fails fast against a closed port and falls back to its embedded mode,
+        # which is the application's own designed behaviour; feeding an empty URL
+        # into its connection code is a change of contract for no benefit.
         Write-RsLog "runtime mode: native (no Docker required)$(if ($Reason) { " - $Reason" })" -Level OK
     } else {
         Write-RsLog 'runtime mode: containerized backend (Docker + WSL2)' -Level OK

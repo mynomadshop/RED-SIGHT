@@ -149,11 +149,11 @@ on the `windows-latest` runner via `.github/workflows/build-windows-installer.ym
 
 ```powershell
 # from a source tree
-pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.3.0
+pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.4.0
 
 # reusing the payload of the previously shipped installer
 pwsh -File installer/build/Build-Installer.ps1 `
-     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.3.0
+     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.4.0
 ```
 
 Useful switches:

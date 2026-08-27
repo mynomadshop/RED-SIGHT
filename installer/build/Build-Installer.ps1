@@ -14,18 +14,18 @@
 
     Examples
       # from an application source tree
-      pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.3.0
+      pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.4.0
 
       # reusing the payload of the previously shipped installer (Windows only)
       pwsh -File installer/build/Build-Installer.ps1 `
-           -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.3.0
+           -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.4.0
 #>
 
 [CmdletBinding()]
 param(
     [string]$AppSource,
     [string]$LegacyInstaller,
-    [string]$Version = '11.3.0',
+    [string]$Version = '11.4.0',
     [string]$OutputDir = 'dist',
     [string]$StagingDir,
     [string]$IsccPath,

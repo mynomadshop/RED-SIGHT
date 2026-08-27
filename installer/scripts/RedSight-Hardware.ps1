@@ -47,6 +47,11 @@ function Get-Cim {
     }
 }
 
+function ConvertTo-IniBool {
+    param($Value)
+    if ($Value) { return '1' } else { return '0' }
+}
+
 function Get-Prop {
     <# Property access that tolerates a missing property under StrictMode. #>
     param($Object, [string]$Name, $Default = $null)
@@ -175,7 +180,17 @@ $hasNvidiaHardware = [bool](@($gpus | Where-Object { $_.Vendor -eq 'NVIDIA' }).C
 # CUDA is only worth installing when a driver actually answers.
 $cudaCapable = [bool]($nvidiaGpus.Count -gt 0)
 $maxVramGB = 0.0
-foreach ($g in $nvidiaGpus) { if ($g.VramGB -gt $maxVramGB) { $maxVramGB = $g.VramGB } }
+$totalVramGB = 0.0
+foreach ($g in $nvidiaGpus) {
+    if ($g.VramGB -gt $maxVramGB) { $maxVramGB = $g.VramGB }
+    $totalVramGB += $g.VramGB
+}
+$totalVramGB = [math]::Round($totalVramGB, 1)
+$nvidiaGpuCount = $nvidiaGpus.Count
+# Multi-GPU is a first-class case for RedSight (its scheduler is dual-GPU aware),
+# so surface the count and every adapter name rather than only the biggest card.
+$nvidiaNames = (@($nvidiaGpus | ForEach-Object { $_.Name }) -join ', ')
+if (-not $nvidiaNames) { $nvidiaNames = (@($gpus | ForEach-Object { $_.Name }) -join ', ') }
 
 # ==========================================================================
 # Virtualization / WSL2 capability
@@ -301,7 +316,10 @@ $hw = [ordered]@{
         nvidia            = $nvidiaGpus.ToArray()
         hasNvidiaHardware = $hasNvidiaHardware
         cudaCapable       = $cudaCapable
+        nvidiaGpuCount    = $nvidiaGpuCount
         maxVramGB         = $maxVramGB
+        totalVramGB       = $totalVramGB
+        names             = $nvidiaNames
         driverVersion     = $driverVersion
         cudaVersion       = $cudaVersion
         nvidiaSmi         = $nvidiaSmi
@@ -324,17 +342,6 @@ $hw = [ordered]@{
     warnings    = $warnings.ToArray()
 }
 
-if ($OutFile) {
-    try {
-        $dir = Split-Path -Parent $OutFile
-        if ($dir) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction SilentlyContinue | Out-Null }
-        ($hw | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $OutFile -Encoding utf8
-        Write-Probe "hardware profile written to $OutFile"
-    } catch {
-        Write-Probe "could not write $OutFile : $($_.Exception.Message)"
-    }
-}
-
 if ($IniFile) {
     # Inno Setup reads INI natively with GetIniString, which is far more robust
     # than parsing JSON in Pascal script.
@@ -345,10 +352,11 @@ if ($IniFile) {
         if ($nvidiaGpus.Count -gt 0) { $gpuName = $nvidiaGpus[0].Name }
         elseif ($gpus.Count -gt 0) { $gpuName = $gpus[0].Name }
 
-        function ConvertTo-IniBool { param($Value) ; if ($Value) { '1' } else { '0' } }
-
         $lines = New-Object System.Collections.Generic.List[string]
         $lines.Add('[hardware]')
+        # Sentinel: the wizard treats a missing or unreadable scanOk as "the scan
+        # did not happen" and falls back rather than trusting default values.
+        $lines.Add('scanOk=1')
         $lines.Add("osCaption=$osCaption")
         $lines.Add("osBuild=$osBuild")
         $lines.Add("cpuName=$cpuName")
@@ -359,7 +367,10 @@ if ($IniFile) {
         $lines.Add("gpuName=$gpuName")
         $lines.Add("hasNvidiaHardware=$(ConvertTo-IniBool $hasNvidiaHardware)")
         $lines.Add("cudaCapable=$(ConvertTo-IniBool $cudaCapable)")
+        $lines.Add("nvidiaGpuCount=$nvidiaGpuCount")
+        $lines.Add("gpuNames=$nvidiaNames")
         $lines.Add("maxVramGB=$maxVramGB")
+        $lines.Add("totalVramGB=$totalVramGB")
         $lines.Add("cudaVersion=$cudaVersion")
         $lines.Add("driverVersion=$driverVersion")
         $lines.Add("virtAvailable=$(ConvertTo-IniBool $virtualizationAvailable)")
@@ -372,10 +383,28 @@ if ($IniFile) {
         for ($i = 0; $i -lt $warnings.Count; $i++) {
             $lines.Add("warning$($i + 1)=$(($warnings[$i] -replace '\s+', ' ').Trim())")
         }
-        Set-Content -LiteralPath $IniFile -Value $lines.ToArray() -Encoding utf8
+        # UTF-8 WITHOUT a BOM, written explicitly.
+        #
+        # Windows PowerShell 5.1's "-Encoding utf8" emits a BOM, and the Windows
+        # INI API (which Inno Setup's GetIniString calls) then fails to match the
+        # very first section header, so EVERY key silently returns its default.
+        # That is what made a dual-GPU, WSL2-capable desktop look like a machine
+        # with no GPU and no virtualization.
+        [System.IO.File]::WriteAllLines($IniFile, $lines.ToArray(), (New-Object System.Text.UTF8Encoding($false)))
         Write-Probe "hardware INI written to $IniFile"
     } catch {
         Write-Probe "could not write $IniFile : $($_.Exception.Message)"
+    }
+}
+
+if ($OutFile) {
+    try {
+        $dir = Split-Path -Parent $OutFile
+        if ($dir) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction SilentlyContinue | Out-Null }
+        ($hw | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $OutFile -Encoding utf8
+        Write-Probe "hardware profile written to $OutFile"
+    } catch {
+        Write-Probe "could not write $OutFile : $($_.Exception.Message)"
     }
 }
 
@@ -391,7 +420,8 @@ if ($Json) {
     Write-Host ("  Disk free       : {0} GB on {1}" -f $freeGB, $systemDrive)
     Write-Host ("  Form factor     : {0}" -f $(if ($isLaptop) { 'laptop / portable' } else { 'desktop' }))
     foreach ($g in $gpus) { Write-Host ("  GPU             : {0} [{1}]" -f $g.Name, $g.Vendor) }
-    Write-Host ("  CUDA capable    : {0}{1}" -f $cudaCapable, $(if ($cudaVersion) { " (CUDA $cudaVersion, driver $driverVersion)" } else { '' }))
+    foreach ($g in $nvidiaGpus) { Write-Host ("  NVIDIA          : {0} ({1} GB, driver {2})" -f $g.Name, $g.VramGB, $g.Driver) }
+    Write-Host ("  CUDA capable    : {0} - {1} GPU(s), {2} GB total{3}" -f $cudaCapable, $nvidiaGpuCount, $totalVramGB, $(if ($cudaVersion) { " (CUDA $cudaVersion, driver $driverVersion)" } else { '' }))
     Write-Host ("  Virtualization  : {0} (hypervisor={1} firmware={2})" -f $virtualizationAvailable, $hypervisorPresent, $firmwareVirt)
     Write-Host ("  WSL2 capable    : {0}" -f $wsl2Capable)
     if ($wsl2Blocker) { Write-Host ("                    {0}" -f $wsl2Blocker) -ForegroundColor Yellow }

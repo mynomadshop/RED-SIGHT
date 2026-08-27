@@ -377,6 +377,12 @@ Assert-True  -Name 'empty values are allowed'   -Condition ([bool](Set-RsEnvValu
 Assert-Equal -Name 'empty value reads as empty' -Expected '' -Actual (Get-RsEnvValue -Path $envPath -Key 'QDRANT_URL')
 Assert-True  -Name 'missing key returns null'   -Condition ($null -eq (Get-RsEnvValue -Path $envPath -Key 'NOT_PRESENT'))
 
+# dotenv parsers trip over a BOM in front of the first key, the same way the
+# Windows INI API does.
+$envBytes = [System.IO.File]::ReadAllBytes($envPath)
+$envBom = ($envBytes.Length -ge 3 -and $envBytes[0] -eq 0xEF -and $envBytes[1] -eq 0xBB -and $envBytes[2] -eq 0xBF)
+Assert-True -Name '.env is written without a BOM' -Condition (-not $envBom)
+
 # ==========================================================================
 Write-Host "`n== Get-RsDependencyPlan (hardware-aware wheel selection) ==" -ForegroundColor Cyan
 # ==========================================================================
@@ -519,6 +525,69 @@ try {
 }
 
 # ==========================================================================
+Write-Host "`n== Test-RsUiLaunch ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Build a stand-in for the Command Center import chain so the probe's real code
+# path runs without a Qt install. This is the check that answers "why did the UI
+# not launch?", so its failure reporting matters as much as its success case.
+$uiPy = $null
+foreach ($n in @('python3', 'python')) {
+    $c = Get-RsCommand -Name $n
+    if ($c) { $uiPy = $c.Source; break }
+}
+if (-not $uiPy) {
+    Write-Host '  SKIP  no local Python for the UI launch probe' -ForegroundColor DarkGray
+} else {
+    $uiRoot = Join-Path $tmpRoot 'FakeUi'
+    New-Item -ItemType Directory -Path (Join-Path $uiRoot 'PySide6') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $uiRoot 'qasync') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $uiRoot 'app\ui') -Force | Out-Null
+
+    Set-Content -LiteralPath (Join-Path $uiRoot 'PySide6\__init__.py') -Value '' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $uiRoot 'PySide6\QtWidgets.py') -Encoding ascii -Value @(
+        'class QApplication:',
+        '    @staticmethod',
+        '    def instance(): return None',
+        '    def __init__(self, argv=None): pass'
+    )
+    Set-Content -LiteralPath (Join-Path $uiRoot 'qasync\__init__.py') -Value '' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $uiRoot 'app\__init__.py') -Value '' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $uiRoot 'app\ui\__init__.py') -Value '' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $uiRoot 'app\ui\qt_bootstrap.py') -Encoding ascii -Value @(
+        'def configure_qt_pre_application():',
+        '    return True'
+    )
+    Set-Content -LiteralPath (Join-Path $uiRoot 'app\ui\command_center.py') -Encoding ascii -Value @(
+        'class CommandCenterMainWindow:',
+        '    pass'
+    )
+
+    $ok = Test-RsUiLaunch -VenvPython $uiPy -ProjectRoot $uiRoot
+    Assert-True  -Name 'a healthy UI chain reports success' -Condition $ok.Ok
+    Assert-True  -Name 'success says so in plain words'     -Condition ($ok.Detail -like '*loads cleanly*')
+    Assert-Equal -Name 'no traceback on success'            -Expected '' -Actual $ok.Traceback
+
+    # The 11.1 regression in miniature: the environment resolves but a module raises.
+    Set-Content -LiteralPath (Join-Path $uiRoot 'app\ui\command_center.py') -Encoding ascii -Value @(
+        'raise ImportError("No module named ''qasync''")'
+    )
+    $bad = Test-RsUiLaunch -VenvPython $uiPy -ProjectRoot $uiRoot
+    Assert-True -Name 'a broken UI chain reports failure'   -Condition (-not $bad.Ok)
+    Assert-True -Name 'and names the stage that failed'     -Condition ($bad.Detail -like '*command_center*')
+    Assert-True -Name 'and captures the traceback'          -Condition ($bad.Traceback -like '*ImportError*')
+
+    # A missing qasync must be caught before the app is declared ready.
+    Remove-Item -LiteralPath (Join-Path $uiRoot 'qasync') -Recurse -Force
+    $noQasync = Test-RsUiLaunch -VenvPython $uiPy -ProjectRoot $uiRoot
+    Assert-True -Name 'a missing qasync fails the probe'    -Condition (-not $noQasync.Ok)
+    Assert-True -Name 'and points at qasync'                -Condition ($noQasync.Detail -like '*qasync*')
+
+    Assert-True -Name 'a missing interpreter fails cleanly' `
+                -Condition (-not (Test-RsUiLaunch -VenvPython (Join-Path $tmpRoot 'no-python.exe') -ProjectRoot $uiRoot).Ok)
+}
+
+# ==========================================================================
 Write-Host "`n== RedSight-Hardware.ps1 ==" -ForegroundColor Cyan
 # ==========================================================================
 
@@ -546,8 +615,39 @@ if (Test-Path -LiteralPath $hwOut) {
                 -Condition ($hwJson.recommend.runtimeMode -in @('container', 'native'))
     Assert-True -Name 'reports a wsl2Capable verdict' `
                 -Condition ($hwJson.virtualization.PSObject.Properties['wsl2Capable'] -ne $null)
+    foreach ($gk in @('nvidiaGpuCount', 'totalVramGB', 'names', 'nvidia')) {
+        Assert-True -Name "gpu section reports '$gk'" `
+                    -Condition ($null -ne $hwJson.gpu.PSObject.Properties[$gk])
+    }
     Assert-True -Name 'explains any WSL2 blocker' `
                 -Condition ($hwJson.virtualization.wsl2Capable -or [bool]$hwJson.virtualization.wsl2Blocker)
+}
+
+$hwIni = Join-Path $tmpRoot 'hw.ini'
+$iniProc = Invoke-RsProcess -FilePath $pwshExe `
+                            -Arguments @('-NoLogo', '-NoProfile', '-File', $hwScript, '-Quiet', '-IniFile', $hwIni) `
+                            -TimeoutSeconds 180 -Quiet
+Assert-Equal -Name 'hardware scan writes the wizard INI' -Expected 0 -Actual $iniProc.ExitCode
+if (Test-Path -LiteralPath $hwIni) {
+    $iniText = Get-Content -LiteralPath $hwIni -Raw
+    # These are exactly the keys RedSight.iss reads with GetIniString.
+    foreach ($key in @('cudaCapable', 'hasNvidiaHardware', 'nvidiaGpuCount', 'gpuNames',
+                       'maxVramGB', 'totalVramGB', 'wsl2Capable', 'wsl2Blocker',
+                       'recommendProfile', 'recommendRuntime', 'isLaptop')) {
+        Assert-True -Name "wizard INI carries '$key'" -Condition ($iniText -match "(?m)^$key=")
+    }
+    # The regression that broke a real install: Windows PowerShell 5.1 writes a
+    # BOM with -Encoding utf8, and the Windows INI API then fails to match the
+    # first section header, so every GetIniString returns its default.
+    $iniBytes = [System.IO.File]::ReadAllBytes($hwIni)
+    $hasBom = ($iniBytes.Length -ge 3 -and $iniBytes[0] -eq 0xEF -and $iniBytes[1] -eq 0xBB -and $iniBytes[2] -eq 0xBF)
+    Assert-True -Name 'wizard INI has no UTF-8 BOM' -Condition (-not $hasBom)
+    Assert-True -Name 'wizard INI starts with the section header' `
+                -Condition ($iniText.StartsWith('[hardware]'))
+    Assert-True -Name 'wizard INI carries the scanOk sentinel' -Condition ($iniText -match '(?m)^scanOk=1')
+
+    Assert-True -Name 'INI values are single-line' `
+                -Condition (@($iniText -split "`r?`n" | Where-Object { $_ -and ($_ -notmatch '^\[') -and ($_ -notmatch '=') }).Count -eq 0)
 }
 
 # ==========================================================================
