@@ -138,6 +138,36 @@ Two further defects on that path are corrected by the overlay:
   `http://127.0.0.1:1234`. Requests to that origin are redirected to the
   configured one, and only while the two differ.
 
+## Which CUDA build, not just whether
+
+A PyTorch wheel carries compiled kernels for a fixed list of GPU
+architectures. Getting that list wrong does not fail at install time and does
+not fail at import: `torch.cuda.is_available()` returns `True`, and the first
+real operation on the device raises
+
+```
+CUDA error: no kernel image is available for execution on the device
+```
+
+The `cu124` index the installer used until 11.5.1 stops at `sm_90`, so on an
+RTX 50-series card (Blackwell, `sm_120`) the whole CUDA profile was decoration.
+The wheel index is now chosen from the compute capability the hardware scan
+reports:
+
+| Compute capability | Index | Requirement |
+| --- | --- | --- |
+| ≥ 12.0 (Blackwell, RTX 50-series) | `.../whl/cu128` | `torch>=2.7` |
+| anything else, or unknown | `.../whl/cu124` | `torch` |
+
+The version floor matters as much as the index: pip reports an
+already-installed torch as satisfied, so without it a machine that once got the
+wrong build would keep it through every repair run.
+
+`Test-RsTorchCuda` then asks the question that actually matters — it compares
+each device's capability against `torch.cuda.get_arch_list()` **and** runs a
+real allocation on it. Setup fails the step rather than reporting success, and
+the health check reports it per GPU.
+
 ## Memory, and why it showed as missing
 
 The desktop UI does not talk to the model directly. Each chat is:
@@ -242,11 +272,11 @@ on the `windows-latest` runner via `.github/workflows/build-windows-installer.ym
 
 ```powershell
 # from a source tree
-pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.0
+pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.1
 
 # reusing the payload of the previously shipped installer
 pwsh -File installer/build/Build-Installer.ps1 `
-     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.0
+     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.1
 ```
 
 Useful switches:
@@ -277,7 +307,7 @@ pwsh -File installer/tests/Test-IssScript.ps1       #  74 static checks
 python3 installer/tests/test_app_overlay.py         #  96 assertions
 ```
 
-410 assertions covering version parsing and gating, the install-path rewriter
+448 assertions covering version parsing and gating, the install-path rewriter
 (plain, JSON-escaped and forward-slash forms, exclusions, idempotency), `.env`
 seeding, retry/backoff behaviour, process timeout and exit-code handling, the
 venv import probe, bundled-Python provisioning (hash verification, tamper
@@ -287,8 +317,10 @@ the runtime configuration file (BOM-free, corrupt-file tolerant) and its
 environment export, the compose and launcher endpoint rewrites, the generated
 native launcher (uvicorn-served gateway, health waits, no proxy on loopback),
 launcher dispatch, the runtime `.pth` installation, the wizard's
-one-installation-per-device guard, and the overlay's probe redirection, cached
-sampling and effects budget. These run on Linux too, which is why they gate the
+one-installation-per-device guard, the PyTorch wheel index chosen per GPU
+architecture and the check that proves torch can really run the installed
+cards, progress reporting for long child processes, and the overlay's probe
+redirection, cached sampling and effects budget. These run on Linux too, which is why they gate the
 Windows build job.
 
 The Windows job then does what unit tests cannot: it installs the freshly built

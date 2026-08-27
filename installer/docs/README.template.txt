@@ -115,6 +115,36 @@ wired to each other, so each is described plainly below.
     with two copies.
 
 
+FIXED IN 11.5.1 - GPU ACCELERATION ON RTX 50-SERIES CARDS
+----------------------------------------------------------
+  * The CUDA setup type installed a PyTorch build that could not
+    run an RTX 50-series card. A PyTorch wheel carries kernels for a
+    fixed list of GPU architectures; the one being installed stopped
+    two generations short of Blackwell. It imported without complaint,
+    reported CUDA as available, and then failed on the first operation
+    with "no kernel image is available for execution on the device" -
+    so on a machine with 50-series cards the whole CUDA profile was
+    decoration.
+
+    The wheel is now chosen from the compute capability your GPUs
+    report, and setup proves it works: it runs a real operation on each
+    card and fails the step if any of them cannot. The health check
+    reports it per GPU. If you already installed 11.5.0 on such a
+    machine, re-running setup replaces the wrong build.
+
+  * Reduced desktop animation is now the default on every machine, not
+    only on machines without a discrete GPU. The cost is not the
+    graphics card - the ambient layer repaints from the same thread that
+    handles the mouse - so the lag was reported on a dual high-end
+    desktop too. Clear the box during setup, or use Settings, to keep
+    the shipped look.
+
+  * Building the container images no longer looks like a hang. That step
+    can take twenty minutes or more on a first run and used to print
+    nothing at all while it worked; it now reports progress every
+    minute.
+
+
 ALSO FIXED IN EARLIER 11.x RELEASES
 ------------------------------------
   * Install-path rewriting now handles JSON-escaped ("C:\\Users\\...")

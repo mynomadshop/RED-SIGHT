@@ -101,6 +101,28 @@ if (Test-Path -LiteralPath $uiPython) {
     Add-RsCheck -Name 'desktop UI env (.venv-ui)' -Status 'fail' -Required -Detail "missing: $uiPython"
 }
 
+# --- GPU acceleration -----------------------------------------------------
+
+# The question worth asking is whether torch can run this machine's GPUs, not
+# whether a CUDA build is present. A wheel with no kernels for the installed
+# architecture imports cleanly, reports CUDA as available, and then fails on the
+# first operation - which is what an RTX 50-series card gets from a cu124 build.
+if (Test-Path -LiteralPath $uiPython) {
+    $torch = Test-RsTorchCuda -VenvPython $uiPython -ProjectRoot $ProjectRoot
+    if (-not $torch.Ok) {
+        Add-RsCheck -Name 'PyTorch' -Status 'skip' -Detail $torch.Detail
+    } elseif ($torch.Usable) {
+        Add-RsCheck -Name 'GPU acceleration (PyTorch)' -Status 'pass' -Detail $torch.Detail
+    } elseif ($torch.Devices) {
+        Add-RsCheck -Name 'GPU acceleration (PyTorch)' -Status 'fail' -Detail $torch.Detail
+        Write-RsLog "    $($torch.Devices)" -Level FAIL
+        Write-RsLog '    re-run setup to install the build that matches these GPUs' -Level INFO
+    } else {
+        # No CUDA device at all is the normal, correct state on the API profile.
+        Add-RsCheck -Name 'GPU acceleration (PyTorch)' -Status 'skip' -Detail $torch.Detail
+    }
+}
+
 $actionsPython = Join-Path $ProjectRoot '.venv-actions\Scripts\python.exe'
 if (Test-Path -LiteralPath $actionsPython) {
     $ok = Test-RsVenvImports -VenvPython $actionsPython -Modules @('fastapi', 'uvicorn', 'httpx')

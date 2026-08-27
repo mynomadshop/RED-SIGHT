@@ -438,8 +438,11 @@ Assert-True -Name 'the CUDA profile counts as a local model' `
             -Condition ($codeText -match 'function UsesLocalModel[\s\S]{0,300}not IsApiProfile\(\)')
 Assert-True -Name 'the visual-effects budget reaches the bootstrap' `
             -Condition ($codeText -match "'uiEffects=reduced'" -and $codeText -match "'uiEffects=full'")
-Assert-True -Name 'animation is reduced by default without a CUDA GPU' `
-            -Condition ($codeText -match 'ReduceEffects\.Checked\s*:=\s*not HwCudaCapable')
+# The lag was reported on a dual RTX 5090 desktop, so a GPU is not the thing
+# that makes the ambient layer affordable: it competes with input handling on
+# the GUI thread whatever the card.
+Assert-True -Name 'animation is reduced by default on every machine' `
+            -Condition ($codeText -match 'ReduceEffects\.Checked\s*:=\s*True')
 
 # --------------------------------------------------------------------------
 # v5: shortcuts must start the action/memory gateway

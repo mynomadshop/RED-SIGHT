@@ -199,6 +199,10 @@ function Invoke-RsProcess {
 
         Returns a PSCustomObject with ExitCode / TimedOut / StdOut / StdErr.
         Does not throw on a non-zero exit code - callers decide what is fatal.
+
+        -HeartbeatSeconds logs a line at that interval while the child runs.
+        Output cannot be read until the pipes close, so a long step is silent
+        without it and looks like a hang.
     #>
     [CmdletBinding()]
     param(
@@ -206,6 +210,7 @@ function Invoke-RsProcess {
         [string[]]$Arguments = @(),
         [string]$WorkingDirectory,
         [int]$TimeoutSeconds = 1800,
+        [int]$HeartbeatSeconds = 0,
         [switch]$Quiet
     )
 
@@ -256,7 +261,20 @@ function Invoke-RsProcess {
         $outTask = $proc.StandardOutput.ReadToEndAsync()
         $errTask = $proc.StandardError.ReadToEndAsync()
 
-        $timedOut = -not $proc.WaitForExit($TimeoutSeconds * 1000)
+        if ($HeartbeatSeconds -gt 0) {
+            # Output is only readable once the pipes close, so a step like
+            # "docker compose build" would otherwise print nothing for twenty
+            # minutes and read as hung. A heartbeat says it is still working.
+            $waited = 0
+            $timedOut = $false
+            while (-not $proc.WaitForExit($HeartbeatSeconds * 1000)) {
+                $waited += $HeartbeatSeconds
+                if ($waited -ge $TimeoutSeconds) { $timedOut = $true; break }
+                Write-RsLog ("    still running after {0:n0}s (timeout {1:n0}s)" -f $waited, $TimeoutSeconds) -Level INFO
+            }
+        } else {
+            $timedOut = -not $proc.WaitForExit($TimeoutSeconds * 1000)
+        }
         if ($timedOut) {
             Write-RsLog "TIMEOUT after ${TimeoutSeconds}s: $shown" -Level WARN
             # Kill the whole tree where supported: installers spawn children.

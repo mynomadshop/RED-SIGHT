@@ -6,7 +6,7 @@
 ;  offline wheelhouse into a staging tree and then invokes ISCC on this script.
 ;
 ;  Required preprocessor defines (all supplied by Build-Installer.ps1):
-;    AppVersion   product version, e.g. 11.5.0
+;    AppVersion   product version, e.g. 11.5.1
 ;    PayloadDir   staged application tree that becomes {app}
 ;    OutputDir    where the compiled setup exe is written
 ;    OutputBase   base name of the setup exe
@@ -16,7 +16,7 @@
 ; ===========================================================================
 
 #ifndef AppVersion
-  #define AppVersion "11.5.0"
+  #define AppVersion "11.5.1"
 #endif
 #ifndef PayloadDir
   #error PayloadDir must be defined (pass /DPayloadDir=... to ISCC)
@@ -528,7 +528,7 @@ begin
   ReduceEffects.Left := LmPage.Edits[1].Left;
   ReduceEffects.Width := LmPage.SurfaceWidth;
   ReduceEffects.Height := ScaleY(17);
-  ReduceEffects.Caption := 'Reduce desktop animation (recommended without a discrete GPU)';
+  ReduceEffects.Caption := 'Reduce desktop animation (recommended)';
   ReduceEffects.Checked := True;
 
   LmInfo := TNewStaticText.Create(LmPage);
@@ -540,8 +540,9 @@ begin
   LmInfo.Height := ScaleY(56);
   LmInfo.WordWrap := True;
   LmInfo.Caption := 'RedSight''s ambient visual layer repaints the whole window twenty times a ' +
-                    'second. On integrated graphics that is felt as late cursor movement and ' +
-                    'late clicks, so setup turns it down unless an NVIDIA GPU is present.';
+                    'second from the same thread that handles the mouse, which is felt as late ' +
+                    'cursor movement and late clicks on any machine. Clear this box to keep the ' +
+                    'shipped look; it can also be changed later in Settings.';
 
   { --- Working directory --------------------------------------------------- }
   WorkspacePage := CreateInputDirPage(LmPage.ID,
@@ -570,9 +571,11 @@ procedure CurPageChanged(CurPageID: Integer);
 begin
   if (LmPage <> nil) and (CurPageID = LmPage.ID) then
   begin
-    { With a discrete NVIDIA GPU the ambient layer is affordable, so leave the
-      product's own look alone; without one it is the main source of input lag. }
-    ReduceEffects.Checked := not HwCudaCapable;
+    { Checked regardless of the GPU: the ambient layer's cost is a translucent
+      full-window repaint driven from the Qt GUI thread, so it competes with
+      input handling even on a dual high-end card - which is where the lag that
+      prompted this was reported. }
+    ReduceEffects.Checked := True;
   end;
 
   if (ProfilePage <> nil) and (CurPageID = ProfilePage.ID) then

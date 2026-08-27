@@ -6,6 +6,7 @@
 
         Python 3.12      bundled official CPython, or a suitable one on PATH
         pip              seeded from the runtime's own ensurepip (offline)
+        PyTorch          the CUDA build whose kernels match the installed GPUs
         virtualenvs      .venv-ui and .venv-actions, dependencies installed
         WSL2             Windows features enabled, kernel updated
         Docker Desktop   downloaded and installed silently, engine started
@@ -544,6 +545,130 @@ function Initialize-RsVenv {
     return $venvPython
 }
 
+function Test-RsTorchCuda {
+    <#
+        Answers "can torch actually use this machine's GPUs?" - not "is a CUDA
+        build installed", which is the question that has been passing while the
+        answer to the real one was no.
+
+        A PyTorch wheel carries compiled kernels for a fixed list of
+        architectures. Running a cu124 build on an RTX 50-series card (sm_120)
+        gets "no kernel image is available for execution on the device" on the
+        first GPU operation, having reported a successful import and even
+        torch.cuda.is_available() == True. The only honest check is to compare
+        each device's capability against torch.cuda.get_arch_list() and then run
+        a real operation on the device.
+
+        Returns Ok / Detail / Devices / ArchList / Version. Never throws: on an
+        API-profile machine there is nothing to check.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VenvPython,
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [int]$TimeoutSeconds = 300
+    )
+
+    $result = [pscustomobject]@{
+        Ok = $false; Detail = ''; Devices = ''; ArchList = ''; Version = ''; Usable = $false
+    }
+    if (-not (Test-Path -LiteralPath $VenvPython)) {
+        $result.Detail = "interpreter not found: $VenvPython"
+        return $result
+    }
+
+    $code = @'
+import json, sys
+report = {"imported": False}
+try:
+    import torch
+except Exception as exc:
+    report["error"] = f"{type(exc).__name__}: {exc}"
+    print("TORCH_REPORT=" + json.dumps(report))
+    sys.exit(0)
+
+report["imported"] = True
+report["version"] = torch.__version__
+try:
+    report["arch_list"] = list(torch.cuda.get_arch_list())
+except Exception:
+    report["arch_list"] = []
+report["available"] = bool(torch.cuda.is_available())
+report["device_count"] = torch.cuda.device_count() if report["available"] else 0
+
+devices = []
+for index in range(report["device_count"]):
+    entry = {"index": index}
+    try:
+        entry["name"] = torch.cuda.get_device_name(index)
+        major, minor = torch.cuda.get_device_capability(index)
+        entry["capability"] = f"{major}.{minor}"
+        entry["supported"] = f"sm_{major}{minor}" in report["arch_list"]
+        # A real allocation and a real kernel: this is where a wheel without
+        # kernels for the device finally admits it.
+        torch.zeros(64, device=f"cuda:{index}").sum().item()
+        entry["works"] = True
+    except Exception as exc:
+        entry["works"] = False
+        entry["error"] = f"{type(exc).__name__}: {exc}"[:400]
+    devices.append(entry)
+
+report["devices"] = devices
+report["usable"] = bool(devices) and all(d.get("works") for d in devices)
+print("TORCH_REPORT=" + json.dumps(report))
+'@
+
+    $r = Invoke-RsProcess -FilePath $VenvPython -Arguments @('-c', $code) `
+                          -WorkingDirectory $ProjectRoot -TimeoutSeconds $TimeoutSeconds -Quiet
+    if ($r.TimedOut) {
+        $result.Detail = "the torch CUDA check timed out after ${TimeoutSeconds}s"
+        return $result
+    }
+
+    $match = [regex]::Match(($r.StdOut + "`n" + $r.StdErr), 'TORCH_REPORT=(\{.*\})')
+    if (-not $match.Success) {
+        $result.Detail = 'the torch CUDA check produced no report'
+        return $result
+    }
+
+    try {
+        $report = $match.Groups[1].Value | ConvertFrom-Json
+    } catch {
+        $result.Detail = "could not read the torch report: $($_.Exception.Message)"
+        return $result
+    }
+
+    if (-not $report.imported) {
+        $result.Detail = "torch could not be imported: $($report.error)"
+        return $result
+    }
+
+    $result.Ok = $true
+    $result.Version = "$($report.version)"
+    $result.ArchList = (@($report.arch_list) -join ' ')
+    $result.Usable = [bool]$report.usable
+
+    if (-not $report.available) {
+        $result.Detail = "torch $($report.version) is installed but reports no CUDA device"
+        return $result
+    }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($d in @($report.devices)) {
+        $verdict = if ($d.works) { 'works' } else { "FAILS - $($d.error)" }
+        $lines.Add("GPU $($d.index) $($d.name) sm_$(("$($d.capability)" -replace '\.', '')) $verdict")
+    }
+    $result.Devices = ($lines.ToArray() -join ' | ')
+
+    if ($result.Usable) {
+        $result.Detail = "torch $($report.version) runs on $($report.device_count) GPU(s)"
+    } else {
+        $result.Detail = ("torch $($report.version) cannot run this machine's GPU(s). " +
+                         "Its wheel carries kernels for: $($result.ArchList)")
+    }
+    return $result
+}
+
 function Test-RsUiLaunch {
     <#
         Answers "will the Command Center actually start?" by importing the exact
@@ -976,8 +1101,13 @@ function Build-RsDockerImages {
     if (-not (Test-Path -LiteralPath $compose)) { throw "docker-compose.yml not found in $ProjectRoot" }
 
     Write-RsLog 'building Docker images (docker compose build)' -Level STEP
-    $r = Invoke-RsProcess -FilePath $cli -Arguments @('compose', 'build') `
-                          -WorkingDirectory $ProjectRoot -TimeoutSeconds $TimeoutSeconds
+    Write-RsLog '    this is the long step - a first build downloads base images and installs' -Level INFO
+    Write-RsLog '    the Python stack inside the container, which can take 15-30 minutes' -Level INFO
+    # --progress plain keeps the captured output readable instead of a stream of
+    # terminal control sequences.
+    $r = Invoke-RsProcess -FilePath $cli -Arguments @('compose', 'build', '--progress', 'plain') `
+                          -WorkingDirectory $ProjectRoot -TimeoutSeconds $TimeoutSeconds `
+                          -HeartbeatSeconds 60
     if ($r.TimedOut) { throw "docker compose build timed out after ${TimeoutSeconds}s" }
     if ($r.ExitCode -ne 0) { throw "docker compose build failed with exit code $($r.ExitCode)" }
     Write-RsLog 'Docker images built' -Level OK

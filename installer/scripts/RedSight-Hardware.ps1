@@ -153,17 +153,29 @@ $cudaVersion = ''
 if ($nvidiaSmi) {
     Write-Probe "probing $nvidiaSmi"
     try {
-        $q = & $nvidiaSmi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits 2>$null
+        # compute_cap decides which PyTorch wheel index is usable: a cu124 build
+        # carries no kernels for sm_120 (Blackwell, an RTX 50-series card), so it
+        # loads and then fails on the first GPU operation. Older nvidia-smi
+        # builds do not know the field, so the query falls back.
+        $q = & $nvidiaSmi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv,noheader,nounits 2>$null
+        $haveComputeCap = ($LASTEXITCODE -eq 0) -and (@($q | Where-Object { $_ -and $_.Trim() }).Count -gt 0)
+        if (-not $haveComputeCap) {
+            Write-Probe 'nvidia-smi does not report compute_cap; falling back to the shorter query'
+            $q = & $nvidiaSmi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits 2>$null
+        }
         foreach ($line in @($q)) {
             if (-not $line -or -not $line.Trim()) { continue }
             $parts = $line -split ','
             if ($parts.Count -lt 3) { continue }
             $vram = 0
             [void][int]::TryParse($parts[1].Trim(), [ref]$vram)
+            $cap = ''
+            if ($parts.Count -ge 4) { $cap = $parts[3].Trim() }
             $nvidiaGpus.Add([pscustomobject]@{
-                Name    = $parts[0].Trim()
-                VramGB  = [math]::Round($vram / 1024, 1)
-                Driver  = $parts[2].Trim()
+                Name        = $parts[0].Trim()
+                VramGB      = [math]::Round($vram / 1024, 1)
+                Driver      = $parts[2].Trim()
+                ComputeCap  = $cap
             })
             $driverVersion = $parts[2].Trim()
         }
@@ -187,6 +199,19 @@ foreach ($g in $nvidiaGpus) {
 }
 $totalVramGB = [math]::Round($totalVramGB, 1)
 $nvidiaGpuCount = $nvidiaGpus.Count
+# The highest architecture present decides the wheel index; a mixed-generation
+# machine still needs kernels for its newest card.
+$maxComputeCap = ''
+$maxComputeCapValue = 0.0
+foreach ($g in $nvidiaGpus) {
+    $capValue = 0.0
+    if ($g.ComputeCap -and [double]::TryParse($g.ComputeCap, [ref]$capValue)) {
+        if ($capValue -gt $maxComputeCapValue) {
+            $maxComputeCapValue = $capValue
+            $maxComputeCap = $g.ComputeCap
+        }
+    }
+}
 # Multi-GPU is a first-class case for RedSight (its scheduler is dual-GPU aware),
 # so surface the count and every adapter name rather than only the biggest card.
 $nvidiaNames = (@($nvidiaGpus | ForEach-Object { $_.Name }) -join ', ')
@@ -319,6 +344,7 @@ $hw = [ordered]@{
         nvidiaGpuCount    = $nvidiaGpuCount
         maxVramGB         = $maxVramGB
         totalVramGB       = $totalVramGB
+        maxComputeCap     = $maxComputeCap
         names             = $nvidiaNames
         driverVersion     = $driverVersion
         cudaVersion       = $cudaVersion
@@ -371,6 +397,7 @@ if ($IniFile) {
         $lines.Add("gpuNames=$nvidiaNames")
         $lines.Add("maxVramGB=$maxVramGB")
         $lines.Add("totalVramGB=$totalVramGB")
+        $lines.Add("maxComputeCap=$maxComputeCap")
         $lines.Add("cudaVersion=$cudaVersion")
         $lines.Add("driverVersion=$driverVersion")
         $lines.Add("virtAvailable=$(ConvertTo-IniBool $virtualizationAvailable)")

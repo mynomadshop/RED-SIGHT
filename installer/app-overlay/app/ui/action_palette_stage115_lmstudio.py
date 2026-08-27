@@ -865,7 +865,16 @@ def install() -> dict[str, Any]:
     module = runtime()
     if module is not None:
         try:
-            report["environment"] = sorted(module.apply_environment())
+            # What matters in a log is the endpoint the process will actually
+            # use, not which variables this call happened to be the first to
+            # set - the .pth normally sets them all before install() runs, so
+            # reporting newly-applied keys reads as an empty list and looks
+            # like a failure.
+            module.apply_environment()
+            report["environment"] = {
+                key: os.environ.get(key, "")
+                for key in ("LM_STUDIO_BASE_URL", "LM_STUDIO_MODEL", "REDSIGHT_UI_EFFECTS")
+            }
         except Exception as exc:
             report["environment_error"] = str(exc)
     else:

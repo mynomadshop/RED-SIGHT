@@ -159,6 +159,41 @@ function Initialize-RsWorkspace {
 # Setup profiles and dependency selection
 # --------------------------------------------------------------------------
 
+# PyTorch wheel indexes, by the GPU architecture they carry kernels for.
+#
+# This mapping is the difference between "CUDA is installed" and "CUDA works".
+# A wheel contains compiled kernels for a fixed set of architectures; asking a
+# cu124 build to run on sm_120 - any RTX 50-series card - gets the driver's
+# "no kernel image is available for execution on the device", not a fallback.
+# Blackwell support arrived in PyTorch 2.7 on the CUDA 12.8 index.
+$script:RsTorchIndexes = @(
+    @{ MinCap = 12.0; Index = 'https://download.pytorch.org/whl/cu128'; Spec = 'torch>=2.7'
+       Label = 'PyTorch (CUDA 12.8 build, Blackwell/sm_120 kernels)' }
+    @{ MinCap = 0.0;  Index = 'https://download.pytorch.org/whl/cu124'; Spec = 'torch'
+       Label = 'PyTorch (CUDA 12.4 build)' }
+)
+
+function Get-RsTorchPlan {
+    <#
+        The PyTorch wheel index for a GPU compute capability.
+
+        An unknown capability keeps the long-standing cu124 default: it covers
+        every NVIDIA generation from Maxwell to Hopper, and guessing the newer
+        index for a card that does not need it would download a larger payload
+        for no gain.
+    #>
+    [CmdletBinding()]
+    param([string]$ComputeCapability = '')
+
+    $cap = 0.0
+    [void][double]::TryParse("$ComputeCapability", [ref]$cap)
+
+    foreach ($entry in $script:RsTorchIndexes) {
+        if ($cap -ge [double]$entry.MinCap) { return [pscustomobject]$entry }
+    }
+    return [pscustomobject]$script:RsTorchIndexes[-1]
+}
+
 function Get-RsDependencyPlan {
     <#
         Chooses the Python packages to install for this machine.
@@ -167,6 +202,8 @@ function Get-RsDependencyPlan {
         use them. The CUDA build of torch alone is roughly 2.5 GB of GPU runtime
         libraries; the CPU build is about 200 MB. On a laptop with no NVIDIA
         driver the CUDA build is not merely wasted, it fails to load.
+
+        Which CUDA build matters as much as whether: see $script:RsTorchIndexes.
 
         Returns PreInstalls (installed first, so later resolution sees the
         chosen torch already satisfied) plus the profile decision and why.
@@ -182,9 +219,13 @@ function Get-RsDependencyPlan {
 
     $cudaCapable = $false
     $vram = 0.0
+    $computeCap = ''
     if ($Hardware) {
         $cudaCapable = [bool]$Hardware.gpu.cudaCapable
         $vram = [double]$Hardware.gpu.maxVramGB
+        if ($Hardware.gpu.PSObject.Properties['maxComputeCap']) {
+            $computeCap = "$($Hardware.gpu.maxComputeCap)"
+        }
     }
 
     if ($SetupProfile -eq 'auto') {
@@ -207,12 +248,17 @@ function Get-RsDependencyPlan {
     }
 
     $preInstalls = New-Object System.Collections.Generic.List[object]
+    $torch = $null
     if ($effective -eq 'cuda') {
+        $torch = Get-RsTorchPlan -ComputeCapability $computeCap
         # The documented PyTorch install form: its wheel index also carries the
-        # transitive dependencies, so --index-url alone is correct here.
+        # transitive dependencies, so --index-url alone is correct here. The
+        # version floor matters: pip reports an already-installed torch as
+        # satisfied, so without it a machine carrying the wrong CUDA build keeps
+        # it forever.
         $preInstalls.Add(@{
-            Label = 'PyTorch (CUDA 12.4 build)'
-            Args  = @('torch', '--index-url', 'https://download.pytorch.org/whl/cu124')
+            Label = $torch.Label
+            Args  = @($torch.Spec, '--index-url', $torch.Index)
         })
         $preInstalls.Add(@{ Label = 'onnxruntime-gpu'; Args = @('onnxruntime-gpu') })
     } else {
@@ -224,12 +270,14 @@ function Get-RsDependencyPlan {
     }
 
     return [pscustomobject]@{
-        Profile     = $effective
-        Requested   = $SetupProfile
-        Reason      = $reason
-        PreInstalls = $preInstalls.ToArray()
-        CudaCapable = $cudaCapable
-        VramGB      = $vram
+        Profile      = $effective
+        Requested    = $SetupProfile
+        Reason       = $reason
+        PreInstalls  = $preInstalls.ToArray()
+        CudaCapable  = $cudaCapable
+        VramGB       = $vram
+        ComputeCap   = $computeCap
+        TorchIndex   = if ($torch) { $torch.Index } else { '' }
     }
 }
 

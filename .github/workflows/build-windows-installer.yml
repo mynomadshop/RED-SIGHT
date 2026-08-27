@@ -13,9 +13,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to build (e.g. 11.5.0)'
+        description: 'Version to build (e.g. 11.5.1)'
         required: false
-        default: '11.5.0'
+        default: '11.5.1'
       include_all_wheels:
         description: 'Bundle every Python wheel for a fully offline installer (adds ~1 GB)'
         type: boolean
@@ -37,7 +37,7 @@ permissions:
   contents: write
 
 env:
-  RS_VERSION: ${{ github.event.inputs.version || '11.5.0' }}
+  RS_VERSION: ${{ github.event.inputs.version || '11.5.1' }}
 
 jobs:
   # --------------------------------------------------------------------------

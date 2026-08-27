@@ -644,7 +644,8 @@ if (Test-Path -LiteralPath $hwIni) {
     Assert-True -Name 'wizard INI has no UTF-8 BOM' -Condition (-not $hasBom)
     Assert-True -Name 'wizard INI starts with the section header' `
                 -Condition ($iniText.StartsWith('[hardware]'))
-    Assert-True -Name 'wizard INI carries the scanOk sentinel' -Condition ($iniText -match '(?m)^scanOk=1')
+    Assert-True -Name 'wizard INI carries maxComputeCap' -Condition ($iniText -match '(?m)^maxComputeCap=')
+Assert-True -Name 'wizard INI carries the scanOk sentinel' -Condition ($iniText -match '(?m)^scanOk=1')
 
     Assert-True -Name 'INI values are single-line' `
                 -Condition (@($iniText -split "`r?`n" | Where-Object { $_ -and ($_ -notmatch '^\[') -and ($_ -notmatch '=') }).Count -eq 0)
@@ -910,6 +911,206 @@ Assert-True -Name 'the .pth has no UTF-8 BOM' `
             -Condition (-not ($pthBytes[0] -eq 0xEF -and $pthBytes[1] -eq 0xBB -and $pthBytes[2] -eq 0xBF))
 Assert-True -Name 'a payload with no runtime module is reported, not assumed' `
             -Condition (-not (Install-RsRuntimeBootstrap -VenvPython $bootPython -ProjectRoot (Join-Path $tmpRoot 'nothing-here')))
+
+# ==========================================================================
+Write-Host "`n== Long-running child processes report progress ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# A child's output cannot be read until its pipes close, so "docker compose
+# build" printed nothing for twenty minutes and read as a hang.
+$sleepExe = (Get-Command 'sleep' -CommandType Application -ErrorAction SilentlyContinue |
+             Select-Object -First 1)
+if (-not $sleepExe) {
+    $sleepExe = (Get-Command 'timeout' -CommandType Application -ErrorAction SilentlyContinue |
+                 Select-Object -First 1)
+}
+if ($sleepExe -and $sleepExe.Name -like 'sleep*') {
+    $hbLog = Join-Path $tmpRoot 'heartbeat.log'
+    Initialize-RsLog -Name 'heartbeat' -LogDir $tmpRoot | Out-Null
+    $hb = Invoke-RsProcess -FilePath $sleepExe.Source -Arguments @('2') `
+                           -HeartbeatSeconds 1 -TimeoutSeconds 30 -Quiet
+    Assert-Equal -Name 'a heartbeat run still returns the exit code' -Expected 0 -Actual $hb.ExitCode
+    Assert-True  -Name 'a heartbeat run does not report a timeout' -Condition (-not $hb.TimedOut)
+    $hbText = Get-Content -LiteralPath (Get-RsLogPath) -Raw
+    Assert-True -Name 'progress is written while the child runs' -Condition ($hbText -match 'still running after')
+
+    $hbTimeout = Invoke-RsProcess -FilePath $sleepExe.Source -Arguments @('30') `
+                                  -HeartbeatSeconds 1 -TimeoutSeconds 2 -Quiet
+    Assert-True  -Name 'the heartbeat path still enforces the timeout' -Condition $hbTimeout.TimedOut
+    Assert-Equal -Name 'a timeout still reports exit code -1' -Expected -1 -Actual $hbTimeout.ExitCode
+
+    $noHb = Invoke-RsProcess -FilePath $sleepExe.Source -Arguments @('1') -TimeoutSeconds 30 -Quiet
+    Assert-Equal -Name 'without a heartbeat nothing changes' -Expected 0 -Actual $noHb.ExitCode
+} else {
+    Write-Host '  SKIP  no sleep executable for the heartbeat checks' -ForegroundColor Yellow
+}
+
+# ==========================================================================
+Write-Host "`n== PyTorch wheel selection by GPU architecture ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# A cu124 wheel carries no kernels for sm_120, so on an RTX 50-series card it
+# imports, reports CUDA as available, and then fails on the first operation.
+$t120 = Get-RsTorchPlan -ComputeCapability '12.0'
+Assert-Equal -Name 'Blackwell gets the CUDA 12.8 index' -Expected 'https://download.pytorch.org/whl/cu128' -Actual $t120.Index
+Assert-Equal -Name 'Blackwell gets a version floor so a wrong build is replaced' -Expected 'torch>=2.7' -Actual $t120.Spec
+Assert-True  -Name 'the Blackwell label names the architecture' -Condition ($t120.Label -match 'sm_120')
+
+foreach ($cap in @('9.0', '8.9', '8.6', '7.5', '6.1')) {
+    Assert-Equal -Name "compute capability $cap keeps the CUDA 12.4 index" `
+                 -Expected 'https://download.pytorch.org/whl/cu124' `
+                 -Actual (Get-RsTorchPlan -ComputeCapability $cap).Index
+}
+Assert-Equal -Name 'an unknown capability keeps the long-standing default' `
+             -Expected 'https://download.pytorch.org/whl/cu124' -Actual (Get-RsTorchPlan -ComputeCapability '').Index
+Assert-Equal -Name 'unparseable text does not throw' `
+             -Expected 'https://download.pytorch.org/whl/cu124' -Actual (Get-RsTorchPlan -ComputeCapability 'n/a').Index
+
+$hwBlackwell = [pscustomobject]@{
+    gpu = [pscustomobject]@{
+        cudaCapable = $true; maxVramGB = 31.8; hasNvidiaHardware = $true; maxComputeCap = '12.0'
+    }
+}
+$planBlackwell = Get-RsDependencyPlan -SetupProfile 'cuda' -Hardware $hwBlackwell
+Assert-Equal -Name 'the plan carries the Blackwell index' `
+             -Expected 'https://download.pytorch.org/whl/cu128' -Actual $planBlackwell.TorchIndex
+Assert-Equal -Name 'the plan reports the capability it decided from' -Expected '12.0' -Actual $planBlackwell.ComputeCap
+$blackwellArgs = ($planBlackwell.PreInstalls[0].Args -join ' ')
+Assert-True -Name 'the pre-install pins the version and the index' `
+            -Condition ($blackwellArgs -eq 'torch>=2.7 --index-url https://download.pytorch.org/whl/cu128')
+Assert-Equal -Name 'the GPU ONNX runtime is still chosen' -Expected 'onnxruntime-gpu' -Actual $planBlackwell.PreInstalls[1].Args[0]
+
+$hwAda = [pscustomobject]@{
+    gpu = [pscustomobject]@{
+        cudaCapable = $true; maxVramGB = 24.0; hasNvidiaHardware = $true; maxComputeCap = '8.9'
+    }
+}
+Assert-Equal -Name 'an Ada card is unaffected' -Expected 'https://download.pytorch.org/whl/cu124' `
+             -Actual (Get-RsDependencyPlan -SetupProfile 'cuda' -Hardware $hwAda).TorchIndex
+
+# A hardware profile from an older scanner has no maxComputeCap at all.
+$hwLegacy = [pscustomobject]@{
+    gpu = [pscustomobject]@{ cudaCapable = $true; maxVramGB = 12.0; hasNvidiaHardware = $true }
+}
+$planLegacy = Get-RsDependencyPlan -SetupProfile 'cuda' -Hardware $hwLegacy
+Assert-Equal -Name 'a profile without the field still yields a plan' `
+             -Expected 'https://download.pytorch.org/whl/cu124' -Actual $planLegacy.TorchIndex
+
+$planApi = Get-RsDependencyPlan -SetupProfile 'api' -Hardware $hwBlackwell
+Assert-True -Name 'the api profile installs no CUDA wheel' `
+            -Condition (($planApi.PreInstalls[0].Args -join ' ') -match '/whl/cpu')
+Assert-Equal -Name 'the api profile records no torch index' -Expected '' -Actual $planApi.TorchIndex
+
+# ==========================================================================
+Write-Host "`n== PyTorch GPU verification ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$torchDir = Join-Path $tmpRoot 'torch-probe'
+New-Item -ItemType Directory -Path $torchDir -Force | Out-Null
+$realPython = (Get-Command 'python3' -CommandType Application -ErrorAction SilentlyContinue |
+               Select-Object -First 1)
+if (-not $realPython) {
+    $realPython = (Get-Command 'python' -CommandType Application -ErrorAction SilentlyContinue |
+                   Select-Object -First 1)
+}
+
+if ($realPython) {
+    # torch 2.6.0+cu124 on a dual RTX 5090: imports, says CUDA is available,
+    # then refuses the first allocation. This is the case that used to pass.
+    @'
+__version__ = "2.6.0+cu124"
+_ARCH = ["sm_50", "sm_70", "sm_80", "sm_86", "sm_90"]
+class _Cuda:
+    @staticmethod
+    def get_arch_list(): return list(_ARCH)
+    @staticmethod
+    def is_available(): return True
+    @staticmethod
+    def device_count(): return 2
+    @staticmethod
+    def get_device_name(i): return "NVIDIA GeForce RTX 5090"
+    @staticmethod
+    def get_device_capability(i): return (12, 0)
+cuda = _Cuda()
+def zeros(*a, **k):
+    raise RuntimeError("CUDA error: no kernel image is available for execution on the device")
+'@ | Set-Content -LiteralPath (Join-Path $torchDir 'torch.py') -Encoding ascii
+
+    $savedPyPath = $env:PYTHONPATH
+    $env:PYTHONPATH = $torchDir
+    try {
+        $mismatch = Test-RsTorchCuda -VenvPython $realPython.Source -ProjectRoot $torchDir
+    } finally {
+        if ($null -ne $savedPyPath) { $env:PYTHONPATH = $savedPyPath } else { Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue }
+    }
+    Assert-True  -Name 'the check runs and reports' -Condition $mismatch.Ok
+    Assert-True  -Name 'a wheel without kernels for the GPU is called unusable' -Condition (-not $mismatch.Usable)
+    Assert-Equal -Name 'the installed version is reported' -Expected '2.6.0+cu124' -Actual $mismatch.Version
+    Assert-True  -Name 'the architectures the wheel does carry are reported' -Condition ($mismatch.ArchList -match 'sm_90')
+    Assert-True  -Name 'each device is named with its capability' -Condition ($mismatch.Devices -match 'sm_120')
+    Assert-True  -Name 'the real error is surfaced, not swallowed' -Condition ($mismatch.Devices -match 'no kernel image')
+    Assert-True  -Name 'torch.cuda.is_available() alone is not treated as success' `
+                 -Condition (-not $mismatch.Usable)
+
+    # The matching build: same GPUs, kernels present.
+    @'
+__version__ = "2.7.1+cu128"
+_ARCH = ["sm_80", "sm_90", "sm_100", "sm_120"]
+class _T:
+    def sum(self): return self
+    def item(self): return 0.0
+class _Cuda:
+    @staticmethod
+    def get_arch_list(): return list(_ARCH)
+    @staticmethod
+    def is_available(): return True
+    @staticmethod
+    def device_count(): return 2
+    @staticmethod
+    def get_device_name(i): return "NVIDIA GeForce RTX 5090"
+    @staticmethod
+    def get_device_capability(i): return (12, 0)
+cuda = _Cuda()
+def zeros(*a, **k): return _T()
+'@ | Set-Content -LiteralPath (Join-Path $torchDir 'torch.py') -Encoding ascii
+
+    $env:PYTHONPATH = $torchDir
+    try {
+        $matched = Test-RsTorchCuda -VenvPython $realPython.Source -ProjectRoot $torchDir
+    } finally {
+        if ($null -ne $savedPyPath) { $env:PYTHONPATH = $savedPyPath } else { Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue }
+    }
+    Assert-True -Name 'the matching build is called usable' -Condition $matched.Usable
+    Assert-True -Name 'every device is reported working' -Condition ($matched.Devices -notmatch 'FAILS')
+    Assert-True -Name 'the detail names the GPU count' -Condition ($matched.Detail -match '2 GPU')
+
+    # No CUDA device at all is the normal state on the API profile.
+    @'
+__version__ = "2.7.1+cpu"
+class _Cuda:
+    @staticmethod
+    def get_arch_list(): return []
+    @staticmethod
+    def is_available(): return False
+    @staticmethod
+    def device_count(): return 0
+cuda = _Cuda()
+'@ | Set-Content -LiteralPath (Join-Path $torchDir 'torch.py') -Encoding ascii
+
+    $env:PYTHONPATH = $torchDir
+    try {
+        $cpuOnly = Test-RsTorchCuda -VenvPython $realPython.Source -ProjectRoot $torchDir
+    } finally {
+        if ($null -ne $savedPyPath) { $env:PYTHONPATH = $savedPyPath } else { Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue }
+    }
+    Assert-True -Name 'a CPU build is reported without alarm' -Condition ($cpuOnly.Ok -and -not $cpuOnly.Usable)
+    Assert-True -Name 'a CPU build says so plainly' -Condition ($cpuOnly.Detail -match 'no CUDA device')
+} else {
+    Write-Host '  SKIP  no python interpreter available for the torch checks' -ForegroundColor Yellow
+}
+
+$noTorch = Test-RsTorchCuda -VenvPython (Join-Path $tmpRoot 'no-such-python.exe') -ProjectRoot $tmpRoot
+Assert-True -Name 'a missing interpreter is reported, not thrown' -Condition (-not $noTorch.Ok)
 
 # ==========================================================================
 Write-Host "`n== Logging and summary ==" -ForegroundColor Cyan

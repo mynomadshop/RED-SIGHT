@@ -314,13 +314,13 @@ if (-not $ApiProvider -or $ApiProvider -eq 'lmstudio') {
 Invoke-RsStep -Name 'Recording the desktop visual-effects budget' -Action {
     $effects = $UiEffects
     if (-not $effects) {
-        # Without a discrete NVIDIA GPU the ambient layer costs more than it is
-        # worth; with one, keep what the product ships.
-        $nvidiaCount = 0
-        if ($hw -and $hw.gpu -and $hw.gpu.PSObject.Properties['nvidiaGpuCount']) {
-            $nvidiaCount = [int]$hw.gpu.nvidiaGpuCount
-        }
-        $effects = if ($nvidiaCount -gt 0) { 'full' } else { 'reduced' }
+        # Reduced regardless of the GPU. The ambient layer's cost is not the
+        # GPU's fill rate: it is a translucent, antialiased repaint of the whole
+        # window driven from the Qt GUI thread, so it competes with input
+        # handling on any machine. The lag that prompted this was reported on a
+        # dual RTX 5090 desktop. Full remains available in the wizard and in
+        # Settings for anyone who wants the shipped look back.
+        $effects = 'reduced'
     }
     $config = Read-RsLmStudioConfig
     $config['ui_effects'] = $effects
@@ -429,6 +429,33 @@ if (-not $python) {
                 }
             }
         } | Out-Null
+
+        if ($plan.Profile -eq 'cuda') {
+            # "A CUDA build is installed" is not the same claim as "the GPUs
+            # work": a wheel without kernels for the installed architecture
+            # imports fine, reports torch.cuda.is_available() == True, and then
+            # fails on the first operation. Ask the real question.
+            Invoke-RsStep -Name 'Verifying that PyTorch can use this GPU' -Action {
+                $t = Test-RsTorchCuda -VenvPython $uiPython -ProjectRoot $ProjectRoot
+                Set-RsSummary -Key 'torchVersion' -Value $t.Version
+                Set-RsSummary -Key 'torchCudaUsable' -Value $t.Usable
+                Set-RsSummary -Key 'torchDetail' -Value $t.Detail
+                Set-RsSummary -Key 'torchDevices' -Value $t.Devices
+                if ($t.Devices) { Write-RsLog "    $($t.Devices)" -Level INFO }
+                if ($t.Usable) {
+                    Write-RsLog "    $($t.Detail)" -Level OK
+                    return
+                }
+                # Not fatal: RedSight runs on CPU, only slower. But it must be
+                # said plainly rather than left to surface as a runtime error.
+                Write-RsLog "    $($t.Detail)" -Level WARN
+                if ($plan.ComputeCap) {
+                    Write-RsLog "    this machine reports compute capability $($plan.ComputeCap)" -Level WARN
+                }
+                Write-RsLog '    re-run setup with -RecreateVenvs to install the matching build' -Level WARN
+                throw $t.Detail
+            } | Out-Null
+        }
 
         if ($effectiveRuntime -eq 'native') {
             Invoke-RsStep -Name 'Verifying the native backend environment' -Action {
@@ -652,6 +679,13 @@ if ($sum['lmStudioModel']) {
     Write-RsLog 'LM Studio model : none loaded - load one in LM Studio' -Level WARN
 }
 Write-RsLog "Visual effects  : $(if ($sum['uiEffects']) { $sum['uiEffects'] } else { 'reduced' })"
+if ($plan.Profile -eq 'cuda') {
+    if ($sum['torchCudaUsable']) {
+        Write-RsLog "GPU acceleration: $($sum['torchDetail'])"
+    } else {
+        Write-RsLog "GPU acceleration: NOT WORKING - $(if ($sum['torchDetail']) { $sum['torchDetail'] } else { 'not verified' })" -Level WARN
+    }
+}
 if (-not $sum['lmStudioReachable']) {
     Write-RsLog '  Start LM Studio, switch on its local server (Developer tab), then use' -Level INFO
     Write-RsLog '  Settings -> LM Studio in RedSight to test and pick a model.' -Level INFO
