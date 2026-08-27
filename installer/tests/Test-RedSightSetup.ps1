@@ -1354,6 +1354,28 @@ if ($repairText) {
 }
 
 # ==========================================================================
+Write-Host "`n== A container port proxy is not a foreign service ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# In container mode the backend runs inside the container and Docker publishes
+# the port through wslrelay.exe, so the host listener is never a RedSight
+# process. Calling that a foreign holder told the user to kill Docker's proxy.
+if ($repairText) {
+    Assert-True -Name 'the Docker/WSL port proxies are recognised' `
+                -Condition ($repairText -match "wslrelay\.exe" -and $repairText -match 'com\.docker\.backend\.exe')
+    Assert-True -Name 'vpnkit and dockerd are recognised too' `
+                -Condition ($repairText -match 'vpnkit\.exe' -and $repairText -match 'dockerd\.exe')
+    Assert-True -Name 'a proxy-published port is reported as healthy, not as a fault' `
+                -Condition ($repairText -match "(?s)\`$proxyNames -contains.*?Status 'ok'")
+    Assert-True -Name 'the proxy case is checked before the foreign-holder case' `
+                -Condition ($repairText -match "(?s)\`$proxyNames -contains.*?continue.*?Status 'problem'")
+    Assert-True -Name 'GPU acceleration is reported by the repair tool as well' `
+                -Condition ($repairText -match 'Test-RsTorchCuda')
+    Assert-True -Name 'an unusable GPU build says a reinstall is needed, not a local repair' `
+                -Condition ($repairText -match '11\.5\.1 or later')
+}
+
+# ==========================================================================
 Write-Host "`n== Logging and summary ==" -ForegroundColor Cyan
 # ==========================================================================
 

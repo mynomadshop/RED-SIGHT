@@ -440,6 +440,31 @@ if (Test-Path -LiteralPath $logDir) {
 }
 
 # ==========================================================================
+# 6b. GPU acceleration
+# ==========================================================================
+
+if (Test-Path -LiteralPath $uiPython) {
+    Write-RsLog ''
+    Write-RsLog '--- GPU acceleration ---' -Level STEP
+    $torch = Test-RsTorchCuda -VenvPython $uiPython -ProjectRoot $ProjectRoot
+    if (-not $torch.Ok) {
+        Add-Finding -Area 'gpu' -Status 'info' -Detail $torch.Detail
+    } elseif ($torch.Usable) {
+        Add-Finding -Area 'gpu' -Status 'ok' -Detail $torch.Detail
+    } elseif ($torch.Devices) {
+        # A wheel with no kernels for the installed architecture imports fine and
+        # reports CUDA as available; only a real allocation exposes it.
+        Add-Finding -Area 'gpu' -Status 'problem' -Detail $torch.Detail `
+            -Fix ('Re-run the installer from 11.5.1 or later, which picks the wheel from ' +
+                  'the GPU architecture. This cannot be repaired from here: it needs the ' +
+                  'matching PyTorch build downloaded.')
+        Write-RsLog "        $($torch.Devices)" -Level FAIL
+    } else {
+        Add-Finding -Area 'gpu' -Status 'info' -Detail $torch.Detail
+    }
+}
+
+# ==========================================================================
 # 7. Services
 # ==========================================================================
 
@@ -521,6 +546,22 @@ foreach ($name in $services.Keys) {
         }
     }
 
+    # In container mode the backend runs inside the container and Docker
+    # publishes the port on the host through its own proxy, so the listener is
+    # never a RedSight process and never has this installation's path. Calling
+    # that a foreign holder is wrong: it is exactly how a containerized install
+    # is supposed to look.
+    if (-not $belongsHere -and $holder) {
+        $proxyNames = @('wslrelay.exe', 'com.docker.backend.exe', 'vpnkit.exe',
+                        'com.docker.proxy.exe', 'docker.exe', 'dockerd.exe', 'svchost.exe')
+        if ($proxyNames -contains $holder.Name.ToLowerInvariant()) {
+            Add-Finding -Area 'services' -Status 'ok' `
+                -Detail ("$name is answering, published by $($holder.Name) - the container " +
+                         'port proxy, which is how container mode looks')
+            continue
+        }
+    }
+
     if ($belongsHere) {
         Add-Finding -Area 'services' -Status 'ok' -Detail "$name is answering, from this installation (pid $($holder.Pid))"
     } elseif ($holder) {
@@ -528,9 +569,11 @@ foreach ($name in $services.Keys) {
         Add-Finding -Area 'services' -Status 'problem' `
             -Detail ("port $($spec.Port) is held by pid $($holder.Pid) ($($holder.Name)) started from " +
                      "$(if ($from) { $from } else { '(unknown path)' }), which is NOT this installation") `
-            -Fix ("This installation's own backend cannot bind the port and exits with " +
-                  "[Errno 10048]; the UI then talks to the other one. Stop it with " +
-                  "'Stop-Process -Id $($holder.Pid)', or re-run with -StopOtherInstances.")
+            -Fix ("This installation's own service cannot bind the port and exits with " +
+                  "[Errno 10048], so the UI talks to the other one - which resolves file " +
+                  "actions and exports against its own directory, not this one. Stop it " +
+                  "with 'Stop-Process -Id $($holder.Pid)' and relaunch RedSight, or re-run " +
+                  'with -StopOtherInstances.')
         if ($line) { Write-RsLog "        command line: $line" -Level WARN }
     } else {
         Add-Finding -Area 'services' -Status 'ok' -Detail "$name is answering"
