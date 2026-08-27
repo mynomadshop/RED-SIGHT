@@ -6,7 +6,7 @@
 ;  offline wheelhouse into a staging tree and then invokes ISCC on this script.
 ;
 ;  Required preprocessor defines (all supplied by Build-Installer.ps1):
-;    AppVersion   product version, e.g. 11.5.3
+;    AppVersion   product version, e.g. 11.5.4
 ;    PayloadDir   staged application tree that becomes {app}
 ;    OutputDir    where the compiled setup exe is written
 ;    OutputBase   base name of the setup exe
@@ -16,7 +16,7 @@
 ; ===========================================================================
 
 #ifndef AppVersion
-  #define AppVersion "11.5.3"
+  #define AppVersion "11.5.4"
 #endif
 #ifndef PayloadDir
   #error PayloadDir must be defined (pass /DPayloadDir=... to ISCC)

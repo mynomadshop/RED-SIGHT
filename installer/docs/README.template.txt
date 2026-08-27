@@ -115,6 +115,17 @@ wired to each other, so each is described plainly below.
     with two copies.
 
 
+FIXED IN 11.5.4 - THE REGISTRY DECIDES WHICH INSTALL IS YOURS
+-------------------------------------------------------------
+  * Pointed at the wrong folder, the diagnostics tool used to advise
+    keeping that folder and retiring the real installation, and it
+    "corrected" a shortcut that was already right. Now, whatever it is
+    pointed at, the installation Windows recorded wins: a mismatch is
+    announced in a banner before anything else, the keep-this-one advice
+    names the recorded install, and a shortcut targeting the recorded
+    install is left alone.
+
+
 FIXED IN 11.5.3 - THE DIAGNOSTICS TOOL IGNORED -ProjectRoot
 ------------------------------------------------------------
   * Repair-RedSight.ps1, the health check and the bootstrap all

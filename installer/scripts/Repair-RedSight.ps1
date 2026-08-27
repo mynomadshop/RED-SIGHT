@@ -176,17 +176,38 @@ Add-Install -Path $ProjectRoot
 
 # What Windows records for the installer's own product code.
 $uninstallKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{B6C1E9C2-6E2E-4C7B-9B2C-REDSIGHT01}_is1'
+$recordedInstall = ''
 foreach ($hive in @('HKLM:\', 'HKCU:\')) {
     $key = $hive + $uninstallKey
     try {
         if (Test-Path -LiteralPath $key) {
             $recorded = (Get-ItemProperty -LiteralPath $key -ErrorAction Stop).InstallLocation
             if ($recorded) {
+                $recorded = $recorded.TrimEnd('\')
+                if (-not $recordedInstall) { $recordedInstall = $recorded }
                 Add-Finding -Area 'registry' -Status 'info' -Detail "Windows records the installation at $recorded"
                 Add-Install -Path $recorded
             }
         }
     } catch { }
+}
+
+# The most consequential thing this tool can get wrong is repairing the wrong
+# tree, so say plainly when the directory being examined is not the one Windows
+# recorded. Nothing below is trustworthy if this is unintentional.
+if ($recordedInstall -and ($recordedInstall.ToLowerInvariant() -ne $ProjectRoot.ToLowerInvariant())) {
+    Add-Finding -Area 'target' -Status 'problem' `
+        -Detail ("this run is examining $ProjectRoot, but Windows records the installation at " +
+                 "$recordedInstall - they are different directories") `
+        -Fix ("If you meant the installed copy, stop and re-run with:`n" +
+              "          -ProjectRoot `"$recordedInstall`"")
+    Write-RsLog ''
+    Write-RsLog ('!' * 72) -Level FAIL
+    Write-RsLog "  Examining : $ProjectRoot" -Level FAIL
+    Write-RsLog "  Installed : $recordedInstall" -Level FAIL
+    Write-RsLog '  These differ. Repairs would be applied to the first one.' -Level FAIL
+    Write-RsLog ('!' * 72) -Level FAIL
+    Write-RsLog ''
 }
 
 # The usual places, plus wherever the user profile keeps one.
@@ -205,11 +226,17 @@ foreach ($candidate in $candidates) { Add-Install -Path $candidate }
 if ($installs.Count -le 1) {
     Add-Finding -Area 'installations' -Status 'ok' -Detail "one RedSight installation: $ProjectRoot"
 } else {
-    $others = @($installs | Where-Object { $_.ToLowerInvariant() -ne $ProjectRoot.ToLowerInvariant() })
+    # Recommend keeping the installation Windows recorded, not whichever
+    # directory this run was pointed at - that advice once told the user to keep
+    # a git clone and retire their real install.
+    $keep = if ($recordedInstall) { $recordedInstall } else { $ProjectRoot }
+    $others = @($installs | Where-Object { $_.ToLowerInvariant() -ne $keep.ToLowerInvariant() })
+    $why = if ($recordedInstall) { ' (the one Windows recorded, and the one the Start Menu targets)' } else { '' }
     Add-Finding -Area 'installations' -Status 'problem' `
         -Detail ("$($installs.Count) RedSight trees exist on this device: " + ($installs -join ' | ')) `
-        -Fix ('Keep ' + $ProjectRoot + ' and remove or rename the others: ' + ($others -join ', ') +
-              '. Two trees is the usual reason a shortcut launches the wrong one.')
+        -Fix ("Keep $keep$why and remove or rename the others: " + ($others -join ', ') +
+              '. More than one tree is the usual reason a shortcut launches the wrong one, ' +
+              'and their leftover backends hold the ports this one needs.')
 }
 
 # ==========================================================================
@@ -241,8 +268,15 @@ foreach ($lnk in $shortcutPaths) {
         $args = "$($sc.Arguments)"
         $work = "$($sc.WorkingDirectory)".TrimEnd('\')
         $pointsHere = ($args -like "*$ProjectRoot*") -or ($work.ToLowerInvariant() -eq $ProjectRoot.ToLowerInvariant())
+        $pointsAtRecorded = $recordedInstall -and (($args -like "*$recordedInstall*") -or
+                                                  ($work.ToLowerInvariant() -eq $recordedInstall.ToLowerInvariant()))
         if ($pointsHere) {
             Add-Finding -Area 'shortcuts' -Status 'ok' -Detail "$(Split-Path -Leaf $lnk) -> $args"
+        } elseif ($pointsAtRecorded) {
+            # Correct on its own terms: it targets the installation Windows
+            # recorded. Repointing it at this run's directory would break it.
+            Add-Finding -Area 'shortcuts' -Status 'info' `
+                -Detail "$(Split-Path -Leaf $lnk) targets the recorded installation $recordedInstall, not $ProjectRoot"
         } else {
             $badShortcuts.Add($lnk)
             Add-Finding -Area 'shortcuts' -Status 'problem' `

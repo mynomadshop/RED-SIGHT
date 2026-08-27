@@ -1328,6 +1328,32 @@ if (Test-Path -LiteralPath $repairScript) {
 }
 
 # ==========================================================================
+Write-Host "`n== The repair tool trusts the registry over its argument ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Pointed at the wrong tree, the tool once advised keeping that tree and
+# retiring the real installation, and repointed a correct shortcut at it. The
+# recorded installation has to win every piece of advice.
+$repairText = ''
+$repairPath = Join-Path $scripts 'Repair-RedSight.ps1'
+if (Test-Path -LiteralPath $repairPath) { $repairText = Get-Content -LiteralPath $repairPath -Raw }
+
+if ($repairText) {
+    Assert-True -Name 'the recorded installation is captured from the registry' `
+                -Condition ($repairText -match '\$recordedInstall\s*=')
+    Assert-True -Name 'a mismatch between argument and registry is reported as a problem' `
+                -Condition ($repairText -match "Add-Finding -Area 'target' -Status 'problem'")
+    Assert-True -Name 'the mismatch is shouted, not buried in a list' `
+                -Condition ($repairText -match "\('!' \* 72\)")
+    Assert-True -Name 'the keep-this-one advice prefers the recorded installation' `
+                -Condition ($repairText -match '\$keep\s*=\s*if\s*\(\$recordedInstall\)\s*\{\s*\$recordedInstall\s*\}')
+    Assert-True -Name 'a shortcut targeting the recorded installation is not called wrong' `
+                -Condition ($repairText -match '\$pointsAtRecorded')
+    Assert-True -Name 'and such a shortcut is not offered for repointing' `
+                -Condition ($repairText -match "(?s)\`$pointsAtRecorded\s*\)\s*\{.*?Status 'info'")
+}
+
+# ==========================================================================
 Write-Host "`n== Logging and summary ==" -ForegroundColor Cyan
 # ==========================================================================
 

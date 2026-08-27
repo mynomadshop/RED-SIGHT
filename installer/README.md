@@ -235,6 +235,11 @@ that it refuses to treat a checkout as an installation: rewriting install paths
 inside one edits tracked files and repoints shortcuts at a tree that was never
 installed.
 
+Whatever it is pointed at, the installation Windows recorded in the registry
+wins every piece of advice: if the two differ it says so in a banner before
+anything else, recommends keeping the recorded one, and leaves a shortcut that
+targets the recorded one alone rather than "correcting" it.
+
 ### A leftover backend is the other common cause
 
 `uvicorn` reporting `[Errno 10048] error while attempting to bind on address
@@ -348,11 +353,11 @@ on the `windows-latest` runner via `.github/workflows/build-windows-installer.ym
 
 ```powershell
 # from a source tree
-pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.3
+pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.4
 
 # reusing the payload of the previously shipped installer
 pwsh -File installer/build/Build-Installer.ps1 `
-     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.3
+     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.4
 ```
 
 Useful switches:
@@ -378,12 +383,12 @@ snapshot; that class of leftover is now removed by pattern rather than by hand.
 ## Testing
 
 ```bash
-pwsh -File installer/tests/Test-RedSightSetup.ps1   # 331 assertions
+pwsh -File installer/tests/Test-RedSightSetup.ps1   # 337 assertions
 pwsh -File installer/tests/Test-IssScript.ps1       #  76 static checks
 python3 installer/tests/test_app_overlay.py         #  96 assertions
 ```
 
-503 assertions covering version parsing and gating, the install-path rewriter
+509 assertions covering version parsing and gating, the install-path rewriter
 (plain, JSON-escaped and forward-slash forms, exclusions, idempotency), `.env`
 seeding, retry/backoff behaviour, process timeout and exit-code handling, the
 venv import probe, bundled-Python provisioning (hash verification, tamper
