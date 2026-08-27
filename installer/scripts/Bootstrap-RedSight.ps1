@@ -101,8 +101,15 @@ $ErrorActionPreference = 'Stop'
 # --------------------------------------------------------------------------
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+
+# Captured before dot-sourcing: RedSight-Preflight.ps1 declares its own
+# [string]$ProjectRoot, and a dot-sourced param() block runs in this scope and
+# would reset ours to ''. The installer passes -ProjectRoot "{app}".
+$requestedRoot = if ($PSBoundParameters.ContainsKey('ProjectRoot')) { $ProjectRoot } else { '' }
+
 . (Join-Path $scriptDir 'RedSight-Preflight.ps1')
 
+$ProjectRoot = $requestedRoot
 if (-not $ProjectRoot) {
     # $Root is historically scripts\windows; the project root is two levels up.
     $base = if ($Root) { $Root } else { $scriptDir }

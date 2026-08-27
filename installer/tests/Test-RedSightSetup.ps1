@@ -1190,21 +1190,31 @@ Set-Content -LiteralPath (Join-Path $selfRoot 'redsight-payload.json') -Value $s
 Assert-Equal -Name 'a payload built in place rewrites nothing' -Expected 0 `
              -Actual (Repair-RsHardcodedPaths -ProjectRoot $selfRoot).Rewritten
 
-# Our own setup scripts hold no install paths, only prose about them; a literal
-# example in one of them made the health check fail on every fresh install.
+# A literal install path in one of our own scripts made the health check report
+# a stale reference on every fresh install. The invariant that prevents it: a
+# setup script either contains no such literal, or is excluded from the rewrite
+# by name. Every one of them must satisfy one of the two.
 $scriptNames = @('RedSight-Common.ps1', 'RedSight-Hardware.ps1', 'RedSight-LmStudio.ps1',
                  'RedSight-Provision.ps1', 'RedSight-Preflight.ps1', 'Bootstrap-RedSight.ps1',
                  'Verify-RedSightSetup.ps1', 'Start-RedSight.ps1', 'Repair-RedSight.ps1',
                  'Uninstall-RedSightDocker.ps1')
-$literalOffenders = New-Object System.Collections.Generic.List[string]
+$preflightText = Get-Content -LiteralPath (Join-Path $scripts 'RedSight-Preflight.ps1') -Raw
+$unguarded = New-Object System.Collections.Generic.List[string]
 foreach ($name in $scriptNames) {
     $path = Join-Path $scripts $name
     if (-not (Test-Path -LiteralPath $path)) { continue }
+    $excludedByName = $preflightText -match ("'" + [regex]::Escape($name) + "'")
+    if ($excludedByName) { continue }
     $text = Get-Content -LiteralPath $path -Raw
-    if ($text -match '[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*?RedSight[\\"'']') { $literalOffenders.Add($name) }
+    if ($text -match '[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*?RedSight[\\"'']') { $unguarded.Add($name) }
 }
-Assert-True -Name 'no setup script contains a rewritable install-path literal' `
-            -Condition ($literalOffenders.Count -eq 0)
+Assert-True -Name 'every setup script is either excluded from the rewrite or free of install-path literals' `
+            -Condition ($unguarded.Count -eq 0)
+foreach ($name in $scriptNames) {
+    if (-not (Test-Path -LiteralPath (Join-Path $scripts $name))) { continue }
+    Assert-True -Name "$name is excluded from the path rewrite" `
+                -Condition ($preflightText -match ("'" + [regex]::Escape($name) + "'"))
+}
 
 # ==========================================================================
 Write-Host "`n== Working directory placement ==" -ForegroundColor Cyan
@@ -1253,6 +1263,68 @@ try {
                 -Condition (Test-Path -LiteralPath (Join-Path $clean 'outputs'))
 } finally {
     if ($null -ne $savedProfile) { $env:USERPROFILE = $savedProfile }
+}
+
+# ==========================================================================
+Write-Host "`n== -ProjectRoot survives dot-sourcing ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# A dot-sourced script's param() block runs in the caller's scope, so
+# RedSight-Preflight.ps1's own [string]$ProjectRoot silently reset the value
+# every one of these scripts had bound - and they then inspected, and repaired,
+# the wrong directory.
+$dotTarget = Join-Path $tmpRoot 'dot-target'
+New-Item -ItemType Directory -Path $dotTarget -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $dotTarget 'docker-compose.yml') -Value 'services: {}' -Encoding ascii
+
+foreach ($name in @('Repair-RedSight.ps1', 'Verify-RedSightSetup.ps1', 'Bootstrap-RedSight.ps1')) {
+    $path = Join-Path $scripts $name
+    if (-not (Test-Path -LiteralPath $path)) { continue }
+    $text = Get-Content -LiteralPath $path -Raw
+    # Single-quoted: these regexes contain PowerShell variable names that must
+    # not be interpolated.
+    $captureRx = '(?s)\$requestedRoot\s*=.*?ContainsKey\(''ProjectRoot''\).*?\.\s*\(Join-Path\s+\$scriptDir\s+''RedSight-Preflight\.ps1''\)'
+    $restoreRx = '(?s)RedSight-Preflight\.ps1''\).*?\$ProjectRoot\s*=\s*\$requestedRoot'
+    Assert-True -Name "$name captures -ProjectRoot before dot-sourcing" -Condition ($text -match $captureRx)
+    Assert-True -Name "$name restores it afterwards" -Condition ($text -match $restoreRx)
+}
+
+# ==========================================================================
+Write-Host "`n== A source checkout is not an installation ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Running the repair against a git clone rewrote 88 files inside it and
+# repointed the Desktop shortcut into a tree that was never installed.
+$repairScript = Join-Path $scripts 'Repair-RedSight.ps1'
+if (Test-Path -LiteralPath $repairScript) {
+    $checkout = Join-Path $tmpRoot 'checkout'
+    New-Item -ItemType Directory -Path (Join-Path $checkout 'installer\build') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $checkout 'docker-compose.yml') -Value 'services: {}' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $checkout 'installer\build\Build-Installer.ps1') -Value '# build' -Encoding ascii
+
+    $pwsh = (Get-Process -Id $PID).Path
+    $refusal = & $pwsh -NoLogo -NoProfile -File $repairScript -ProjectRoot $checkout 2>&1 | Out-String
+    Assert-True -Name 'a checkout is refused' -Condition ($refusal -match 'source checkout, not an installation')
+    Assert-True -Name 'the refusal says nothing was changed' -Condition ($refusal -match 'nothing was changed')
+    Assert-True -Name 'the refusal is readable, not a PowerShell error dump' `
+                -Condition ($refusal -notmatch 'ParserError|Exception|at line:')
+    Assert-True -Name 'the checkout is left untouched' `
+                -Condition (-not (Test-Path -LiteralPath (Join-Path $checkout '.env')))
+
+    # An installed payload carries the manifest, so it is accepted even if the
+    # app source happened to include the installer directory.
+    $installed = Join-Path $tmpRoot 'installed-with-installer-dir'
+    New-Item -ItemType Directory -Path (Join-Path $installed 'installer\build') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $installed 'docker-compose.yml') -Value 'services: {}' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $installed 'installer\build\Build-Installer.ps1') -Value '# build' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $installed 'redsight-payload.json') -Value '{"sourceRoot":"C:\\x"}' -Encoding ascii
+    $accepted = & $pwsh -NoLogo -NoProfile -File $repairScript -ProjectRoot $installed 2>&1 | Out-String
+    Assert-True -Name 'an installed payload is accepted' -Condition ($accepted -notmatch 'source checkout')
+    Assert-True -Name 'and it reports against the directory it was given' `
+                -Condition ($accepted -match [regex]::Escape($installed))
+
+    $missing = & $pwsh -NoLogo -NoProfile -File $repairScript -ProjectRoot (Join-Path $tmpRoot 'nope') 2>&1 | Out-String
+    Assert-True -Name 'a missing directory is refused readably' -Condition ($missing -match 'does not exist')
 }
 
 # ==========================================================================

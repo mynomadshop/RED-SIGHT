@@ -115,6 +115,37 @@ wired to each other, so each is described plainly below.
     with two copies.
 
 
+FIXED IN 11.5.3 - THE DIAGNOSTICS TOOL IGNORED -ProjectRoot
+------------------------------------------------------------
+  * Repair-RedSight.ps1, the health check and the bootstrap all
+    accepted -ProjectRoot and then silently discarded it. A dot-sourced
+    PowerShell script's param() block runs in the caller's scope, so
+    RedSight-Preflight.ps1's own -ProjectRoot reset theirs to empty and
+    each fell back to guessing the directory two levels above itself.
+    Run from a source checkout with -ProjectRoot pointing at the real
+    installation, the repair tool therefore examined - and repaired -
+    the checkout.
+
+    All three now capture the value before dot-sourcing anything.
+
+  * The repair tool refuses to treat a source checkout as an
+    installation, and says which directory to use instead, reading it
+    from the registry where possible. Rewriting install paths inside a
+    checkout edits its tracked files and repoints shortcuts at a tree
+    that was never installed.
+
+  * The diagnostics now name the process holding ports 8000 and 8765 and
+    which installation it was started from. A leftover backend from an
+    older RedSight folder makes this one exit with
+
+        [Errno 10048] error while attempting to bind on address
+        ('127.0.0.1', 8000)
+
+    and the UI then talks to the old backend - a different .env, a
+    different data folder, possibly a different LM Studio. Re-run with
+    -StopOtherInstances to free the port.
+
+
 FIXED IN 11.5.2 - MIXED-UP INSTALLATIONS, AND A REPAIR TOOL
 -----------------------------------------------------------
   * "Some file points to the older installation." Setup rewrites the

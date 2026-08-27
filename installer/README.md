@@ -226,7 +226,23 @@ that matters when the UI will not start:
 `-Fix` rewrites paths, re-creates the shortcut against this installation, moves
 a colliding working directory (never touching its contents), and re-installs
 the runtime configuration into both virtualenvs. `-RecreateVenv` additionally
-rebuilds `.venv-ui` from scratch.
+rebuilds `.venv-ui` from scratch. `-StopOtherInstances` ends a RedSight process
+from a different tree that is holding port 8000 or 8765 — separate from `-Fix`
+because it stops a running program.
+
+**Always pass `-ProjectRoot` when running it from a source checkout**, and note
+that it refuses to treat a checkout as an installation: rewriting install paths
+inside one edits tracked files and repoints shortcuts at a tree that was never
+installed.
+
+### A leftover backend is the other common cause
+
+`uvicorn` reporting `[Errno 10048] error while attempting to bind on address
+('127.0.0.1', 8000)` means the port is already taken — normally by a backend
+from an older RedSight tree. This installation's backend then exits, and the UI
+talks to the old one, which is reading a different `.env`, a different data root
+and possibly a different LM Studio endpoint. The diagnostics name the process
+holding each port and which installation it came from.
 
 ### Two installations on one device
 
@@ -332,11 +348,11 @@ on the `windows-latest` runner via `.github/workflows/build-windows-installer.ym
 
 ```powershell
 # from a source tree
-pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.2
+pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.3
 
 # reusing the payload of the previously shipped installer
 pwsh -File installer/build/Build-Installer.ps1 `
-     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.2
+     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.3
 ```
 
 Useful switches:
@@ -362,12 +378,12 @@ snapshot; that class of leftover is now removed by pattern rather than by hand.
 ## Testing
 
 ```bash
-pwsh -File installer/tests/Test-RedSightSetup.ps1   # 228 assertions
+pwsh -File installer/tests/Test-RedSightSetup.ps1   # 331 assertions
 pwsh -File installer/tests/Test-IssScript.ps1       #  76 static checks
 python3 installer/tests/test_app_overlay.py         #  96 assertions
 ```
 
-480 assertions covering version parsing and gating, the install-path rewriter
+503 assertions covering version parsing and gating, the install-path rewriter
 (plain, JSON-escaped and forward-slash forms, exclusions, idempotency), `.env`
 seeding, retry/backoff behaviour, process timeout and exit-code handling, the
 venv import probe, bundled-Python provisioning (hash verification, tamper
@@ -379,7 +395,9 @@ native launcher (uvicorn-served gateway, health waits, no proxy on loopback),
 launcher dispatch, the runtime `.pth` installation, the wizard's
 one-installation-per-device guard, the PyTorch wheel index chosen per GPU
 architecture and the check that proves torch can really run the installed
-cards, progress reporting for long child processes, and the overlay's probe
+cards, progress reporting for long child processes, -ProjectRoot surviving the
+dot-source of a script that declares its own, the refusal to treat a source
+checkout as an installation, and the overlay's probe
 redirection, cached sampling and effects budget. These run on Linux too, which is why they gate the
 Windows build job.
 

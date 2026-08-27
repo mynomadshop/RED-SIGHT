@@ -22,8 +22,11 @@
       4. the environment the UI and the backend will actually see - the LM
          Studio endpoint above all, which is read from the process
          environment and not from .env
-      5. the services the UI needs: the backend on 8000 and the action/memory
-         gateway on 8765
+      5. the services the UI needs - the backend on 8000 and the action/memory
+         gateway on 8765 - including which installation the process holding
+         each port was started from, because a leftover backend from an older
+         tree makes this one exit with [Errno 10048] while the UI happily talks
+         to the old one
 
     Every repair is idempotent. Nothing is deleted without -Fix, and the
     working directory's contents are never touched.
@@ -36,6 +39,10 @@ param(
     # Recreate .venv-ui from scratch. Slow (it reinstalls every wheel) and only
     # needed when the environment itself is broken rather than misconfigured.
     [switch]$RecreateVenv,
+    # Stop a RedSight process from another installation that is holding one of
+    # the ports this installation needs. Separate from -Fix because it ends a
+    # running program.
+    [switch]$StopOtherInstances,
     [switch]$Json
 )
 
@@ -43,12 +50,83 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+
+# Capture what the caller asked for BEFORE dot-sourcing anything. A dot-sourced
+# script's param() block runs in this scope, so RedSight-Preflight.ps1's own
+# [string]$ProjectRoot resets ours to '' - and the tool then silently inspects
+# the wrong directory.
+$requestedRoot = if ($PSBoundParameters.ContainsKey('ProjectRoot')) { $ProjectRoot } else { '' }
+
 . (Join-Path $scriptDir 'RedSight-Preflight.ps1')
 
+$ProjectRoot = $requestedRoot
 if (-not $ProjectRoot) {
     $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir '..\..'))
 }
-$ProjectRoot = $ProjectRoot.TrimEnd('\')
+function Write-Refusal {
+    <# A readable message, not a PowerShell error dump. #>
+    # Not Mandatory: a mandatory array parameter rejects the blank lines that
+    # make the message readable.
+    param([string[]]$Lines = @())
+    Write-Host ''
+    foreach ($line in $Lines) { Write-Host $line -ForegroundColor Yellow }
+    Write-Host ''
+}
+
+if (-not (Test-Path -LiteralPath $ProjectRoot)) {
+    Write-Refusal @(
+        "That directory does not exist: $ProjectRoot",
+        '',
+        'Pass the installed copy with -ProjectRoot, for example:',
+        '    -ProjectRoot "D:\RedSight"'
+    )
+    exit 2
+}
+$ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path.TrimEnd('\')
+
+# A source checkout is not an installation. Rewriting install paths inside one
+# edits tracked files and points shortcuts at a tree that was never installed.
+# A .git directory settles it; an installer/ tree with no payload manifest is a
+# checkout of an older layout. An installed payload carries the manifest and
+# never carries .git, which the build prunes.
+$checkoutMarker = ''
+if (Test-Path -LiteralPath (Join-Path $ProjectRoot '.git')) {
+    $checkoutMarker = '.git'
+} elseif ((Test-Path -LiteralPath (Join-Path $ProjectRoot 'installer\build\Build-Installer.ps1')) -and
+          -not (Test-Path -LiteralPath (Join-Path $ProjectRoot 'redsight-payload.json'))) {
+    $checkoutMarker = 'installer\build\Build-Installer.ps1 and no payload manifest'
+}
+
+if ($checkoutMarker) {
+    $recorded = ''
+    $key = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{B6C1E9C2-6E2E-4C7B-9B2C-REDSIGHT01}_is1'
+    foreach ($hive in @('HKLM:\', 'HKCU:\')) {
+        try {
+            if (Test-Path -LiteralPath ($hive + $key)) {
+                $value = (Get-ItemProperty -LiteralPath ($hive + $key) -ErrorAction Stop).InstallLocation
+                if ($value) { $recorded = $value.TrimEnd('\'); break }
+            }
+        } catch { }
+    }
+
+    $lines = @(
+        "$ProjectRoot is a RedSight source checkout, not an installation.",
+        "  (it contains $checkoutMarker)",
+        '',
+        'Nothing was changed. Rewriting install paths in a checkout would edit',
+        'its tracked files and point your shortcuts at a tree that was never',
+        'installed.'
+    )
+    if ($recorded) {
+        $lines += @('', 'Windows records your installation here. Run:', '',
+                    "    powershell -ExecutionPolicy Bypass -File `"$PSCommandPath`" -ProjectRoot `"$recorded`"")
+    } else {
+        $lines += @('', 'Pass the installed copy with -ProjectRoot, for example:',
+                    '    -ProjectRoot "D:\RedSight"')
+    }
+    Write-Refusal $lines
+    exit 2
+}
 
 Initialize-RsLog -Name 'repair' | Out-Null
 
@@ -348,16 +426,80 @@ function Test-LocalEndpoint {
     }
 }
 
-$services = [ordered]@{
-    'backend (8000)'                 = 'http://127.0.0.1:8000/api/v1/health'
-    'action/memory gateway (8765)'   = 'http://127.0.0.1:8765/memory/status'
+function Get-PortHolder {
+    <#
+        Which process is listening on a port, and where it was started from.
+
+        This is the check that explains "the backend will not start" when the
+        backend is in fact already running - from a different RedSight tree.
+        uvicorn reports [Errno 10048] and exits; the UI then talks to whatever
+        else owns the port.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Port)
+
+    $result = [pscustomobject]@{ Pid = 0; Name = ''; Path = ''; CommandLine = '' }
+    try {
+        $conn = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop |
+                  Select-Object -First 1)
+        if ($conn.Count -eq 0) { return $null }
+        $result.Pid = [int]$conn[0].OwningProcess
+    } catch {
+        return $null
+    }
+
+    try {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $($result.Pid)" -ErrorAction Stop
+        if ($proc) {
+            $result.Name = "$($proc.Name)"
+            $result.Path = "$($proc.ExecutablePath)"
+            $result.CommandLine = "$($proc.CommandLine)"
+        }
+    } catch { }
+    return $result
 }
+
+$services = [ordered]@{
+    'backend (8000)'               = @{ Url = 'http://127.0.0.1:8000/api/v1/health'; Port = 8000 }
+    'action/memory gateway (8765)' = @{ Url = 'http://127.0.0.1:8765/memory/status'; Port = 8765 }
+}
+
+$foreignHolders = New-Object System.Collections.Generic.List[object]
+
 foreach ($name in $services.Keys) {
-    if (Test-LocalEndpoint -Url $services[$name]) {
-        Add-Finding -Area 'services' -Status 'ok' -Detail "$name is answering"
-    } else {
+    $spec = $services[$name]
+    $answering = Test-LocalEndpoint -Url $spec.Url
+    $holder = Get-PortHolder -Port $spec.Port
+
+    if (-not $answering -and -not $holder) {
         Add-Finding -Area 'services' -Status 'info' `
             -Detail "$name is not answering (it is started by the RedSight launcher)"
+        continue
+    }
+
+    # Whose process is it? A path under this installation is what we want.
+    $from = if ($holder) { $holder.Path } else { '' }
+    $line = if ($holder) { $holder.CommandLine } else { '' }
+    $belongsHere = $false
+    foreach ($text in @($from, $line)) {
+        if ($text -and $text.ToLowerInvariant().Contains($ProjectRoot.ToLowerInvariant())) {
+            $belongsHere = $true
+        }
+    }
+
+    if ($belongsHere) {
+        Add-Finding -Area 'services' -Status 'ok' -Detail "$name is answering, from this installation (pid $($holder.Pid))"
+    } elseif ($holder) {
+        $foreignHolders.Add([pscustomobject]@{ Name = $name; Port = $spec.Port; Holder = $holder })
+        Add-Finding -Area 'services' -Status 'problem' `
+            -Detail ("port $($spec.Port) is held by pid $($holder.Pid) ($($holder.Name)) started from " +
+                     "$(if ($from) { $from } else { '(unknown path)' }), which is NOT this installation") `
+            -Fix ("This installation's own backend cannot bind the port and exits with " +
+                  "[Errno 10048]; the UI then talks to the other one. Stop it with " +
+                  "'Stop-Process -Id $($holder.Pid)', or re-run with -StopOtherInstances.")
+        if ($line) { Write-RsLog "        command line: $line" -Level WARN }
+    } else {
+        Add-Finding -Area 'services' -Status 'ok' -Detail "$name is answering"
     }
 }
 
@@ -417,6 +559,19 @@ if (-not $Fix) {
         if (Install-RsShortcuts -ProjectRoot $ProjectRoot -RuntimeMode $mode) {
             $actions.Add('desktop shortcut re-created against this installation')
         }
+    }
+
+    if ($StopOtherInstances -and $foreignHolders.Count) {
+        foreach ($entry in $foreignHolders) {
+            try {
+                Stop-Process -Id $entry.Holder.Pid -Force -ErrorAction Stop
+                $actions.Add("stopped pid $($entry.Holder.Pid) which held port $($entry.Port)")
+            } catch {
+                Write-RsLog "could not stop pid $($entry.Holder.Pid): $($_.Exception.Message)" -Level WARN
+            }
+        }
+    } elseif ($foreignHolders.Count) {
+        Write-RsLog 'a port is held by another installation; re-run with -StopOtherInstances to free it' -Level WARN
     }
 
     if ($RecreateVenv) {

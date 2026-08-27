@@ -21,8 +21,15 @@ param(
 Set-StrictMode -Version Latest
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+
+# Captured before dot-sourcing: RedSight-Preflight.ps1 declares its own
+# [string]$ProjectRoot, and a dot-sourced param() block runs in this scope and
+# would reset ours to ''.
+$requestedRoot = if ($PSBoundParameters.ContainsKey('ProjectRoot')) { $ProjectRoot } else { '' }
+
 . (Join-Path $scriptDir 'RedSight-Preflight.ps1')
 
+$ProjectRoot = $requestedRoot
 if (-not $ProjectRoot) {
     $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir '..\..'))
 }
