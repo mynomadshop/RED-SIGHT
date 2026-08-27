@@ -53,6 +53,18 @@ param(
     # Directory or file holding MCP server definitions to register.
     [string]$McpPath,
 
+    # Local LM Studio server. Left empty, setup probes the usual local
+    # endpoints and starts the server through the lms CLI if it finds one.
+    [string]$LmStudioUrl = '',
+    [string]$LmStudioModel = '',
+    [switch]$NoLmStudioAutoStart,
+
+    # full | reduced | off - how much animation the desktop UI runs. Reduced by
+    # default: the shipped ambient layer repaints the whole window twenty times
+    # a second through a translucent widget, which is felt as input lag on
+    # integrated graphics.
+    [ValidateSet('', 'full', 'reduced', 'off')][string]$UiEffects = '',
+
     # INI file carrying the installer wizard's answers. Used instead of passing
     # them as arguments so an API key never appears in a command line, the
     # process list, or the Inno Setup log.
@@ -130,6 +142,9 @@ if ($AnswerFile) {
         if (-not $ApiBaseUrl -and $answers['baseUrl']) { $ApiBaseUrl = $answers['baseUrl'] }
         if (-not $McpPath -and $answers['mcpPath']) { $McpPath = $answers['mcpPath'] }
         if (-not $HardwareProfile -and $answers['hardwareProfile']) { $HardwareProfile = $answers['hardwareProfile'] }
+        if (-not $LmStudioUrl -and $answers['lmStudioUrl']) { $LmStudioUrl = $answers['lmStudioUrl'] }
+        if (-not $LmStudioModel -and $answers['lmStudioModel']) { $LmStudioModel = $answers['lmStudioModel'] }
+        if (-not $UiEffects -and $answers['uiEffects']) { $UiEffects = $answers['uiEffects'] }
 
         $keyNote = if ($ApiKey) { 'yes' } else { 'no' }
         Write-RsLog "    profile=$SetupProfile runtime=$RuntimeMode provider=$ApiProvider apiKey=$keyNote" -Level DEBUG
@@ -280,6 +295,40 @@ if ($effectiveRuntime -eq 'native') {
 Set-RsSummary -Key 'runtimeMode' -Value $effectiveRuntime
 Set-RsSummary -Key 'runtimeModeReason' -Value $nativeReason
 
+# The local model server is what a "lmstudio" provider actually talks to. Its
+# endpoint has to be recorded whether or not it answers now: the launcher reads
+# the recorded value on every start, so switching LM Studio on later is enough.
+if (-not $ApiProvider -or $ApiProvider -eq 'lmstudio') {
+    Invoke-RsStep -Name 'Locating the LM Studio local server' -Action {
+        $lm = Resolve-RsLmStudio -BaseUrl $LmStudioUrl -Model $LmStudioModel `
+                                 -NoAutoStart:$NoLmStudioAutoStart
+        Set-RsSummary -Key 'lmStudioReachable' -Value $lm.Ok
+        Set-RsSummary -Key 'lmStudioUrl' -Value $lm.BaseUrl
+        Set-RsSummary -Key 'lmStudioModel' -Value $lm.Model
+        if (-not $lm.Ok) {
+            Write-RsLog '    RedSight will use this endpoint as soon as LM Studio is running' -Level INFO
+        }
+    } | Out-Null
+}
+
+Invoke-RsStep -Name 'Recording the desktop visual-effects budget' -Action {
+    $effects = $UiEffects
+    if (-not $effects) {
+        # Without a discrete NVIDIA GPU the ambient layer costs more than it is
+        # worth; with one, keep what the product ships.
+        $nvidiaCount = 0
+        if ($hw -and $hw.gpu -and $hw.gpu.PSObject.Properties['nvidiaGpuCount']) {
+            $nvidiaCount = [int]$hw.gpu.nvidiaGpuCount
+        }
+        $effects = if ($nvidiaCount -gt 0) { 'full' } else { 'reduced' }
+    }
+    $config = Read-RsLmStudioConfig
+    $config['ui_effects'] = $effects
+    Save-RsLmStudioConfig -Config $config | Out-Null
+    Set-RsSummary -Key 'uiEffects' -Value $effects
+    Write-RsLog "    visual effects: $effects" -Level OK
+} | Out-Null
+
 # --------------------------------------------------------------------------
 # 3. Install-path repair, .env and the working directory
 # --------------------------------------------------------------------------
@@ -340,6 +389,9 @@ if (-not $python) {
                                -RequirementFiles @((Join-Path $ProjectRoot 'requirements-desktop-stage11.txt')) `
                                -Wheelhouse $wheelhouse -OfflineOnly:$OfflineOnly -Recreate:$RecreateVenvs
         Set-RsSummary -Key 'venvUi' -Value $p
+        # Puts the recorded LM Studio endpoint into the environment of every
+        # process this interpreter starts, before any application code runs.
+        Install-RsRuntimeBootstrap -VenvPython $p -ProjectRoot $ProjectRoot | Out-Null
         return $p
     }
 
@@ -368,6 +420,14 @@ if (-not $python) {
                 throw $ui.Detail
             }
             Write-RsLog "    $($ui.Detail)" -Level OK
+            if ($ui.Fixes) {
+                Set-RsSummary -Key 'uiFixes' -Value $ui.Fixes
+                if ($ui.Fixes -like 'FAILED:*') {
+                    Write-RsLog "    the desktop responsiveness and LM Studio fixes did not install: $($ui.Fixes)" -Level WARN
+                } else {
+                    Write-RsLog "    desktop fixes: $($ui.Fixes)" -Level OK
+                }
+            }
         } | Out-Null
 
         if ($effectiveRuntime -eq 'native') {
@@ -394,6 +454,7 @@ if (-not $python) {
                                -RequirementFiles @((Join-Path $ProjectRoot 'requirements-stage111-actions.txt')) `
                                -Wheelhouse $wheelhouse -OfflineOnly:$OfflineOnly -Recreate:$RecreateVenvs
         Set-RsSummary -Key 'venvActions' -Value $p
+        Install-RsRuntimeBootstrap -VenvPython $p -ProjectRoot $ProjectRoot | Out-Null
     } | Out-Null
 
     # ----------------------------------------------------------------------
@@ -581,6 +642,20 @@ if ($effectiveRuntime -eq 'container') {
     Write-RsLog 'Backend         : native (embedded vector store, no Docker required)'
 }
 Write-RsLog "Node.js         : $(if ($after.NodePath) { $after.NodePath } else { 'not installed (optional)' })"
+
+$sum = Get-RsSummary
+$lmUrl = if ($sum['lmStudioUrl']) { $sum['lmStudioUrl'] } else { '(not configured)' }
+Write-RsLog "LM Studio       : $lmUrl$(if ($sum['lmStudioReachable']) { ' - reachable' } else { ' - not answering yet' })"
+if ($sum['lmStudioModel']) {
+    Write-RsLog "LM Studio model : $($sum['lmStudioModel'])"
+} elseif ($sum['lmStudioReachable']) {
+    Write-RsLog 'LM Studio model : none loaded - load one in LM Studio' -Level WARN
+}
+Write-RsLog "Visual effects  : $(if ($sum['uiEffects']) { $sum['uiEffects'] } else { 'reduced' })"
+if (-not $sum['lmStudioReachable']) {
+    Write-RsLog '  Start LM Studio, switch on its local server (Developer tab), then use' -Level INFO
+    Write-RsLog '  Settings -> LM Studio in RedSight to test and pick a model.' -Level INFO
+}
 
 if ($warnings.Count) {
     Write-RsLog ''

@@ -651,6 +651,267 @@ if (Test-Path -LiteralPath $hwIni) {
 }
 
 # ==========================================================================
+Write-Host "`n== LM Studio endpoint normalisation ==" -ForegroundColor Cyan
+# ==========================================================================
+
+Assert-Equal -Name 'bare host:port gains a scheme and /v1' -Expected 'http://127.0.0.1:1234/v1' `
+             -Actual (ConvertTo-RsLmBaseUrl -Value '127.0.0.1:1234')
+Assert-Equal -Name 'an existing /v1 is kept once' -Expected 'http://h:1/v1' `
+             -Actual (ConvertTo-RsLmBaseUrl -Value 'http://h:1/v1')
+Assert-Equal -Name 'a /models tail is trimmed' -Expected 'http://h:1/v1' `
+             -Actual (ConvertTo-RsLmBaseUrl -Value 'http://h:1/v1/models')
+Assert-Equal -Name 'a /chat/completions tail is trimmed' -Expected 'http://h:1/v1' `
+             -Actual (ConvertTo-RsLmBaseUrl -Value 'http://h:1/v1/chat/completions')
+Assert-Equal -Name 'surrounding whitespace is ignored' -Expected 'http://h:1/v1' `
+             -Actual (ConvertTo-RsLmBaseUrl -Value '  http://h:1/  ')
+Assert-Equal -Name 'https is preserved' -Expected 'https://h/v1' `
+             -Actual (ConvertTo-RsLmBaseUrl -Value 'https://h/v1')
+Assert-Equal -Name 'an empty value stays empty' -Expected '' -Actual (ConvertTo-RsLmBaseUrl -Value '')
+Assert-Equal -Name 'the root URL drops the version segment' -Expected 'http://a:1234' `
+             -Actual (Get-RsLmStudioRootUrl -BaseUrl 'http://a:1234/v1')
+
+# ==========================================================================
+Write-Host "`n== LM Studio model selection ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# A chat request naming an embedding model is answered with nonsense or an
+# error, so those ids must never be picked as the chat model.
+Assert-Equal -Name 'an embedding model is skipped' -Expected 'qwen/qwen3-8b' `
+             -Actual (Select-RsLmStudioChatModel -Models @('text-embedding-nomic-embed-text-v1.5', 'qwen/qwen3-8b'))
+Assert-Equal -Name 'a reranker is skipped' -Expected 'llama-3-8b' `
+             -Actual (Select-RsLmStudioChatModel -Models @('bge-reranker-v2-m3', 'llama-3-8b'))
+Assert-Equal -Name 'a loaded preferred model wins' -Expected 'b' `
+             -Actual (Select-RsLmStudioChatModel -Models @('a', 'b') -Preferred 'b')
+Assert-Equal -Name 'a preferred model that is not loaded is not used' -Expected 'a' `
+             -Actual (Select-RsLmStudioChatModel -Models @('a', 'b') -Preferred 'gone')
+Assert-Equal -Name 'an empty list yields no model' -Expected '' -Actual (Select-RsLmStudioChatModel -Models @())
+
+# ==========================================================================
+Write-Host "`n== LM Studio configuration file ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$lmConfigPath = Join-Path $tmpRoot 'lmstudio.json'
+Save-RsLmStudioConfig -Config @{ base_url = 'lan-box:1234'; model = 'qwen/q3' } -Path $lmConfigPath | Out-Null
+Assert-True -Name 'the configuration file is written' -Condition (Test-Path -LiteralPath $lmConfigPath)
+
+# Python's json.load rejects a byte order mark, and a BOM in the hardware INI is
+# exactly what made the 11.3 wizard read every value as its default.
+$lmBytes = [System.IO.File]::ReadAllBytes($lmConfigPath)
+Assert-True -Name 'the configuration file has no UTF-8 BOM' `
+            -Condition (-not ($lmBytes[0] -eq 0xEF -and $lmBytes[1] -eq 0xBB -and $lmBytes[2] -eq 0xBF))
+
+$lmRead = Read-RsLmStudioConfig -Path $lmConfigPath
+Assert-Equal -Name 'the endpoint is normalised on the way in' -Expected 'http://lan-box:1234/v1' -Actual $lmRead['base_url']
+Assert-Equal -Name 'the model round-trips' -Expected 'qwen/q3' -Actual $lmRead['model']
+Assert-Equal -Name 'an unset timeout takes the default' -Expected 180 -Actual $lmRead['timeout_seconds']
+
+# Each writer must merge rather than replace: a whitelist here silently lost the
+# runtime mode and the effects budget, so the backend never learned either.
+Save-RsLmStudioConfig -Config @{ runtime_mode = 'native'; data_root = 'C:\rs\data'; ui_effects = 'off' } -Path $lmConfigPath | Out-Null
+$lmMerged = Read-RsLmStudioConfig -Path $lmConfigPath
+Assert-Equal -Name 'the runtime mode persists' -Expected 'native' -Actual $lmMerged['runtime_mode']
+Assert-Equal -Name 'the data root persists' -Expected 'C:\rs\data' -Actual $lmMerged['data_root']
+Assert-Equal -Name 'the effects budget persists' -Expected 'off' -Actual $lmMerged['ui_effects']
+Assert-Equal -Name 'writing one key preserves the endpoint' -Expected 'http://lan-box:1234/v1' -Actual $lmMerged['base_url']
+Assert-Equal -Name 'writing one key preserves the model' -Expected 'qwen/q3' -Actual $lmMerged['model']
+Save-RsLmStudioConfig -Config @{ ui_effects = 'nonsense' } -Path $lmConfigPath | Out-Null
+Assert-Equal -Name 'an unknown effects level falls back to reduced' -Expected 'reduced' `
+             -Actual (Read-RsLmStudioConfig -Path $lmConfigPath)['ui_effects']
+
+Set-Content -LiteralPath $lmConfigPath -Value '{ not json' -Encoding ascii
+$lmBroken = Read-RsLmStudioConfig -Path $lmConfigPath
+Assert-Equal -Name 'a corrupt file degrades to the local default' -Expected 'http://127.0.0.1:1234/v1' -Actual $lmBroken['base_url']
+
+$lmMissing = Read-RsLmStudioConfig -Path (Join-Path $tmpRoot 'no-such-file.json')
+Assert-Equal -Name 'a missing file degrades to the local default' -Expected 'http://127.0.0.1:1234/v1' -Actual $lmMissing['base_url']
+
+# ==========================================================================
+Write-Host "`n== LM Studio environment export ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Nothing in the application calls load_dotenv and its settings use the
+# RED_SIGHT_ prefix, so these process variables are the only way the endpoint
+# reaches the backend at all.
+Save-RsLmStudioConfig -Config @{ base_url = 'http://lan:1234/v1'; model = 'm1' } -Path $lmConfigPath | Out-Null
+$lmEnv = Get-RsLmStudioEnvironment -ConfigPath $lmConfigPath
+Assert-Equal -Name 'LM_STUDIO_BASE_URL is exported' -Expected 'http://lan:1234/v1' -Actual $lmEnv['LM_STUDIO_BASE_URL']
+Assert-Equal -Name 'the historical LM_BASE_URL is exported' -Expected 'http://lan:1234/v1' -Actual $lmEnv['LM_BASE_URL']
+Assert-Equal -Name 'LM_STUDIO_URL carries the server root' -Expected 'http://lan:1234' -Actual $lmEnv['LM_STUDIO_URL']
+Assert-Equal -Name 'the model is exported' -Expected 'm1' -Actual $lmEnv['LM_STUDIO_MODEL']
+Assert-Equal -Name 'the pydantic-native name is exported too' -Expected 'http://lan:1234/v1' `
+             -Actual $lmEnv['RED_SIGHT_LMSTUDIO__BASE_URL']
+Assert-Equal -Name 'the models URL for the redirected UI probes is exported' -Expected 'http://lan:1234/v1/models' `
+             -Actual $lmEnv['LM_STUDIO_MODELS_URL']
+
+Save-RsLmStudioConfig -Config @{ runtime_mode = 'native'; data_root = 'D:\rs\data' } -Path $lmConfigPath | Out-Null
+$lmEnvNative = Get-RsLmStudioEnvironment -ConfigPath $lmConfigPath
+Assert-Equal -Name 'native mode asks for the embedded vector store' -Expected 'true' -Actual $lmEnvNative['VECTOR_BACKEND_EMBEDDED']
+Assert-Equal -Name 'native mode stops the container hostname being used' -Expected '127.0.0.1' -Actual $lmEnvNative['VECTOR_BACKEND_HOST']
+Assert-Equal -Name 'the data root is exported with the nested delimiter' -Expected 'D:\rs\data' `
+             -Actual $lmEnvNative['RED_SIGHT_PLATFORM__DATA_ROOT']
+Save-RsLmStudioConfig -Config @{ runtime_mode = 'container' } -Path $lmConfigPath | Out-Null
+Assert-True -Name 'container mode leaves the vector backend alone' `
+            -Condition (-not (Get-RsLmStudioEnvironment -ConfigPath $lmConfigPath).Contains('VECTOR_BACKEND_EMBEDDED'))
+
+# A model of '' has to clear the variable, or the backend keeps naming a model
+# that is no longer loaded.
+$lmCleared = Read-RsLmStudioConfig -Path $lmConfigPath
+$lmCleared['model'] = ''
+Save-RsLmStudioConfig -Config $lmCleared -Path $lmConfigPath | Out-Null
+Assert-True -Name 'no model means no model variable' `
+            -Condition (-not (Get-RsLmStudioEnvironment -ConfigPath $lmConfigPath).Contains('LM_STUDIO_MODEL'))
+
+# ==========================================================================
+Write-Host "`n== Container and launcher endpoint rewriting ==" -ForegroundColor Cyan
+# ==========================================================================
+
+Assert-Equal -Name 'a loopback endpoint becomes host.docker.internal' -Expected 'http://host.docker.internal:1234/v1' `
+             -Actual (Get-RsLmStudioContainerUrl -BaseUrl 'http://127.0.0.1:1234/v1')
+Assert-Equal -Name 'a non-default port is preserved' -Expected 'http://host.docker.internal:1235/v1' `
+             -Actual (Get-RsLmStudioContainerUrl -BaseUrl 'http://localhost:1235/v1')
+Assert-Equal -Name 'a LAN endpoint is reachable as it stands' -Expected 'http://192.168.1.5:1234/v1' `
+             -Actual (Get-RsLmStudioContainerUrl -BaseUrl 'http://192.168.1.5:1234/v1')
+
+# The shipped compose files carry the author's own LAN address, so a
+# containerized install would otherwise talk to someone else's machine.
+$composeRoot = Join-Path $tmpRoot 'compose'
+New-Item -ItemType Directory -Path $composeRoot -Force | Out-Null
+@'
+services:
+  redsight:
+    environment:
+      - RED_SIGHT_MODE=local_preferred
+      - LM_STUDIO_BASE_URL=http://192.168.50.139:1234/v1
+      - LM_STUDIO_MODEL=someone/elses-model
+      - QDRANT_URL=http://qdrant:6333
+'@ | Set-Content -LiteralPath (Join-Path $composeRoot 'docker-compose.yml')
+@'
+services:
+  redsight:
+    environment:
+      LM_STUDIO_URL: "http://192.168.50.139:1234"
+      LM_STUDIO_BASE_URL: "http://192.168.50.139:1234/v1"
+'@ | Set-Content -LiteralPath (Join-Path $composeRoot 'docker-compose.override.yml')
+
+$composeChanged = Repair-RsComposeLmStudio -ProjectRoot $composeRoot -BaseUrl 'http://127.0.0.1:1234/v1' -Model 'my/model'
+Assert-Equal -Name 'both compose files are rewritten' -Expected 2 -Actual $composeChanged
+$composeMain = Get-Content -LiteralPath (Join-Path $composeRoot 'docker-compose.yml') -Raw
+Assert-True -Name 'the list form is rewritten' -Condition ($composeMain -match '- LM_STUDIO_BASE_URL=http://host\.docker\.internal:1234/v1')
+Assert-True -Name 'the model is rewritten too' -Condition ($composeMain -match '- LM_STUDIO_MODEL=my/model')
+Assert-True -Name "the author's address is gone from compose" -Condition ($composeMain -notmatch '192\.168\.50\.139')
+$composeOver = Get-Content -LiteralPath (Join-Path $composeRoot 'docker-compose.override.yml') -Raw
+Assert-True -Name 'the mapping form is rewritten' -Condition ($composeOver -match 'LM_STUDIO_BASE_URL: "http://host\.docker\.internal:1234/v1"')
+Assert-True -Name 'unrelated keys are untouched' -Condition ($composeMain -match 'RED_SIGHT_MODE=local_preferred')
+
+# The shipped launchers hard-assign the same variables, which would override
+# whatever setup recorded.
+@'
+$env:PYTHONNOUSERSITE = "1"
+$env:LM_STUDIO_URL = "http://127.0.0.1:1234"
+$env:LM_STUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
+$env:LM_BASE_URL = "http://127.0.0.1:1234/v1"
+'@ | Set-Content -LiteralPath (Join-Path $composeRoot 'START-REDSIGHT.ps1')
+$launcherChanged = Repair-RsAppLauncher -ProjectRoot $composeRoot -BaseUrl 'http://192.168.1.7:1234/v1' -Model 'my/model'
+Assert-Equal -Name 'the shipped launcher is rewritten' -Expected 1 -Actual $launcherChanged
+$launcherText = Get-Content -LiteralPath (Join-Path $composeRoot 'START-REDSIGHT.ps1') -Raw
+Assert-True -Name 'the launcher base URL follows the configuration' `
+            -Condition ($launcherText -match '\$env:LM_STUDIO_BASE_URL = "http://192\.168\.1\.7:1234/v1"')
+Assert-True -Name 'the launcher server root follows the configuration' `
+            -Condition ($launcherText -match '\$env:LM_STUDIO_URL = "http://192\.168\.1\.7:1234"')
+Assert-True -Name 'unrelated launcher lines are untouched' `
+            -Condition ($launcherText -match '\$env:PYTHONNOUSERSITE = "1"')
+$launcherParse = $null
+$null = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Resolve-Path (Join-Path $composeRoot 'START-REDSIGHT.ps1')).Path, [ref]$null, [ref]$launcherParse)
+Assert-True -Name 'the rewritten launcher still parses' -Condition (-not ($launcherParse -and $launcherParse.Count))
+
+# ==========================================================================
+Write-Host "`n== Native launcher ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$nativeRoot = Join-Path $tmpRoot 'native'
+New-Item -ItemType Directory -Path $nativeRoot -Force | Out-Null
+$nativePath = New-RsNativeLauncher -ProjectRoot $nativeRoot -WorkspaceDir $nativeRoot
+Assert-True -Name 'the native launcher is written' -Condition (Test-Path -LiteralPath $nativePath)
+$nativeErrors = $null
+$null = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Resolve-Path $nativePath).Path, [ref]$null, [ref]$nativeErrors)
+Assert-True -Name 'the native launcher parses' -Condition (-not ($nativeErrors -and $nativeErrors.Count))
+
+$nativeText = Get-Content -LiteralPath $nativePath -Raw
+# gateway_stage10 exposes an ASGI app: running the file as a script starts
+# nothing, which is what left memory showing as missing in the UI.
+Assert-True -Name 'the gateway is served by uvicorn' `
+            -Condition ($nativeText -match "uvicorn'.*\r?\n.*'redsight_actions\.gateway_stage10:app'" -or
+                        $nativeText -match "'-m', 'uvicorn',\s*\r?\n?\s*'redsight_actions\.gateway_stage10:app'")
+Assert-True -Name 'the gateway is never run as a plain script' `
+            -Condition ($nativeText -notmatch "ArgumentList @\(\`$Gateway\)")
+Assert-True -Name 'the launcher waits for the gateway to answer' `
+            -Condition ($nativeText -match '/memory/status')
+Assert-True -Name 'a gateway failure is explained in terms of the symptom' `
+            -Condition ($nativeText -match 'memory will show as missing')
+Assert-True -Name 'the LM Studio endpoint is exported into the environment' `
+            -Condition ($nativeText -match 'redsight_bootstrap' -and $nativeText -match 'LM_STUDIO_BASE_URL')
+Assert-True -Name 'the backend is started with the recorded environment' `
+            -Condition ($nativeText -match 'scripts\\start\.py' -and $nativeText -match 'app\.server:app')
+Assert-True -Name 'loopback probes bypass any system proxy' -Condition ($nativeText -match '\$req\.Proxy = \$null')
+Assert-True -Name 'Qt scale rounding is set for crisp text' `
+            -Condition ($nativeText -match 'QT_SCALE_FACTOR_ROUNDING_POLICY')
+
+# ==========================================================================
+Write-Host "`n== Launcher dispatch ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Shortcuts must go through the dispatcher: it picks the launcher that starts
+# the action/memory gateway, which the UI needs for memory and for chat.
+$dispatchRoot = Join-Path $tmpRoot 'dispatch'
+New-Item -ItemType Directory -Path (Join-Path $dispatchRoot 'scripts\windows') -Force | Out-Null
+New-Item -ItemType File -Path (Join-Path $dispatchRoot 'LAUNCH-REDSIGHT-DESKTOP.ps1') -Force | Out-Null
+New-Item -ItemType File -Path (Join-Path $dispatchRoot 'START-REDSIGHT.ps1') -Force | Out-Null
+Assert-True -Name 'without a dispatcher, the gateway launcher wins' `
+            -Condition ((Split-Path -Leaf (Get-RsLauncherPath -ProjectRoot $dispatchRoot -Mode 'container')) -eq 'START-REDSIGHT.ps1')
+New-Item -ItemType File -Path (Join-Path $dispatchRoot 'scripts\windows\Start-RedSight.ps1') -Force | Out-Null
+Assert-True -Name 'the dispatcher is preferred once present' `
+            -Condition ((Split-Path -Leaf (Get-RsLauncherPath -ProjectRoot $dispatchRoot -Mode 'container')) -eq 'Start-RedSight.ps1')
+
+$dispatcher = Join-Path $scripts 'Start-RedSight.ps1'
+Assert-True -Name 'the dispatcher script exists' -Condition (Test-Path -LiteralPath $dispatcher)
+$dispatchText = Get-Content -LiteralPath $dispatcher -Raw
+Assert-True -Name 'the dispatcher reads the recorded runtime mode' -Condition ($dispatchText -match 'REDSIGHT_RUNTIME_MODE')
+Assert-True -Name 'native mode prefers the native launcher' `
+            -Condition ($dispatchText -match "'START-REDSIGHT-NATIVE\.ps1', 'START-REDSIGHT\.ps1'")
+Assert-True -Name 'container mode prefers the gateway launcher' `
+            -Condition ($dispatchText -match "'START-REDSIGHT\.ps1', 'LAUNCH-REDSIGHT-DESKTOP\.ps1'")
+
+# ==========================================================================
+Write-Host "`n== Runtime bootstrap installation ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# The .pth is what puts the endpoint into the environment before any
+# application code runs, whichever way a RedSight process is started.
+$bootRoot = Join-Path $tmpRoot 'boot'
+$bootVenv = Join-Path $bootRoot '.venv-ui'
+$bootSite = Join-Path $bootVenv 'Lib\site-packages'
+New-Item -ItemType Directory -Path $bootSite -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $bootVenv 'Scripts') -Force | Out-Null
+$bootPython = Join-Path $bootVenv 'Scripts\python.exe'
+New-Item -ItemType File -Path $bootPython -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $bootRoot 'redsight_bootstrap.py') -Value '# runtime configuration' -Encoding ascii
+
+$bootOk = Install-RsRuntimeBootstrap -VenvPython $bootPython -ProjectRoot $bootRoot
+Assert-True -Name 'the runtime module is installed into site-packages' -Condition $bootOk
+Assert-True -Name 'the module is copied' -Condition (Test-Path -LiteralPath (Join-Path $bootSite 'redsight_bootstrap.py'))
+$pthPath = Join-Path $bootSite 'redsight_bootstrap.pth'
+Assert-True -Name 'a .pth is written' -Condition (Test-Path -LiteralPath $pthPath)
+Assert-True -Name 'the .pth imports the module at interpreter startup' `
+            -Condition ((Get-Content -LiteralPath $pthPath -Raw).Trim() -eq 'import redsight_bootstrap')
+$pthBytes = [System.IO.File]::ReadAllBytes($pthPath)
+Assert-True -Name 'the .pth has no UTF-8 BOM' `
+            -Condition (-not ($pthBytes[0] -eq 0xEF -and $pthBytes[1] -eq 0xBB -and $pthBytes[2] -eq 0xBF))
+Assert-True -Name 'a payload with no runtime module is reported, not assumed' `
+            -Condition (-not (Install-RsRuntimeBootstrap -VenvPython $bootPython -ProjectRoot (Join-Path $tmpRoot 'nothing-here')))
+
+# ==========================================================================
 Write-Host "`n== Logging and summary ==" -ForegroundColor Cyan
 # ==========================================================================
 

@@ -174,18 +174,76 @@ Add-RsCheck -Name 'Node.js (WhatsApp bridge)' `
             -Status $(if ($node) { 'pass' } else { 'skip' }) `
             -Detail $(if ($node) { $node.Source } else { 'optional feature not installed' })
 
-# LM Studio is started by the user, so its absence is only informational.
-$lmUp = $false
+# --- LM Studio ------------------------------------------------------------
+
+# The endpoint the backend will actually use, not a hardcoded guess. This is the
+# check that distinguishes "LM Studio is off" from "RedSight is pointed at the
+# wrong place", which is what made a passing Settings test sit beside a
+# connection error in the UI.
+$lmConfig = Read-RsLmStudioConfig
+$lmProbe = Test-RsLmStudioEndpoint -BaseUrl $lmConfig['base_url']
+Add-RsCheck -Name 'LM Studio local server' `
+            -Status $(if ($lmProbe.Ok) { 'pass' } else { 'skip' }) `
+            -Detail $(if ($lmProbe.Ok) { "responding at $($lmConfig['base_url'])" }
+                      else { "not answering at $($lmConfig['base_url']) - start it, or change the endpoint in Settings -> LM Studio" })
+
+if ($lmProbe.Ok) {
+    # A request naming a model LM Studio has not got is answered with 404, so an
+    # empty model list means chat cannot work even though the server is up.
+    $lmModels = @($lmProbe.Models)
+    Add-RsCheck -Name 'LM Studio model loaded' `
+                -Status $(if ($lmModels.Count -gt 0) { 'pass' } else { 'warn' }) `
+                -Detail $(if ($lmModels.Count -gt 0) { "$($lmModels.Count) model(s): $(($lmModels | Select-Object -First 4) -join ', ')" }
+                          else { 'no model loaded in LM Studio - load one, then Settings -> LM Studio -> Detect models' })
+}
+
+# The endpoint has to reach the backend through the process environment, because
+# nothing in the application loads .env for these names.
+$bootstrapOk = $false
+$bootstrapDetail = 'redsight_bootstrap is not installed in .venv-ui'
+if (Test-Path -LiteralPath $uiPython) {
+    $r = Invoke-RsProcess -FilePath $uiPython -TimeoutSeconds 60 -Quiet `
+                          -Arguments @('-c', 'import redsight_bootstrap,os;print(os.environ.get("LM_STUDIO_BASE_URL",""))')
+    if ($r.ExitCode -eq 0 -and $r.StdOut.Trim()) {
+        $bootstrapOk = $true
+        $bootstrapDetail = "the backend will read LM_STUDIO_BASE_URL=$($r.StdOut.Trim())"
+    }
+}
+Add-RsCheck -Name 'LM Studio endpoint reaches the backend' -Required `
+            -Status $(if ($bootstrapOk) { 'pass' } else { 'fail' }) `
+            -Detail $bootstrapDetail
+
+# --- Action/memory gateway ------------------------------------------------
+
+# Every chat goes through this service: /memory/build before the model call and
+# /memory/commit after it, and the UI's memory indicator reads /memory/status
+# here. With it down the UI reports memory as missing and no query is answered.
+$gatewayModule = Join-Path $ProjectRoot 'redsight_actions\gateway_stage10.py'
+Add-RsCheck -Name 'action/memory gateway module' -Required `
+            -Status $(if (Test-Path -LiteralPath $gatewayModule) { 'pass' } else { 'fail' }) `
+            -Detail $(if (Test-Path -LiteralPath $gatewayModule) { 'redsight_actions\gateway_stage10.py' }
+                      else { "missing: $gatewayModule" })
+
+$gatewayUp = $false
 try {
-    $req = [System.Net.HttpWebRequest]::Create('http://127.0.0.1:1234/v1/models')
-    $req.Timeout = 3000
+    $req = [System.Net.HttpWebRequest]::Create('http://127.0.0.1:8765/memory/status')
+    $req.Timeout = 4000
+    $req.Proxy = $null
     $resp = $req.GetResponse()
     $resp.Dispose()
-    $lmUp = $true
+    $gatewayUp = $true
 } catch { }
-Add-RsCheck -Name 'LM Studio local server' `
-            -Status $(if ($lmUp) { 'pass' } else { 'skip' }) `
-            -Detail $(if ($lmUp) { 'responding on 127.0.0.1:1234' } else { 'not running (start it for local inference)' })
+Add-RsCheck -Name 'action/memory gateway running' `
+            -Status $(if ($gatewayUp) { 'pass' } else { 'skip' }) `
+            -Detail $(if ($gatewayUp) { 'answering on 127.0.0.1:8765' }
+                      else { 'not running - it is started by the RedSight launcher; if memory shows as missing in the UI, check %LOCALAPPDATA%\RedSight\logs\native-gateway.err.log' })
+
+# --- Desktop responsiveness ----------------------------------------------
+
+Add-RsCheck -Name 'desktop visual effects' -Status 'pass' `
+            -Detail $(if ($lmConfig['ui_effects'] -eq 'full') { 'full - as shipped' }
+                      elseif ($lmConfig['ui_effects'] -eq 'off') { 'off - no ambient animation' }
+                      else { 'reduced - calmer animation, less input latency' })
 
 # --- Agent capabilities ---------------------------------------------------
 

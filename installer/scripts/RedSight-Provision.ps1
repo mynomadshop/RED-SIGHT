@@ -11,6 +11,8 @@
       * runtime mode - containers when the machine can run WSL2/Docker, native
         (embedded Qdrant, backend in-process) when it cannot
       * MCP server registration from a directory or config file
+      * the runtime configuration module, copied into each virtualenv so every
+        RedSight process reads the same LM Studio endpoint
 
     Dot-sourced by RedSight-Preflight.ps1.
 #>
@@ -394,6 +396,59 @@ function Install-RsMcpConfig {
 # Runtime mode
 # --------------------------------------------------------------------------
 
+function Install-RsRuntimeBootstrap {
+    <#
+        Puts redsight_bootstrap.py on the import path of a virtualenv, and adds
+        a .pth file that imports it at interpreter startup.
+
+        This is what makes the LM Studio endpoint reach the backend. The
+        application reads its endpoint through app/config/settings.py, whose
+        Settings class uses env_prefix RED_SIGHT_, and nothing in the codebase
+        calls load_dotenv - so a plain LM_STUDIO_BASE_URL line in .env is never
+        seen. Only LmStudioConfig's own validator reads that name, and it reads
+        it from the real process environment. Importing the module through a
+        .pth puts it there before any application code runs, whichever way the
+        process was started.
+
+        A .pth is used rather than sitecustomize.py so nothing another package
+        installed gets overwritten.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VenvPython,
+        [Parameter(Mandatory)][string]$ProjectRoot
+    )
+
+    $source = Join-Path $ProjectRoot 'redsight_bootstrap.py'
+    if (-not (Test-Path -LiteralPath $source)) {
+        Write-RsLog "redsight_bootstrap.py is not in the payload - the LM Studio endpoint will not reach the backend automatically" -Level WARN
+        return $false
+    }
+    if (-not (Test-Path -LiteralPath $VenvPython)) { return $false }
+
+    $sitePackages = Join-Path (Split-Path -Parent (Split-Path -Parent $VenvPython)) 'Lib\site-packages'
+    if (-not (Test-Path -LiteralPath $sitePackages)) {
+        # Ask the interpreter rather than guessing at a non-standard layout.
+        $r = Invoke-RsProcess -FilePath $VenvPython -TimeoutSeconds 60 -Quiet `
+                              -Arguments @('-c', 'import sysconfig;print(sysconfig.get_paths()["purelib"])')
+        if ($r.ExitCode -eq 0) { $sitePackages = $r.StdOut.Trim() }
+    }
+    if (-not $sitePackages -or -not (Test-Path -LiteralPath $sitePackages)) {
+        Write-RsLog "could not locate site-packages for $VenvPython" -Level WARN
+        return $false
+    }
+
+    Copy-Item -LiteralPath $source -Destination (Join-Path $sitePackages 'redsight_bootstrap.py') -Force
+
+    # A .pth line beginning with "import" is executed by site.py at startup.
+    $pth = Join-Path $sitePackages 'redsight_bootstrap.pth'
+    [System.IO.File]::WriteAllText($pth, "import redsight_bootstrap$([Environment]::NewLine)",
+                                   (New-Object System.Text.UTF8Encoding($false)))
+
+    Write-RsLog "runtime configuration installed into $sitePackages" -Level OK
+    return $true
+}
+
 function New-RsNativeLauncher {
     <#
         Writes START-REDSIGHT-NATIVE.ps1: a launcher that runs RedSight without
@@ -404,6 +459,13 @@ function New-RsNativeLauncher {
         the FastAPI backend can be run directly by scripts/start.py. Together
         that means a machine which cannot run WSL2 - because virtualization is
         switched off in its firmware - can still run the whole product.
+
+        Three services have to be up, not one. The desktop UI sends every chat
+        through the action/memory gateway on 127.0.0.1:8765 (/memory/build, then
+        /memory/commit) and reads its memory indicator from
+        /memory/status there, so with the gateway down the UI reports memory as
+        missing and no query ever reaches a model. The gateway is an ASGI app:
+        running gateway_stage10.py as a script starts nothing.
     #>
     [CmdletBinding()]
     param(
@@ -425,7 +487,7 @@ function New-RsNativeLauncher {
 #>
 
 [CmdletBinding()]
-param([switch]$NoUi, [int]$Port = 8000)
+param([switch]$NoUi, [int]$Port = 8000, [int]$GatewayPort = 8765)
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
@@ -437,48 +499,145 @@ $Log = Join-Path $LogDir ("native-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss
 
 function Write-Line { param([string]$m) ; "$(Get-Date -Format s)  $m" | Tee-Object -FilePath $Log -Append }
 
+function Test-Endpoint {
+    param([Parameter(Mandatory)][string]$Url, [int]$TimeoutSeconds = 3)
+    try {
+        # No proxy: a configured system proxy must not intercept a loopback call.
+        $req = [System.Net.HttpWebRequest]::Create($Url)
+        $req.Method = 'GET'
+        $req.Timeout = $TimeoutSeconds * 1000
+        $req.Proxy = $null
+        $resp = $req.GetResponse()
+        $code = [int]$resp.StatusCode
+        $resp.Dispose()
+        return ($code -ge 200 -and $code -lt 500)
+    } catch {
+        return $false
+    }
+}
+
+function Wait-Endpoint {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Name,
+        [int]$Seconds = 180,
+        $Process
+    )
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        if ($Process -and $Process.HasExited) {
+            Write-Line "$Name exited early with code $($Process.ExitCode)"
+            return $false
+        }
+        if (Test-Endpoint -Url $Url) { return $true }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+
 $Python = Join-Path $Root '.venv-ui\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $Python)) {
     throw "RedSight Python environment not found at $Python. Run 'Repair RedSight setup' from the Start Menu."
 }
 
-# No Qdrant server runs in native mode: the store fails fast against the closed
-# port and falls back to its embedded, in-process mode.
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+# The LM Studio endpoint has to be in the real process environment: the backend
+# reads it through a validator on os.environ, and nothing in the application
+# loads .env. redsight_bootstrap holds the value setup recorded.
+
+$env:PYTHONPATH = $null
+$env:PYTHONHOME = $null
+$env:PYTHONNOUSERSITE = '1'
 $env:REDSIGHT_API_URL = "http://127.0.0.1:$Port"
 $env:REDSIGHT_API_BASE_URL = $env:REDSIGHT_API_URL
 $env:API_BASE_URL = $env:REDSIGHT_API_URL
 $env:REDSIGHT_RUNTIME_MODE = 'native'
 
-Write-Line "starting the RedSight backend natively on port $Port"
-$backend = Start-Process -FilePath $Python -PassThru -WindowStyle Hidden `
-    -ArgumentList @('scripts\start.py', '--host', '127.0.0.1', '--port', "$Port") `
-    -RedirectStandardOutput (Join-Path $LogDir 'native-backend.out.log') `
-    -RedirectStandardError  (Join-Path $LogDir 'native-backend.err.log')
-Write-Line "backend pid $($backend.Id)"
+# Qt: PassThrough rounding keeps text crisp on fractional scaling instead of
+# rounding the whole UI up to the next integer factor.
+if (-not $env:QT_SCALE_FACTOR_ROUNDING_POLICY) { $env:QT_SCALE_FACTOR_ROUNDING_POLICY = 'PassThrough' }
 
-# Wait for the health endpoint rather than sleeping a fixed amount.
-$ready = $false
-$deadline = (Get-Date).AddSeconds(180)
-while ((Get-Date) -lt $deadline) {
-    if ($backend.HasExited) {
-        Write-Line "backend exited early with code $($backend.ExitCode); see native-backend.err.log"
-        break
-    }
+$Applied = & $Python -c "import json,redsight_bootstrap as r;print(json.dumps(r.environment()))" 2>$null
+if ($LASTEXITCODE -eq 0 -and $Applied) {
     try {
-        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/v1/health" -TimeoutSec 3 -UseBasicParsing
-        if ($resp.StatusCode -eq 200) { $ready = $true; break }
-    } catch { }
-    Start-Sleep -Seconds 2
+        $Parsed = $Applied | ConvertFrom-Json
+        foreach ($entry in $Parsed.PSObject.Properties) {
+            Set-Item -Path ("Env:" + $entry.Name) -Value ([string]$entry.Value)
+        }
+        Write-Line "LM Studio endpoint: $($env:LM_STUDIO_BASE_URL) model: $(if ($env:LM_STUDIO_MODEL) { $env:LM_STUDIO_MODEL } else { '(auto-detected at first request)' })"
+    } catch {
+        Write-Line "could not apply the recorded runtime configuration: $($_.Exception.Message)"
+    }
+} else {
+    Write-Line 'the runtime configuration module is not installed; falling back to the local LM Studio default'
+    if (-not $env:LM_STUDIO_BASE_URL) { $env:LM_STUDIO_BASE_URL = 'http://127.0.0.1:1234/v1' }
+    if (-not $env:LM_BASE_URL) { $env:LM_BASE_URL = $env:LM_STUDIO_BASE_URL }
+    if (-not $env:LM_STUDIO_URL) { $env:LM_STUDIO_URL = 'http://127.0.0.1:1234' }
 }
-Write-Line ("backend ready: {0}" -f $ready)
 
-# The action/memory gateway is optional; start it when its environment exists.
-$GatewayPython = Join-Path $Root '.venv-actions\Scripts\python.exe'
-$Gateway = Join-Path $Root 'redsight_actions\gateway_stage10.py'
-if ((Test-Path -LiteralPath $GatewayPython) -and (Test-Path -LiteralPath $Gateway)) {
-    Write-Line 'starting the action/memory gateway'
-    Start-Process -FilePath $GatewayPython -ArgumentList @($Gateway) -WindowStyle Hidden | Out-Null
+# ---------------------------------------------------------------------------
+# Backend
+# ---------------------------------------------------------------------------
+
+if (Test-Endpoint -Url "http://127.0.0.1:$Port/api/v1/health") {
+    Write-Line "the backend is already running on port $Port"
+} else {
+    Write-Line "starting the RedSight backend natively on port $Port"
+    $StartScript = Join-Path $Root 'scripts\start.py'
+    if (Test-Path -LiteralPath $StartScript) {
+        $BackendArgs = @($StartScript, '--host', '127.0.0.1', '--port', "$Port")
+    } else {
+        # Same entry point the container image uses.
+        $BackendArgs = @('-m', 'uvicorn', 'app.server:app', '--host', '127.0.0.1', '--port', "$Port")
+    }
+    $backend = Start-Process -FilePath $Python -PassThru -WindowStyle Hidden `
+        -ArgumentList $BackendArgs -WorkingDirectory $Root `
+        -RedirectStandardOutput (Join-Path $LogDir 'native-backend.out.log') `
+        -RedirectStandardError  (Join-Path $LogDir 'native-backend.err.log')
+    Write-Line "backend pid $($backend.Id)"
+    $ready = Wait-Endpoint -Url "http://127.0.0.1:$Port/api/v1/health" -Name 'backend' -Seconds 180 -Process $backend
+    Write-Line ("backend ready: {0}" -f $ready)
+    if (-not $ready) { Write-Line 'see native-backend.err.log' }
 }
+
+# ---------------------------------------------------------------------------
+# Action/memory gateway
+# ---------------------------------------------------------------------------
+# The UI's chat path is /memory/build here, then the backend, then
+# /memory/commit here. Without this service there is no memory and no answer.
+
+$GatewayPython = Join-Path $Root '.venv-actions\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $GatewayPython)) { $GatewayPython = $Python }
+$GatewayModule = Join-Path $Root 'redsight_actions\gateway_stage10.py'
+$GatewayHealth = "http://127.0.0.1:$GatewayPort/memory/status"
+
+if (Test-Endpoint -Url $GatewayHealth) {
+    Write-Line "the action/memory gateway is already running on port $GatewayPort"
+} elseif (Test-Path -LiteralPath $GatewayModule) {
+    Write-Line "starting the action/memory gateway on port $GatewayPort"
+    # gateway_stage10 exposes an ASGI app, so it has to be served by uvicorn;
+    # running the file as a script defines the app and exits.
+    $gateway = Start-Process -FilePath $GatewayPython -PassThru -WindowStyle Hidden `
+        -ArgumentList @('-m', 'uvicorn', 'redsight_actions.gateway_stage10:app',
+                        '--host', '127.0.0.1', '--port', "$GatewayPort", '--log-level', 'warning') `
+        -WorkingDirectory $Root `
+        -RedirectStandardOutput (Join-Path $LogDir 'native-gateway.out.log') `
+        -RedirectStandardError  (Join-Path $LogDir 'native-gateway.err.log')
+    Write-Line "gateway pid $($gateway.Id)"
+    $gatewayReady = Wait-Endpoint -Url $GatewayHealth -Name 'gateway' -Seconds 90 -Process $gateway
+    Write-Line ("gateway ready: {0}" -f $gatewayReady)
+    if (-not $gatewayReady) {
+        Write-Line 'memory will show as missing in the UI; see native-gateway.err.log'
+    }
+} else {
+    Write-Line "the action/memory gateway is not in this install ($GatewayModule)"
+}
+
+# ---------------------------------------------------------------------------
+# Command Center
+# ---------------------------------------------------------------------------
 
 if (-not $NoUi) {
     $Launcher = Join-Path $Root 'launch_redsight_command_center.py'
@@ -516,6 +675,11 @@ function Set-RsRuntimeMode {
     <#
         Records whether RedSight runs its backend in containers or natively, and
         makes sure the matching launcher exists.
+
+        The mode is also written into the runtime configuration file, because it
+        decides two things every RedSight process needs to agree on: whether the
+        vector store runs embedded, and which LM Studio endpoint a container
+        should use.
     #>
     [CmdletBinding()]
     param(
@@ -528,29 +692,61 @@ function Set-RsRuntimeMode {
     $envFile = Join-Path $ProjectRoot '.env'
     Set-RsEnvValue -Path $envFile -Key 'REDSIGHT_RUNTIME_MODE' -Value $Mode | Out-Null
 
+    # Recorded where the backend, the gateway and the UI all read it.
+    $config = Read-RsLmStudioConfig
+    $config['runtime_mode'] = $Mode
+    $config['data_root'] = (Join-Path $ProjectRoot 'data')
+    Save-RsLmStudioConfig -Config $config | Out-Null
+
+    # The shipped launchers hard-assign the LM Studio variables, which would
+    # override the recorded endpoint; both modes use one of them.
+    Repair-RsAppLauncher -ProjectRoot $ProjectRoot `
+                         -BaseUrl $config['base_url'] -Model $config['model'] | Out-Null
+
     if ($Mode -eq 'native') {
         New-RsNativeLauncher -ProjectRoot $ProjectRoot -WorkspaceDir $WorkspaceDir | Out-Null
         # QDRANT_URL is deliberately left as shipped. The store tries the server,
         # fails fast against a closed port and falls back to its embedded mode,
         # which is the application's own designed behaviour; feeding an empty URL
-        # into its connection code is a change of contract for no benefit.
+        # into its connection code is a change of contract for no benefit. What
+        # the runtime configuration does add is VECTOR_BACKEND_EMBEDDED, so the
+        # wasted lookup for the container hostname is skipped.
         Write-RsLog "runtime mode: native (no Docker required)$(if ($Reason) { " - $Reason" })" -Level OK
     } else {
+        # The shipped compose files carry the author's own LAN address for LM
+        # Studio, so a containerized backend would talk to someone else's
+        # machine.
+        Repair-RsComposeLmStudio -ProjectRoot $ProjectRoot `
+                                 -BaseUrl $config['base_url'] -Model $config['model'] | Out-Null
         Write-RsLog 'runtime mode: containerized backend (Docker + WSL2)' -Level OK
     }
     return $Mode
 }
 
 function Get-RsLauncherPath {
-    <# The script the shortcuts should point at for the current runtime mode. #>
+    <#
+        The script the shortcuts should point at for the current runtime mode.
+
+        START-REDSIGHT.ps1 comes before LAUNCH-REDSIGHT-DESKTOP.ps1 because it
+        is the one that starts the action/memory gateway on 127.0.0.1:8765.
+        The desktop UI sends every chat through that gateway and reads its
+        memory indicator from it, so a shortcut to the launcher that only starts
+        Docker and the UI produces exactly the reported symptom: memory missing
+        and no answer to a query.
+    #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$ProjectRoot, [Parameter(Mandatory)][string]$Mode)
+
+    # The dispatcher decides from the recorded runtime mode at launch time, so
+    # a shortcut created before setup finished still points somewhere correct.
+    $dispatcher = Join-Path $ProjectRoot 'scripts\windows\Start-RedSight.ps1'
+    if (Test-Path -LiteralPath $dispatcher) { return $dispatcher }
 
     if ($Mode -eq 'native') {
         $native = Join-Path $ProjectRoot 'START-REDSIGHT-NATIVE.ps1'
         if (Test-Path -LiteralPath $native) { return $native }
     }
-    foreach ($candidate in @('LAUNCH-REDSIGHT-DESKTOP.ps1', 'START-REDSIGHT.ps1')) {
+    foreach ($candidate in @('START-REDSIGHT.ps1', 'LAUNCH-REDSIGHT-DESKTOP.ps1')) {
         $p = Join-Path $ProjectRoot $candidate
         if (Test-Path -LiteralPath $p) { return $p }
     }

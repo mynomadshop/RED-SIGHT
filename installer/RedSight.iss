@@ -6,7 +6,7 @@
 ;  offline wheelhouse into a staging tree and then invokes ISCC on this script.
 ;
 ;  Required preprocessor defines (all supplied by Build-Installer.ps1):
-;    AppVersion   product version, e.g. 11.3.0
+;    AppVersion   product version, e.g. 11.5.0
 ;    PayloadDir   staged application tree that becomes {app}
 ;    OutputDir    where the compiled setup exe is written
 ;    OutputBase   base name of the setup exe
@@ -16,7 +16,7 @@
 ; ===========================================================================
 
 #ifndef AppVersion
-  #define AppVersion "11.4.0"
+  #define AppVersion "11.5.0"
 #endif
 #ifndef PayloadDir
   #error PayloadDir must be defined (pass /DPayloadDir=... to ISCC)
@@ -54,7 +54,10 @@ VersionInfoVersion={#AppVersion}
 VersionInfoProductName={#AppName}
 VersionInfoDescription={#AppName} Desktop Setup
 
-DefaultDirName={autopf}\RedSight
+; A device may hold exactly one RedSight installation. When one is already
+; recorded, setup installs over it rather than beside it, and the directory page
+; is skipped so a second copy cannot be created by changing the path.
+DefaultDirName={code:GetInstallDir}
 DefaultGroupName=RedSight
 DisableProgramGroupPage=yes
 AllowNoIcons=yes
@@ -86,6 +89,9 @@ SetupLogging=yes
 CloseApplications=yes
 RestartApplications=no
 ChangesEnvironment=yes
+; Two copies of setup running at once would fight over the same virtualenvs and
+; the same registry entry.
+SetupMutex=RedSightSetup,Global\RedSightSetup
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -132,16 +138,15 @@ Source: "{#PayloadDir}\*"; DestDir: "{app}"; \
 Source: "{#HardwareScript}"; Flags: dontcopy
 
 [Icons]
+; One entry, pointing at the dispatcher. RedSight ships several launchers and
+; they are not equivalent - only some start the action/memory gateway the UI
+; needs for memory and for chat - so the choice is made at launch time from the
+; recorded runtime mode instead of guessed here, before setup has even run.
 Name: "{group}\RedSight"; \
     Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
-    Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\LAUNCH-REDSIGHT-DESKTOP.ps1"""; \
+    Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\scripts\windows\Start-RedSight.ps1"""; \
     IconFilename: "{app}\assets\redsight.ico"; WorkingDir: "{app}"; \
-    Comment: "RedSight Command Center"; Check: HasDesktopLauncher
-Name: "{group}\RedSight"; \
-    Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
-    Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -File ""{app}\START-REDSIGHT.ps1"""; \
-    IconFilename: "{app}\assets\redsight.ico"; WorkingDir: "{app}"; \
-    Comment: "RedSight Command Center"; Check: NotHasDesktopLauncher
+    Comment: "RedSight Command Center"
 Name: "{group}\RedSight health check"; \
     Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
     Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\windows\Verify-RedSightSetup.ps1"""; \
@@ -174,7 +179,7 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
     WorkingDir: "{app}"; Description: "Run the RedSight health check"; \
     Flags: postinstall runascurrentuser skipifsilent
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
-    Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -File ""{app}\START-REDSIGHT.ps1"""; \
+    Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\windows\Start-RedSight.ps1"""; \
     WorkingDir: "{app}"; Description: "Launch RedSight now"; \
     Flags: postinstall nowait runascurrentuser skipifsilent unchecked
 
@@ -206,8 +211,14 @@ var
   ProfilePage:   TInputOptionWizardPage;
   ProviderPage:  TInputOptionWizardPage;
   ApiPage:       TInputQueryWizardPage;
+  LmPage:        TInputQueryWizardPage;
   WorkspacePage: TInputDirWizardPage;
   ProfileInfo:   TNewStaticText;
+  LmInfo:        TNewStaticText;
+  ReduceEffects: TNewCheckBox;
+
+  ExistingPath:  string;
+  ExistingVer:   string;
 
   RebootNeeded:  Boolean;
   HwScanned:     Boolean;
@@ -247,6 +258,62 @@ end;
 function IniBool(const Section, Key: string): Boolean;
 begin
   Result := GetIniString(Section, Key, '0', HwIniPath) = '1';
+end;
+
+{ ------------------------------------------------------------------------
+  One installation per device.
+
+  Inno records where a product with this AppId was installed. Reading that back
+  lets setup install over the existing copy instead of beside it, and lets the
+  directory page be skipped so the path cannot be changed into a second copy.
+  Both registry views are checked because an earlier build may have been
+  compiled without 64-bit install mode.
+  ------------------------------------------------------------------------ }
+procedure DetectExistingInstall();
+var
+  Key: string;
+  Value: string;
+begin
+  if ExistingPath <> '' then
+    Exit;
+
+  Key := 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#AppId}_is1';
+
+  if RegQueryStringValue(HKLM64, Key, 'InstallLocation', Value) or
+     RegQueryStringValue(HKLM32, Key, 'InstallLocation', Value) or
+     RegQueryStringValue(HKCU,   Key, 'InstallLocation', Value) then
+  begin
+    Value := RemoveBackslashUnlessRoot(Trim(Value));
+    { A recorded path whose directory is gone is a stale entry from a manual
+      deletion; treating it as authoritative would install into nothing. }
+    if (Value <> '') and DirExists(Value) then
+    begin
+      ExistingPath := Value;
+      if not (RegQueryStringValue(HKLM64, Key, 'DisplayVersion', ExistingVer) or
+              RegQueryStringValue(HKLM32, Key, 'DisplayVersion', ExistingVer) or
+              RegQueryStringValue(HKCU,   Key, 'DisplayVersion', ExistingVer)) then
+        ExistingVer := '';
+      Log('existing RedSight installation found at ' + ExistingPath +
+          ' (version ' + ExistingVer + ')');
+    end
+    else
+      Log('a RedSight installation is recorded at "' + Value + '" but that directory is gone');
+  end;
+end;
+
+function GetInstallDir(Param: string): string;
+begin
+  DetectExistingInstall();
+  if ExistingPath <> '' then
+    Result := ExistingPath
+  else
+    Result := ExpandConstant('{autopf}\RedSight');
+end;
+
+function HasExistingInstall(): Boolean;
+begin
+  DetectExistingInstall();
+  Result := ExistingPath <> '';
 end;
 
 { ------------------------------------------------------------------------
@@ -435,8 +502,49 @@ begin
   ApiPage.Add('Model (optional - leave blank for the default):', False);
   ApiPage.Add('Base URL (only for a custom OpenAI-compatible endpoint):', False);
 
+  { --- LM Studio: the local model server ----------------------------------
+    Shown whenever RedSight will use a local model - the CUDA profile always,
+    and the API profile when LM Studio is the chosen provider.
+
+    This page exists because the endpoint has to be recorded somewhere every
+    RedSight process reads. The application's own default is
+    http://host.docker.internal:1234/v1, which resolves only inside a
+    container, and its Settings dialog tests whatever URL is typed into it
+    directly - so a passing test could sit beside a backend that never reached
+    LM Studio at all. }
+  LmPage := CreateInputQueryPage(ApiPage.ID,
+    'LM Studio',
+    'Where is your local model server?',
+    'Leave the default if LM Studio runs on this computer. Point it at another machine by ' +
+    'entering that address. Setup tests the endpoint and records it for the backend, the ' +
+    'agent gateway and the desktop UI; you can change it later in Settings -> LM Studio.');
+  LmPage.Add('Endpoint:', False);
+  LmPage.Add('Model (optional - leave blank to use whichever model is loaded):', False);
+  LmPage.Values[0] := 'http://127.0.0.1:1234/v1';
+
+  ReduceEffects := TNewCheckBox.Create(LmPage);
+  ReduceEffects.Parent := LmPage.Surface;
+  ReduceEffects.Top := LmPage.Edits[1].Top + LmPage.Edits[1].Height + ScaleY(20);
+  ReduceEffects.Left := LmPage.Edits[1].Left;
+  ReduceEffects.Width := LmPage.SurfaceWidth;
+  ReduceEffects.Height := ScaleY(17);
+  ReduceEffects.Caption := 'Reduce desktop animation (recommended without a discrete GPU)';
+  ReduceEffects.Checked := True;
+
+  LmInfo := TNewStaticText.Create(LmPage);
+  LmInfo.Parent := LmPage.Surface;
+  LmInfo.Top := ReduceEffects.Top + ReduceEffects.Height + ScaleY(10);
+  LmInfo.Left := LmPage.Edits[1].Left;
+  LmInfo.Width := LmPage.SurfaceWidth;
+  LmInfo.AutoSize := False;
+  LmInfo.Height := ScaleY(56);
+  LmInfo.WordWrap := True;
+  LmInfo.Caption := 'RedSight''s ambient visual layer repaints the whole window twenty times a ' +
+                    'second. On integrated graphics that is felt as late cursor movement and ' +
+                    'late clicks, so setup turns it down unless an NVIDIA GPU is present.';
+
   { --- Working directory --------------------------------------------------- }
-  WorkspacePage := CreateInputDirPage(ApiPage.ID,
+  WorkspacePage := CreateInputDirPage(LmPage.ID,
     'RedSight working folder',
     'Where should RedSight keep your files?',
     'Setup creates this folder and configures RedSight to use it for projects, generated output, memory and MCP server definitions. It must be writable, so it lives under your user profile rather than in Program Files.',
@@ -450,8 +558,23 @@ begin
   WorkspacePage.Values[0] := ExpandConstant('{%USERPROFILE}\RedSight');
 end;
 
+function UsesLocalModel(): Boolean;
+begin
+  { The CUDA profile is local inference by definition; the API profile is only
+    local when LM Studio is the selected provider. }
+  Result := (not IsApiProfile()) or
+            ((ProviderPage <> nil) and (ProviderSlug(ProviderPage.SelectedValueIndex) = 'lmstudio'));
+end;
+
 procedure CurPageChanged(CurPageID: Integer);
 begin
+  if (LmPage <> nil) and (CurPageID = LmPage.ID) then
+  begin
+    { With a discrete NVIDIA GPU the ambient layer is affordable, so leave the
+      product's own look alone; without one it is the main source of input lag. }
+    ReduceEffects.Checked := not HwCudaCapable;
+  end;
+
   if (ProfilePage <> nil) and (CurPageID = ProfilePage.ID) then
   begin
     { Scan here rather than on the way out of the welcome page: Inno 6 disables
@@ -521,6 +644,13 @@ begin
     Result := not IsApiProfile();
   if (ApiPage <> nil) and (PageID = ApiPage.ID) then
     Result := (not IsApiProfile()) or (ProviderSlug(ProviderPage.SelectedValueIndex) = 'lmstudio');
+  { Nothing to ask about a local server that will not be used. }
+  if (LmPage <> nil) and (PageID = LmPage.ID) then
+    Result := not UsesLocalModel();
+  { One installation per device: the path of the existing one is not negotiable,
+    because a different path would leave two copies behind. }
+  if (PageID = wpSelectDir) and HasExistingInstall() then
+    Result := True;
 end;
 
 { ------------------------------------------------------------------------
@@ -546,7 +676,7 @@ begin
 
   AnswerPath := ExpandConstant('{tmp}\rs-answers.ini');
 
-  SetArrayLength(Lines, 16);
+  SetArrayLength(Lines, 24);
   Count := 0;
   Lines[Count] := '[setup]'; Count := Count + 1;
 
@@ -602,6 +732,27 @@ begin
     end;
   end;
 
+  if UsesLocalModel() and (LmPage <> nil) then
+  begin
+    if Trim(LmPage.Values[0]) <> '' then
+    begin
+      Lines[Count] := 'lmStudioUrl=' + Trim(LmPage.Values[0]); Count := Count + 1;
+    end;
+    if Trim(LmPage.Values[1]) <> '' then
+    begin
+      Lines[Count] := 'lmStudioModel=' + Trim(LmPage.Values[1]); Count := Count + 1;
+    end;
+  end;
+
+  if ReduceEffects <> nil then
+  begin
+    if ReduceEffects.Checked then
+      Lines[Count] := 'uiEffects=reduced'
+    else
+      Lines[Count] := 'uiEffects=full';
+    Count := Count + 1;
+  end;
+
   if HwJsonPath <> '' then
   begin
     Lines[Count] := 'hardwareProfile=' + HwJsonPath; Count := Count + 1;
@@ -646,21 +797,6 @@ begin
 end;
 
 { --------------------------------------------------------------------------
-  Which launcher shipped in this payload? 11.2.0 and later carry
-  LAUNCH-REDSIGHT-DESKTOP.ps1, which runs windowless and reports failures in a
-  dialog; older payloads only have START-REDSIGHT.ps1.
-  -------------------------------------------------------------------------- }
-function HasDesktopLauncher(): Boolean;
-begin
-  Result := FileExists(ExpandConstant('{app}\LAUNCH-REDSIGHT-DESKTOP.ps1'));
-end;
-
-function NotHasDesktopLauncher(): Boolean;
-begin
-  Result := not HasDesktopLauncher();
-end;
-
-{ --------------------------------------------------------------------------
   Pre-install environment checks. Refusing early with a clear message beats
   failing halfway through a 20-minute dependency install.
   -------------------------------------------------------------------------- }
@@ -669,6 +805,28 @@ var
   FreeMB, TotalMB: Cardinal;
 begin
   Result := True;
+
+  { Read the recorded installation before any page is built, so the directory
+    page can be skipped and DefaultDirName can point at it. }
+  DetectExistingInstall();
+  if ExistingPath <> '' then
+  begin
+    if ExistingVer = '{#AppVersion}' then
+    begin
+      if MsgBox('RedSight {#AppVersion} is already installed at:' + #13#10#13#10 +
+                '    ' + ExistingPath + #13#10#13#10 +
+                'Only one installation is allowed per computer, so setup will reinstall ' +
+                'over it and re-run dependency setup. Continue?',
+                mbConfirmation, MB_YESNO) <> IDYES then
+      begin
+        Result := False;
+        Exit;
+      end;
+    end
+    else
+      Log('upgrading the installation at ' + ExistingPath +
+          ' from version "' + ExistingVer + '" to {#AppVersion}');
+  end;
 
   if not IsAdminInstallMode then
   begin

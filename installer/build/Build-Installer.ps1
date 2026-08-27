@@ -14,18 +14,18 @@
 
     Examples
       # from an application source tree
-      pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.4.0
+      pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.0
 
       # reusing the payload of the previously shipped installer (Windows only)
       pwsh -File installer/build/Build-Installer.ps1 `
-           -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.4.0
+           -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.0
 #>
 
 [CmdletBinding()]
 param(
     [string]$AppSource,
     [string]$LegacyInstaller,
-    [string]$Version = '11.4.0',
+    [string]$Version = '11.5.0',
     [string]$OutputDir = 'dist',
     [string]$StagingDir,
     [string]$IsccPath,
@@ -208,8 +208,9 @@ Write-RsLog 'installing the updated setup scripts into scripts\windows' -Level S
 $targetScripts = Join-Path $StagingDir 'scripts\windows'
 New-Item -ItemType Directory -Path $targetScripts -Force | Out-Null
 
-$overlay = @('RedSight-Common.ps1', 'RedSight-Hardware.ps1', 'RedSight-Provision.ps1',
-             'RedSight-Preflight.ps1', 'Bootstrap-RedSight.ps1', 'Verify-RedSightSetup.ps1')
+$overlay = @('RedSight-Common.ps1', 'RedSight-Hardware.ps1', 'RedSight-LmStudio.ps1',
+             'RedSight-Provision.ps1', 'RedSight-Preflight.ps1', 'Bootstrap-RedSight.ps1',
+             'Verify-RedSightSetup.ps1', 'Start-RedSight.ps1', 'Uninstall-RedSightDocker.ps1')
 foreach ($name in $overlay) {
     $src = Join-Path (Join-Path $installerRoot 'scripts') $name
     if (-not (Test-Path -LiteralPath $src)) { throw "setup script missing from the repository: $src" }

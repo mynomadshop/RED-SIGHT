@@ -14,6 +14,12 @@
       * an unbalanced line continuation
       * a [Components]/[Tasks] name referenced from [Code] that does not exist
 
+    It also asserts the invariants the wizard is supposed to hold: that the
+    hardware scan happens before anything is offered, that Docker is never
+    requested on a machine that cannot run WSL2, that a device ends up with one
+    installation rather than two, and that no shortcut points at a launcher
+    which leaves the action/memory gateway down.
+
         pwsh -File installer/tests/Test-IssScript.ps1
 #>
 
@@ -393,6 +399,57 @@ Assert-True -Name 'a leftover answer file is deleted' -Condition ($codeText -mat
 # Docker must never be requested on a machine the scan says cannot run WSL2.
 Assert-True -Name 'Docker is gated on the WSL2 verdict' `
             -Condition ($codeText -match "WizardIsComponentSelected\('docker'\)\s*and\s*HwWsl2")
+
+
+# --------------------------------------------------------------------------
+# v5: one installation per device
+# --------------------------------------------------------------------------
+
+Assert-True -Name 'the install directory comes from the recorded installation' `
+            -Condition ($raw -match '(?m)^DefaultDirName=\{code:GetInstallDir\}')
+Assert-True -Name 'a second setup cannot run alongside the first' `
+            -Condition ($raw -match '(?m)^SetupMutex=')
+Assert-True -Name 'the recorded installation is read from the registry' `
+            -Condition ($codeText -match 'RegQueryStringValue\(HKLM64' -and $codeText -match "'InstallLocation'")
+Assert-True -Name 'both registry views are consulted' `
+            -Condition ($codeText -match 'HKLM32')
+Assert-True -Name 'a recorded path whose directory is gone is ignored' `
+            -Condition ($codeText -match 'DirExists\(Value\)')
+Assert-True -Name 'the directory page is skipped when an installation exists' `
+            -Condition ($codeText -match 'wpSelectDir\)\s*and\s*HasExistingInstall\(\)')
+Assert-True -Name 'the existing installation is detected before any page is built' `
+            -Condition ($codeText -match 'function InitializeSetup[\s\S]{0,400}DetectExistingInstall\(\)')
+
+# --------------------------------------------------------------------------
+# v5: LM Studio and desktop responsiveness
+# --------------------------------------------------------------------------
+
+Assert-True -Name 'wizard offers an LM Studio endpoint page' `
+            -Condition ($codeText -match 'LmPage\s*:=\s*CreateInputQueryPage')
+Assert-True -Name 'the endpoint defaults to the local server' `
+            -Condition ($codeText -match "LmPage\.Values\[0\]\s*:=\s*'http://127\.0\.0\.1:1234/v1'")
+Assert-True -Name 'the endpoint reaches the bootstrap' `
+            -Condition ($codeText -match "'lmStudioUrl='")
+Assert-True -Name 'the chosen model reaches the bootstrap' `
+            -Condition ($codeText -match "'lmStudioModel='")
+Assert-True -Name 'the LM Studio page is skipped when no local model is used' `
+            -Condition ($codeText -match 'LmPage\.ID\)\s*then[\s\S]{0,60}not UsesLocalModel\(\)')
+Assert-True -Name 'the CUDA profile counts as a local model' `
+            -Condition ($codeText -match 'function UsesLocalModel[\s\S]{0,300}not IsApiProfile\(\)')
+Assert-True -Name 'the visual-effects budget reaches the bootstrap' `
+            -Condition ($codeText -match "'uiEffects=reduced'" -and $codeText -match "'uiEffects=full'")
+Assert-True -Name 'animation is reduced by default without a CUDA GPU' `
+            -Condition ($codeText -match 'ReduceEffects\.Checked\s*:=\s*not HwCudaCapable')
+
+# --------------------------------------------------------------------------
+# v5: shortcuts must start the action/memory gateway
+# --------------------------------------------------------------------------
+
+$iconText = ($logical | Where-Object { $_ -match '^Name:\s*"\{group\}' }) -join "`n"
+Assert-True -Name 'the Start Menu shortcut goes through the launcher dispatcher' `
+            -Condition ($iconText -match 'Start-RedSight\.ps1')
+Assert-True -Name 'no shortcut points straight at the gateway-less launcher' `
+            -Condition ($iconText -notmatch 'LAUNCH-REDSIGHT-DESKTOP\.ps1')
 
 $issText = $raw
 Assert-True -Name 'hardware scanner is extracted at wizard time' `

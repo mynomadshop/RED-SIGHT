@@ -18,17 +18,24 @@ installer/
   scripts/                      installed into {app}\scripts\windows
     RedSight-Common.ps1         logging, retries, downloads, process exec, PATH
     RedSight-Hardware.ps1       standalone capability scan (GPU, virtualization)
+    RedSight-LmStudio.ps1       find/start LM Studio, record the endpoint and model
     RedSight-Provision.ps1      profiles, workspace, provider keys, runtime mode
     RedSight-Preflight.ps1      the dependency engine (detect / provision / verify)
     Bootstrap-RedSight.ps1      first-run orchestrator, run by the installer
     Verify-RedSightSetup.ps1    health check ("can RedSight launch right now?")
+    Start-RedSight.ps1          launcher dispatcher every shortcut points at
+    Uninstall-RedSightDocker.ps1  removes containers/images, asks about volumes
   app-overlay/                  additive application modules merged into the payload
-    Apply-AppOverlay.ps1        copies the modules and wires the launcher hook
-    app/ui/action_palette_stage114_mcp.py   MCP Servers tab in Settings
+    Apply-AppOverlay.ps1        copies the modules, patches and wires the hooks
+    redsight_bootstrap.py       runtime configuration, installed into each venv
+    patches/lmstudio_stage115.py  appended to app/models/lmstudio.py
+    app/ui/action_palette_stage114_mcp.py       MCP Servers tab in Settings
+    app/ui/action_palette_stage115_lmstudio.py  LM Studio tab, probe redirection,
+                                                responsiveness fixes
   tests/
     Test-RedSightSetup.ps1      cross-platform tests for the setup logic
     Test-IssScript.ps1          static checks for RedSight.iss
-    test_app_overlay.py         tests for the MCP path handling
+    test_app_overlay.py         tests for the overlay logic and runtime config
   docs/
     README.template.txt         becomes README.txt in the release zip
   legacy/
@@ -47,9 +54,15 @@ hardware scan that runs first:
    driver warns before continuing.
 2. **AI provider and key** (API profile only) - LM Studio, OpenAI, Anthropic,
    Gemini, xAI or a custom OpenAI-compatible endpoint.
+3. **LM Studio endpoint** (whenever a local model will be used) - the address of
+   the local server, an optional model, and whether to reduce desktop animation.
 
 It then asks for the **working folder**, which setup creates and wires into
 `.env`.
+
+Only one RedSight installation can exist on a device: when setup finds one
+recorded in the registry it installs over it and skips the directory page, so a
+second copy cannot be created by changing the path.
 
 ### Why the profile matters
 
@@ -75,6 +88,86 @@ reports **false** whenever a hypervisor is already running, because the CPU is
 itself virtualized. Reading it alone would conclude that a machine already
 running WSL2 cannot run WSL2, so it is OR'd with
 `Win32_ComputerSystem.HypervisorPresent`.
+
+## How RedSight reaches LM Studio
+
+This is the part that repeatedly looked configured and was not, so it is worth
+stating exactly.
+
+The backend reads its endpoint through `app/config/settings.py`. That `Settings`
+class uses `env_prefix = "RED_SIGHT_"`, and **nothing in the application calls
+`load_dotenv`** - so a plain `LM_STUDIO_BASE_URL=...` line in `.env` never
+reaches it. The only code that looks at that name is `LmStudioConfig`'s own
+`mode="before"` validator, and it reads it from the real process environment.
+With nothing there the field keeps its shipped default,
+`http://host.docker.internal:1234/v1`, which resolves only inside a container.
+
+Meanwhile the Settings dialog's "Test Connection" probes whatever URL is typed
+into it, directly. So a native install could show a passing test beside a
+backend that had never reached LM Studio at all.
+
+Setup therefore records the endpoint in one machine-local file:
+
+```
+%LOCALAPPDATA%\RedSight\settings\lmstudio.json
+    base_url         http://127.0.0.1:1234/v1
+    model            the model a chat request names
+    timeout_seconds  request timeout
+    data_root        <install>\data
+    runtime_mode     native | container
+    ui_effects       full | reduced | off
+```
+
+and makes every consumer read it:
+
+| Consumer | How it gets the value |
+| --- | --- |
+| the backend, the gateway, any `python` in a RedSight venv | `redsight_bootstrap.py` in `site-packages`, imported by a `.pth` at interpreter startup |
+| `START-REDSIGHT-NATIVE.ps1` | reads it and exports it before starting anything |
+| the app's own `START-REDSIGHT.ps1` | its hard-assigned `$env:LM_STUDIO_*` lines are rewritten to match |
+| a containerized backend | the `LM_STUDIO_*` keys in `docker-compose.yml` are rewritten (the shipped file carries the author's own LAN address) |
+| the desktop UI | Settings -> LM Studio reads and writes the same file |
+
+Two further defects on that path are corrected by the overlay:
+
+* **The model.** `/api/v1/chat` passes no model, and `settings.lmstudio.model_id`
+  is never consulted, so the provider sent the literal id `"default"` - which
+  LM Studio answers with 404. The appended patch resolves the configured model,
+  or the first non-embedding model LM Studio reports as loaded.
+* **The status probes.** Every probe in the UI is hardcoded to
+  `http://127.0.0.1:1234`. Requests to that origin are redirected to the
+  configured one, and only while the two differ.
+
+## Memory, and why it showed as missing
+
+The desktop UI does not talk to the model directly. Each chat is:
+
+```
+UI -> POST 127.0.0.1:8765/memory/build     (action/memory gateway)
+   -> POST 127.0.0.1:8000/api/v1/chat      (backend -> LM Studio)
+   -> POST 127.0.0.1:8765/memory/commit
+```
+
+and the memory indicator reads `127.0.0.1:8765/memory/status`. That gateway is
+`redsight_actions.gateway_stage10:app` - an ASGI app, so running
+`gateway_stage10.py` as a script defines it and exits without serving anything.
+With the gateway down, memory reads as missing *and* no query is answered.
+
+Setup now serves it through uvicorn and waits for `/memory/status`, and every
+shortcut goes through `Start-RedSight.ps1`, which picks a launcher that starts
+the gateway rather than whichever launcher happens to exist. The health check
+reports the gateway separately from the backend.
+
+## Desktop responsiveness
+
+Three things in the shipped UI cost input latency, all of them now handled by
+the overlay:
+
+| Cause | Effect | Fix |
+| --- | --- | --- |
+| `LiveGpuDock.refresh` runs `subprocess.run(["nvidia-smi", ...])` on the Qt GUI thread every 1000 ms | the event loop stalls for as long as the process takes - hundreds of milliseconds on hybrid-graphics laptops | telemetry queries are served from a background sample |
+| `get_lm_model()` blocks the GUI thread on an HTTP request every 10 s | a multi-second freeze whenever LM Studio is unreachable | the model list is fetched on a background thread and cached |
+| `AmbientSupervisuals` repaints a translucent, full-window overlay every 50 ms | a permanent cost on integrated graphics | the cadence is budgeted (`full` / `reduced` / `off`), selectable in the wizard and in Settings |
 
 ## Runtime modes
 
@@ -149,11 +242,11 @@ on the `windows-latest` runner via `.github/workflows/build-windows-installer.ym
 
 ```powershell
 # from a source tree
-pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.4.0
+pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.0
 
 # reusing the payload of the previously shipped installer
 pwsh -File installer/build/Build-Installer.ps1 `
-     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.4.0
+     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.0
 ```
 
 Useful switches:
@@ -179,17 +272,23 @@ snapshot; that class of leftover is now removed by pattern rather than by hand.
 ## Testing
 
 ```bash
-pwsh -File installer/tests/Test-RedSightSetup.ps1   # 137 assertions
-pwsh -File installer/tests/Test-IssScript.ps1       #  45 static checks
-python3 installer/tests/test_app_overlay.py         #  35 assertions
+pwsh -File installer/tests/Test-RedSightSetup.ps1   # 228 assertions
+pwsh -File installer/tests/Test-IssScript.ps1       #  74 static checks
+python3 installer/tests/test_app_overlay.py         #  96 assertions
 ```
 
-66 assertions covering version parsing and gating, the install-path rewriter
+410 assertions covering version parsing and gating, the install-path rewriter
 (plain, JSON-escaped and forward-slash forms, exclusions, idempotency), `.env`
 seeding, retry/backoff behaviour, process timeout and exit-code handling, the
 venv import probe, bundled-Python provisioning (hash verification, tamper
-refusal, absent-bundle fallback), archive expansion, hashing and the
-logging/summary plumbing. These run on Linux too, which is why they gate the
+refusal, absent-bundle fallback), archive expansion, hashing, the
+logging/summary plumbing, LM Studio endpoint normalisation and model selection,
+the runtime configuration file (BOM-free, corrupt-file tolerant) and its
+environment export, the compose and launcher endpoint rewrites, the generated
+native launcher (uvicorn-served gateway, health waits, no proxy on loopback),
+launcher dispatch, the runtime `.pth` installation, the wizard's
+one-installation-per-device guard, and the overlay's probe redirection, cached
+sampling and effects budget. These run on Linux too, which is why they gate the
 Windows build job.
 
 The Windows job then does what unit tests cannot: it installs the freshly built

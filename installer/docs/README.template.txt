@@ -54,8 +54,69 @@ Everything is idempotent: re-running setup repairs a broken install
 instead of starting over.
 
 
-ALSO FIXED IN THIS RELEASE
----------------------------
+FIXED IN {{VERSION}} — LM STUDIO, MEMORY AND A RESPONSIVE UI
+------------------------------------------------------------
+Four faults reported against the previous release are fixed. All four
+were in how the desktop UI, the backend and the local model server were
+wired to each other, so each is described plainly below.
+
+  * "Test Connection passes but nothing answers."
+    The backend reads its LM Studio endpoint from the process
+    environment. Nothing in RedSight loads .env for that setting, so the
+    endpoint fell back to its built-in default of
+    http://host.docker.internal:1234/v1 — an address that only exists
+    inside a container. Meanwhile the Settings dialog tested whatever
+    URL was typed into it, directly. A passing test could therefore sit
+    next to a backend that had never reached LM Studio at all.
+
+    Setup now records the endpoint in one file that everything reads:
+
+        %LOCALAPPDATA%\RedSight\settings\lmstudio.json
+
+    and installs it into the environment of the backend, the agent
+    gateway and the desktop UI. A new wizard page asks for the endpoint,
+    and a new Settings ▸ LM Studio tab lets you change it, detect the
+    loaded models and test the connection for real.
+
+  * "The query gets no response."
+    RedSight sent every chat with the model id "default", because the
+    UI passes no model and the configured one was never consulted.
+    LM Studio answers 404 for a model it has not got, so nothing ever
+    reached your loaded model. Requests now name the configured model,
+    or the first non-embedding model LM Studio reports as loaded.
+
+  * "Memory is missing."
+    The UI reads memory from the action/memory gateway on
+    127.0.0.1:8765, and each chat goes through it before and after the
+    model call. That gateway has to be served by uvicorn; the launcher
+    was running its module as a plain script, which starts nothing. It
+    is now served properly and waited for, every shortcut goes through
+    a launcher that starts it, and the health check reports it
+    separately.
+
+  * "The UI is glitchy — the cursor and clicks lag."
+    Three things ran on the drawing thread: nvidia-smi was launched as
+    a process once a second, an HTTP request to LM Studio blocked it
+    every ten seconds, and a translucent layer covering the whole window
+    repainted twenty times a second. Sampling now happens in the
+    background and the animation has a budget you can choose — full,
+    reduced or off — during setup and in Settings.
+
+  * If your LM Studio runs on another machine or another port, the UI
+    now reports it correctly. Its status probes were hardcoded to
+    127.0.0.1:1234 and are redirected to your configured endpoint.
+
+  * A containerized install no longer inherits the build machine's own
+    LAN address for LM Studio from docker-compose.yml.
+
+  * One installation per device. Setup installs over an existing
+    RedSight rather than beside it, and no longer offers to change the
+    directory when one is already present, so a machine cannot end up
+    with two copies.
+
+
+ALSO FIXED IN EARLIER 11.x RELEASES
+------------------------------------
   * Install-path rewriting now handles JSON-escaped ("C:\\Users\\...")
     and forward-slash ("C:/Users/...") paths as well as plain ones.
     Earlier releases only matched the plain form, so paths inside JSON
@@ -148,13 +209,24 @@ in {{SUMS_FILE}}.
 
 FIRST LAUNCH
 -------------
-The "RedSight" shortcut will:
-  1. Start Docker Desktop if it is not already running.
-  2. Start the Qdrant and RedSight backend containers.
-  3. Connect to LM Studio's local server on 127.0.0.1:1234 if it is
-     running (start LM Studio's Local Server separately for local
-     inference).
-  4. Start the action/memory gateway and open the Command Center UI.
+The "RedSight" shortcut picks the right launcher for how setup
+configured this machine, and will:
+  1. Start Docker Desktop and the Qdrant/RedSight containers, or, in
+     native mode, start the backend in-process with an embedded vector
+     store and no containers at all.
+  2. Start the action/memory gateway on 127.0.0.1:8765 and wait until it
+     answers. The UI needs it for memory and for chat, so a failure here
+     is reported rather than passed over.
+  3. Put the recorded LM Studio endpoint into the environment the
+     backend reads.
+  4. Open the Command Center UI.
+
+For local inference, start LM Studio and switch on its Local Server
+(Developer tab), then load a model. Setup records the endpoint even when
+LM Studio is not running yet, so switching it on later is enough — no
+reinstall needed. To point RedSight at a different address or pick a
+different model, use Settings ▸ LM Studio, which tests the endpoint and
+lists the models it actually has.
 
 If the Docker images were not built during setup, the first launch
 builds them, which takes several minutes once.
@@ -174,7 +246,14 @@ To check an existing install at any time, use the Start Menu entry
       "C:\Program Files\RedSight\scripts\windows\Verify-RedSightSetup.ps1"
 
 It reports, per dependency, whether RedSight can launch right now and
-what is missing if it cannot.
+what is missing if it cannot — including whether the LM Studio endpoint
+reaches the backend, whether a model is loaded, and whether the
+action/memory gateway is answering.
+
+If the UI says memory is missing, the gateway did not start. Its output
+is in:
+
+    %LOCALAPPDATA%\RedSight\logs\native-gateway.err.log
 
 To repair an install (safe to re-run at any time), use the Start Menu
 entry "Repair RedSight setup", or run:

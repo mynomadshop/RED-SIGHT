@@ -11,6 +11,7 @@
         Docker Desktop   downloaded and installed silently, engine started
         Docker images    built via docker compose
         Node.js          LTS MSI, only for the optional WhatsApp bridge
+        LM Studio        local server located, started and its model recorded
         .env             created from .env.example
         install paths    author-machine absolute paths rewritten
 
@@ -31,6 +32,7 @@ Set-StrictMode -Version Latest
 # Dot-source the shared helpers from the same directory.
 $script:RsScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 . (Join-Path $script:RsScriptDir 'RedSight-Common.ps1')
+. (Join-Path $script:RsScriptDir 'RedSight-LmStudio.ps1')
 . (Join-Path $script:RsScriptDir 'RedSight-Provision.ps1')
 
 # --------------------------------------------------------------------------
@@ -561,7 +563,7 @@ function Test-RsUiLaunch {
         [int]$TimeoutSeconds = 300
     )
 
-    $result = [pscustomobject]@{ Ok = $false; Detail = ''; Traceback = '' }
+    $result = [pscustomobject]@{ Ok = $false; Detail = ''; Traceback = ''; Fixes = '' }
     if (-not (Test-Path -LiteralPath $VenvPython)) {
         $result.Detail = "interpreter not found: $VenvPython"
         return $result
@@ -594,6 +596,17 @@ except Exception:
     print("UI_LAUNCH_FAILED_AT=" + stage)
     traceback.print_exc()
     sys.exit(1)
+
+# The Stage 11.5 fixes - the LM Studio endpoint, the redirected status probes,
+# nvidia-smi off the GUI thread and the calmed animation - are installed by an
+# overlay module. It is wired into the launcher inside a try/except so the UI
+# always starts, which also means a failure there would be invisible. Report it.
+try:
+    import json
+    from app.ui import action_palette_stage115_lmstudio as rs115
+    print("UI_FIXES=" + json.dumps(rs115.install(), default=str))
+except Exception as exc:
+    print("UI_FIXES_FAILED=" + type(exc).__name__ + ": " + str(exc))
 '@
 
     # QT_QPA_PLATFORM is also set on the child so Qt cannot try to open a window.
@@ -614,6 +627,13 @@ except Exception:
     if ($r.ExitCode -eq 0 -and $out -match 'UI_LAUNCH_OK') {
         $result.Ok = $true
         $result.Detail = 'the Command Center import chain loads cleanly'
+        $fixes = [regex]::Match($out, 'UI_FIXES=(.+)')
+        if ($fixes.Success) {
+            $result.Fixes = $fixes.Groups[1].Value.Trim()
+        } else {
+            $failed = [regex]::Match($out, 'UI_FIXES_FAILED=(.+)')
+            if ($failed.Success) { $result.Fixes = 'FAILED: ' + $failed.Groups[1].Value.Trim() }
+        }
         return $result
     }
 
