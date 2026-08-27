@@ -31,6 +31,7 @@ Set-StrictMode -Version Latest
 # Dot-source the shared helpers from the same directory.
 $script:RsScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 . (Join-Path $script:RsScriptDir 'RedSight-Common.ps1')
+. (Join-Path $script:RsScriptDir 'RedSight-Provision.ps1')
 
 # --------------------------------------------------------------------------
 # Pinned dependency versions and sources
@@ -92,6 +93,90 @@ function Get-RsDownloadCache {
            else { Join-Path $ProjectRoot 'runtime\downloads' }
     New-Item -ItemType Directory -Path $dir -Force -ErrorAction SilentlyContinue | Out-Null
     return $dir
+}
+
+# ==========================================================================
+# Hardware profile
+# ==========================================================================
+
+$script:RsHardwareProfile = $null
+
+function Get-RsHardwareProfile {
+    <#
+        Returns the machine capability profile produced by RedSight-Hardware.ps1.
+
+        The installer wizard already runs that scan before installing, so it can
+        hand the result over with -ProfilePath rather than paying for a second
+        scan; otherwise it is run here. Cached for the life of the process.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$ProfilePath,
+        [switch]$Refresh
+    )
+
+    if ($script:RsHardwareProfile -and -not $Refresh) { return $script:RsHardwareProfile }
+
+    if ($ProfilePath -and (Test-Path -LiteralPath $ProfilePath)) {
+        try {
+            $script:RsHardwareProfile = Get-Content -LiteralPath $ProfilePath -Raw | ConvertFrom-Json
+            Write-RsLog "loaded the hardware profile from $ProfilePath" -Level DEBUG
+            return $script:RsHardwareProfile
+        } catch {
+            Write-RsLog "could not read the hardware profile at $ProfilePath : $($_.Exception.Message)" -Level WARN
+        }
+    }
+
+    $scanner = Join-Path $script:RsScriptDir 'RedSight-Hardware.ps1'
+    if (-not (Test-Path -LiteralPath $scanner)) {
+        Write-RsLog "hardware scanner not found at $scanner" -Level WARN
+        return $null
+    }
+
+    Write-RsLog 'scanning hardware capabilities' -Level STEP
+    $r = Invoke-RsProcess -FilePath (Get-RsPowerShellExe) `
+                          -Arguments @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                                       '-File', $scanner, '-Json', '-Quiet') `
+                          -TimeoutSeconds 300 -Quiet
+    if ($r.ExitCode -ne 0 -or -not $r.StdOut.Trim()) {
+        Write-RsLog "hardware scan produced no output (exit $($r.ExitCode))" -Level WARN
+        return $null
+    }
+    try {
+        $script:RsHardwareProfile = $r.StdOut | ConvertFrom-Json
+    } catch {
+        Write-RsLog "could not parse the hardware scan output: $($_.Exception.Message)" -Level WARN
+        return $null
+    }
+    return $script:RsHardwareProfile
+}
+
+function Test-RsVirtualizationAvailable {
+    <#
+        True when this machine can actually run WSL2 / Docker Desktop.
+
+        Earlier builds skipped this and enabled the WSL2 Windows features on
+        machines whose firmware has virtualization switched off, which left a
+        half-configured system: the features were on, Docker was installed, and
+        the engine could never start. Setup now refuses to begin that work and
+        falls back to native mode instead.
+    #>
+    [CmdletBinding()]
+    param([string]$ProfilePath)
+
+    $hw = Get-RsHardwareProfile -ProfilePath $ProfilePath
+    if (-not $hw) {
+        # No profile: fall back to a direct check rather than guessing.
+        try {
+            $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+            if ($cs.HypervisorPresent) { return $true }
+            $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1
+            return [bool]$cpu.VirtualizationFirmwareEnabled
+        } catch {
+            return $false
+        }
+    }
+    return [bool]$hw.virtualization.wsl2Capable
 }
 
 # ==========================================================================
@@ -356,6 +441,7 @@ function Initialize-RsVenv {
         [string[]]$RequirementFiles = @(),
         [string[]]$Packages = @(),
         [string[]]$EditableProjects = @(),
+        [object[]]$PreInstalls = @(),
         [string]$Wheelhouse,
         [switch]$OfflineOnly,
         [switch]$Recreate,
@@ -400,6 +486,10 @@ function Initialize-RsVenv {
     }
 
     $installs = New-Object System.Collections.Generic.List[object]
+    # PreInstalls run first on purpose: pinning torch to the CPU or CUDA wheel
+    # index up front means the later resolution sees it already satisfied and
+    # does not pull the multi-gigabyte default build over the top.
+    foreach ($pre in $PreInstalls) { $installs.Add($pre) }
     foreach ($proj in $EditableProjects) { $installs.Add(@{ Label = "editable $proj"; Args = @('-e', $proj) }) }
     foreach ($file in $RequirementFiles) {
         if (Test-Path -LiteralPath $file) {
@@ -511,9 +601,33 @@ function Enable-RsWsl2 {
         flag tells the caller whether Docker can be expected to start now or
         only after a restart.
     #>
-    [CmdletBinding()] param()
+    [CmdletBinding()]
+    param([string]$HardwareProfilePath)
 
-    $result = [pscustomobject]@{ Changed = $false; RebootRequired = $false; Ok = $false }
+    $result = [pscustomobject]@{
+        Changed = $false; RebootRequired = $false; Ok = $false
+        Blocked = $false; Reason = ''
+    }
+
+    # Hardware gate first. Turning on the WSL2 features when the firmware has
+    # virtualization disabled produces a machine that reboots, still cannot
+    # start Docker, and has no way to say why - the exact failure reported
+    # against earlier builds.
+    $hw = Get-RsHardwareProfile -ProfilePath $HardwareProfilePath
+    if ($hw -and -not $hw.virtualization.wsl2Capable) {
+        $result.Blocked = $true
+        $result.Reason = [string]$hw.virtualization.wsl2Blocker
+        Write-RsLog 'WSL2 is not available on this machine, so it will not be enabled:' -Level WARN
+        Write-RsLog "    $($result.Reason)" -Level WARN
+        if (-not $hw.virtualization.available) {
+            Write-RsLog '    To enable it: restart, open the firmware setup screen (usually F2, F10, Del' -Level INFO
+            Write-RsLog '    or Esc during boot), turn on Intel VT-x / AMD-V (often listed as' -Level INFO
+            Write-RsLog '    "Virtualization Technology", "SVM Mode" or "Intel VMX"), save and reboot,' -Level INFO
+            Write-RsLog '    then re-run "Repair RedSight setup" from the Start Menu.' -Level INFO
+        }
+        Write-RsLog '    RedSight will run in native mode instead - no containers required.' -Level INFO
+        return $result
+    }
 
     if (-not (Test-RsAdmin)) {
         Write-RsLog 'enabling WSL2 requires elevation - skipping' -Level WARN
@@ -619,11 +733,22 @@ function Install-RsDockerDesktop {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ProjectRoot,
+        [string]$HardwareProfilePath,
         [switch]$OfflineOnly
     )
 
     if (-not (Test-RsAdmin)) {
         throw 'installing Docker Desktop requires administrator privileges'
+    }
+
+    # Docker Desktop's only supported backend here is WSL2. Installing it on a
+    # machine that cannot run WSL2 downloads 1.6 GB to produce an engine that
+    # will never start, so refuse with a reason the user can act on.
+    $hw = Get-RsHardwareProfile -ProfilePath $HardwareProfilePath
+    if ($hw -and -not $hw.virtualization.wsl2Capable) {
+        throw ("Docker Desktop needs WSL2, which this machine cannot run. " +
+               [string]$hw.virtualization.wsl2Blocker +
+               " RedSight will run in native mode instead.")
     }
 
     $cache = Get-RsDownloadCache -ProjectRoot $ProjectRoot
@@ -894,24 +1019,61 @@ function Repair-RsHardcodedPaths {
 }
 
 function Install-RsShortcuts {
-    <# Delegates to the app's own shortcut installer when present. #>
+    <#
+        Creates the Desktop shortcut, pointing at the launcher that matches the
+        runtime mode: the native launcher when RedSight runs without Docker, the
+        app's own desktop launcher otherwise.
+    #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$ProjectRoot)
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [ValidateSet('container', 'native')][string]$RuntimeMode = 'container',
+        [string]$ShortcutPath
+    )
 
-    $script = Join-Path $ProjectRoot 'scripts\windows\Install-RedSightDesktopShortcut.ps1'
-    if (-not (Test-Path -LiteralPath $script)) {
-        Write-RsLog 'shortcut installer not found - skipping' -Level WARN
+    $launcher = Get-RsLauncherPath -ProjectRoot $ProjectRoot -Mode $RuntimeMode
+    if (-not $launcher) {
+        # Fall back to the payload's own installer, which has its own chain of
+        # candidate launchers.
+        $script = Join-Path $ProjectRoot 'scripts\windows\Install-RedSightDesktopShortcut.ps1'
+        if (-not (Test-Path -LiteralPath $script)) {
+            Write-RsLog 'no launcher and no shortcut installer found - skipping' -Level WARN
+            return $false
+        }
+        $r = Invoke-RsProcess -FilePath (Get-RsPowerShellExe) `
+                              -Arguments @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script) `
+                              -TimeoutSeconds 300
+        if ($r.ExitCode -ne 0) {
+            Write-RsLog "shortcut creation returned $($r.ExitCode)" -Level WARN
+            return $false
+        }
+        Write-RsLog 'desktop shortcut created by the application installer' -Level OK
+        return $true
+    }
+
+    if (-not $ShortcutPath) {
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        if (-not $desktop) { $desktop = $ProjectRoot }
+        $ShortcutPath = Join-Path $desktop 'RedSight.lnk'
+    }
+
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $sc = $shell.CreateShortcut($ShortcutPath)
+        $sc.TargetPath = Get-RsPowerShellExe
+        # -WindowStyle Hidden keeps a console window from flashing up on launch.
+        $sc.Arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcher + '"'
+        $sc.WorkingDirectory = $ProjectRoot
+        $sc.Description = "RedSight Local Intelligence Command Center ($RuntimeMode mode)"
+        $icon = Join-Path $ProjectRoot 'assets\redsight.ico'
+        if (Test-Path -LiteralPath $icon) { $sc.IconLocation = $icon }
+        $sc.Save()
+        Write-RsLog "desktop shortcut created: $ShortcutPath -> $(Split-Path -Leaf $launcher)" -Level OK
+        return $true
+    } catch {
+        Write-RsLog "could not create the desktop shortcut: $($_.Exception.Message)" -Level WARN
         return $false
     }
-    $ps = Get-RsPowerShellExe
-    $r = Invoke-RsProcess -FilePath $ps -Arguments @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script) `
-                          -TimeoutSeconds 300
-    if ($r.ExitCode -ne 0) {
-        Write-RsLog "shortcut creation returned $($r.ExitCode)" -Level WARN
-        return $false
-    }
-    Write-RsLog 'desktop shortcut created' -Level OK
-    return $true
 }
 
 # ==========================================================================

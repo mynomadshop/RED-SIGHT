@@ -208,7 +208,8 @@ Write-RsLog 'installing the updated setup scripts into scripts\windows' -Level S
 $targetScripts = Join-Path $StagingDir 'scripts\windows'
 New-Item -ItemType Directory -Path $targetScripts -Force | Out-Null
 
-$overlay = @('RedSight-Common.ps1', 'RedSight-Preflight.ps1', 'Bootstrap-RedSight.ps1', 'Verify-RedSightSetup.ps1')
+$overlay = @('RedSight-Common.ps1', 'RedSight-Hardware.ps1', 'RedSight-Provision.ps1',
+             'RedSight-Preflight.ps1', 'Bootstrap-RedSight.ps1', 'Verify-RedSightSetup.ps1')
 foreach ($name in $overlay) {
     $src = Join-Path (Join-Path $installerRoot 'scripts') $name
     if (-not (Test-Path -LiteralPath $src)) { throw "setup script missing from the repository: $src" }
@@ -371,12 +372,20 @@ $iss = Join-Path $installerRoot 'RedSight.iss'
 $outputBase = "RedSight-Setup-$Version"
 $icon = Join-Path $StagingDir 'assets\redsight.ico'
 
+# The hardware scanner is compiled in with the dontcopy flag so the wizard can
+# extract and run it before anything is installed.
+$hardwareScript = Join-Path (Join-Path $installerRoot 'scripts') 'RedSight-Hardware.ps1'
+if (-not (Test-Path -LiteralPath $hardwareScript)) {
+    throw "hardware scanner missing from the repository: $hardwareScript"
+}
+
 $isccArgs = @(
     $iss,
     "/DAppVersion=$Version",
     "/DPayloadDir=$StagingDir",
     "/DOutputDir=$OutputDir",
-    "/DOutputBase=$outputBase"
+    "/DOutputBase=$outputBase",
+    "/DHardwareScript=$hardwareScript"
 )
 if (Test-Path -LiteralPath $icon) { $isccArgs += "/DIconFile=$icon" }
 
@@ -472,6 +481,17 @@ $manifest = [ordered]@{
         )
     }
     bundled = $bundledInfo
+    setup_options = @(
+        'Setup profile: NVIDIA CUDA local inference, or laptop/API provider',
+        'AI provider and API key (stored with Windows DPAPI, as the Settings dialog does)',
+        'RedSight working folder, created and wired into .env',
+        'Runtime mode: containerized backend, or native with an embedded vector store'
+    )
+    hardware_aware = @(
+        'Scans GPU/CUDA, chassis, RAM, disk and firmware virtualization before installing',
+        'Installs CPU PyTorch wheels instead of ~2.5 GB of CUDA runtime when no NVIDIA driver responds',
+        'Never enables WSL2 or installs Docker when firmware virtualization is unavailable'
+    )
     auto_provisioned = @(
         'Python 3.12 private runtime (bundled; falls back to python.org)',
         'pip / setuptools / wheel (offline from the bundled wheelhouse)',

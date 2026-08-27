@@ -259,15 +259,113 @@ Assert-True -Name 'no shortcut targets a .ps1 directly' `
             -Condition ($ps1Targets.Count -eq 0) -Detail "($($ps1Targets -join ', '))"
 
 # --------------------------------------------------------------------------
-# Pascal begin/end balance in [Code]
+# Pascal lexing: block balance, and comments that close early
 # --------------------------------------------------------------------------
-$stripped = [regex]::Replace($codeText, "'[^']*'", "''")             # string literals
-$stripped = [regex]::Replace($stripped, '(?s)\{[^}]*\}', ' ')        # { comments }
-$stripped = [regex]::Replace($stripped, '(?m)//.*$', ' ')            # // comments
-$beginCount = ([regex]::Matches($stripped, '(?i)\bbegin\b')).Count
-$endCount = ([regex]::Matches($stripped, '(?i)\bend\b')).Count
-Assert-True -Name '[Code] begin/end are balanced' `
-            -Condition ($beginCount -eq $endCount) -Detail "(begin=$beginCount end=$endCount)"
+
+function Remove-PascalNoise {
+    <#
+        Strips Pascal string literals and comments with a character state
+        machine. Regex cannot do this correctly: '{' occurs inside string
+        literals and apostrophes occur inside comments, so a regex pass
+        mis-pairs them and produces phantom imbalances.
+
+        Also reports nested '{' inside a brace comment, which is a real hazard:
+        Pascal ends the comment at the FIRST '}', so a comment mentioning
+        something like {app} silently terminates early and the remainder
+        becomes code.
+    #>
+    param([Parameter(Mandatory)][string]$Code)
+
+    $sb = New-Object System.Text.StringBuilder
+    $nestedBrace = New-Object System.Collections.Generic.List[int]
+    $state = 'code'
+    $line = 1
+    for ($i = 0; $i -lt $Code.Length; $i++) {
+        $c = $Code[$i]
+        $next = if ($i + 1 -lt $Code.Length) { $Code[$i + 1] } else { [char]0 }
+        if ($c -eq "`n") { $line++ }
+
+        switch ($state) {
+            'code' {
+                if ($c -eq "'") { $state = 'str'; [void]$sb.Append(' ') }
+                elseif ($c -eq '{') { $state = 'brace'; [void]$sb.Append(' ') }
+                elseif ($c -eq '/' -and $next -eq '/') { $state = 'line'; $i++; [void]$sb.Append(' ') }
+                else { [void]$sb.Append($c) }
+            }
+            'str' {
+                if ($c -eq "'") { $state = 'code' }
+                [void]$sb.Append($(if ($c -eq "`n") { "`n" } else { ' ' }))
+            }
+            'brace' {
+                if ($c -eq '}') { $state = 'code' }
+                elseif ($c -eq '{') { $nestedBrace.Add($line) }
+                [void]$sb.Append($(if ($c -eq "`n") { "`n" } else { ' ' }))
+            }
+            'line' {
+                if ($c -eq "`n") { $state = 'code'; [void]$sb.Append("`n") } else { [void]$sb.Append(' ') }
+            }
+        }
+    }
+    return [pscustomobject]@{
+        Clean       = $sb.ToString()
+        EndState    = $state
+        NestedBrace = $nestedBrace
+    }
+}
+
+$lex = Remove-PascalNoise -Code $codeText
+Assert-True -Name 'Pascal lexes cleanly (no unterminated string or comment)' `
+            -Condition ($lex.EndState -eq 'code') -Detail "(ended in state '$($lex.EndState)')"
+Assert-True -Name 'no brace comment contains a nested {' `
+            -Condition ($lex.NestedBrace.Count -eq 0) `
+            -Detail "(lines: $($lex.NestedBrace -join ', ') - the comment ends at the first } and the rest becomes code)"
+
+# begin/case/try all close with end.
+$openers = ([regex]::Matches($lex.Clean, '(?i)\b(begin|case|try)\b')).Count
+$ends = ([regex]::Matches($lex.Clean, '(?i)\bend\b')).Count
+Assert-True -Name '[Code] blocks are balanced' `
+            -Condition ($openers -eq $ends) -Detail "(begin/case/try=$openers end=$ends)"
+
+# Depth must never go negative, which would mean an end with no opener.
+$depth = 0
+$negativeLine = 0
+$lineNo = 0
+foreach ($l in ($lex.Clean -split "`r?`n")) {
+    $lineNo++
+    $depth += ([regex]::Matches($l, '(?i)\b(begin|case|try)\b')).Count
+    $depth -= ([regex]::Matches($l, '(?i)\bend\b')).Count
+    if ($depth -lt 0 -and $negativeLine -eq 0) { $negativeLine = $lineNo }
+}
+Assert-True -Name '[Code] never closes a block that was not opened' `
+            -Condition ($negativeLine -eq 0) -Detail "(first at [Code] line $negativeLine)"
+
+# --------------------------------------------------------------------------
+# Wizard wiring
+# --------------------------------------------------------------------------
+
+# The two initial setup options are the headline feature of this installer.
+Assert-True -Name 'wizard offers a setup-profile page' -Condition ($codeText -match 'ProfilePage\s*:=\s*CreateInputOptionPage')
+Assert-True -Name 'wizard scans hardware before offering options' -Condition ($codeText -match 'procedure ScanHardware')
+Assert-True -Name 'hardware scan runs before the profile page' -Condition ($codeText -match 'CurPageID = wpWelcome[\s\S]{0,120}ScanHardware')
+Assert-True -Name 'wizard offers a working-folder page' -Condition ($codeText -match 'CreateInputDirPage')
+Assert-True -Name 'provider pages are skipped for the CUDA profile' -Condition ($codeText -match 'function ShouldSkipPage')
+
+# The API key must never reach a command line: Inno logs [Run] parameters.
+Assert-True -Name 'wizard answers go to an answer file' -Condition ($codeText -match 'SaveStringsToFile\(AnswerPath')
+Assert-True -Name 'bootstrap receives -AnswerFile' -Condition ($codeText -match "'-AnswerFile")
+Assert-True -Name 'no apiKey is appended to the argument string' `
+            -Condition ($codeText -notmatch "Args\s*:=\s*Args\s*\+\s*'\s*-ApiKey")
+Assert-True -Name 'a leftover answer file is deleted' -Condition ($codeText -match 'DeleteFile\(AnswerPath\)')
+
+# Docker must never be requested on a machine the scan says cannot run WSL2.
+Assert-True -Name 'Docker is gated on the WSL2 verdict' `
+            -Condition ($codeText -match "WizardIsComponentSelected\('docker'\)\s*and\s*HwWsl2")
+
+$issText = $raw
+Assert-True -Name 'hardware scanner is extracted at wizard time' `
+            -Condition ($issText -match 'HardwareScript[\s\S]{0,80}dontcopy' -or $issText -match 'dontcopy')
+Assert-True -Name 'hardware scanner is not installed into {app}' `
+            -Condition ($issText -notmatch 'RedSight-Hardware\.ps1"; DestDir')
 
 # --------------------------------------------------------------------------
 Write-Host ("`n" + ('=' * 60)) -ForegroundColor Cyan

@@ -27,6 +27,11 @@
 #ifndef OutputBase
   #define OutputBase "RedSight-Setup-" + AppVersion
 #endif
+; Standalone hardware scanner, extracted to {tmp} and run by the wizard before
+; anything is installed so the setup options can be tailored to this machine.
+#ifndef HardwareScript
+  #define HardwareScript "scripts\RedSight-Hardware.ps1"
+#endif
 
 #define AppName        "RedSight"
 #define AppPublisher   "RedSight"
@@ -122,6 +127,10 @@ Name: "{app}\logs";            Flags: uninsalwaysuninstall
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs; Components: core
 
+; Wizard-time only: never installed, just extracted to {tmp} so the hardware
+; scan can run before the user chooses a setup profile.
+Source: "{#HardwareScript}"; Flags: dontcopy
+
 [Icons]
 Name: "{group}\RedSight"; \
     Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
@@ -189,8 +198,384 @@ Type: filesandordirs; Name: "{app}\__pycache__"
 WelcomeLabel2=This will install [name/ver] on your computer.%n%nSetup checks for everything RedSight needs - Python 3.12, its virtual environments, WSL2 and Docker Desktop - and installs and configures whatever is missing. A private Python 3.12 runtime is included, so no separate Python installation is required.%n%nAn internet connection is needed unless you are installing from a prepared offline bundle.
 
 [Code]
+const
+  PROFILE_CUDA = 0;
+  PROFILE_API  = 1;
+
 var
-  RebootNeeded: Boolean;
+  ProfilePage:   TInputOptionWizardPage;
+  ProviderPage:  TInputOptionWizardPage;
+  ApiPage:       TInputQueryWizardPage;
+  WorkspacePage: TInputDirWizardPage;
+  ProfileInfo:   TNewStaticText;
+
+  RebootNeeded:  Boolean;
+  HwScanned:     Boolean;
+  HwIniPath:     string;
+  HwJsonPath:    string;
+  AnswerPath:    string;
+
+  HwCudaCapable: Boolean;
+  HwNvidiaCard:  Boolean;
+  HwWsl2:        Boolean;
+  HwLaptop:      Boolean;
+  HwGpuName:     string;
+  HwVram:        string;
+  HwWslBlocker:  string;
+  HwRecProfile:  string;
+  HwRecRuntime:  string;
+
+{ Provider slugs, in the order shown on ProviderPage. Must match
+  app/ui/action_palette_stage105.py and RedSight-Provision.ps1. }
+function ProviderSlug(Index: Integer): string;
+begin
+  case Index of
+    0: Result := 'lmstudio';
+    1: Result := 'openai';
+    2: Result := 'anthropic';
+    3: Result := 'gemini';
+    4: Result := 'xai';
+    5: Result := 'custom';
+  else
+    Result := 'lmstudio';
+  end;
+end;
+
+function IniBool(const Section, Key: string): Boolean;
+begin
+  Result := GetIniString(Section, Key, '0', HwIniPath) = '1';
+end;
+
+{ ------------------------------------------------------------------------
+  Runs RedSight-Hardware.ps1 into the temp directory. Everything downstream -
+  which Python wheels get downloaded, whether WSL2/Docker is attempted at all -
+  depends on this, so it runs before the user is asked to choose anything.
+  ------------------------------------------------------------------------ }
+procedure ScanHardware();
+var
+  ResultCode: Integer;
+  ScriptPath: string;
+  Params: string;
+begin
+  if HwScanned then
+    Exit;
+  HwScanned := True;
+
+  { Conservative defaults if anything below fails. }
+  HwCudaCapable := False;
+  HwNvidiaCard := False;
+  HwWsl2 := False;
+  HwLaptop := False;
+  HwGpuName := '';
+  HwVram := '0';
+  HwWslBlocker := '';
+  HwRecProfile := 'api';
+  HwRecRuntime := 'native';
+
+  try
+    ExtractTemporaryFile('RedSight-Hardware.ps1');
+  except
+    Log('could not extract the hardware scanner: ' + GetExceptionMessage);
+    Exit;
+  end;
+
+  ScriptPath := ExpandConstant('{tmp}\RedSight-Hardware.ps1');
+  HwIniPath := ExpandConstant('{tmp}\rs-hardware.ini');
+  HwJsonPath := ExpandConstant('{tmp}\rs-hardware.json');
+
+  Params := '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '"' +
+            ' -Quiet -IniFile "' + HwIniPath + '" -OutFile "' + HwJsonPath + '"';
+
+  WizardForm.StatusLabel.Caption := 'Checking this computer...';
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params,
+              '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Log('hardware scan could not be started, code ' + IntToStr(ResultCode));
+    Exit;
+  end;
+
+  if not FileExists(HwIniPath) then
+  begin
+    Log('hardware scan produced no INI at ' + HwIniPath);
+    Exit;
+  end;
+
+  HwCudaCapable := IniBool('hardware', 'cudaCapable');
+  HwNvidiaCard  := IniBool('hardware', 'hasNvidiaHardware');
+  HwWsl2        := IniBool('hardware', 'wsl2Capable');
+  HwLaptop      := IniBool('hardware', 'isLaptop');
+  HwGpuName     := GetIniString('hardware', 'gpuName', '', HwIniPath);
+  HwVram        := GetIniString('hardware', 'maxVramGB', '0', HwIniPath);
+  HwWslBlocker  := GetIniString('hardware', 'wsl2Blocker', '', HwIniPath);
+  HwRecProfile  := GetIniString('hardware', 'recommendProfile', 'api', HwIniPath);
+  HwRecRuntime  := GetIniString('hardware', 'recommendRuntime', 'native', HwIniPath);
+
+  Log('hardware: cuda=' + GetIniString('hardware', 'cudaCapable', '0', HwIniPath) +
+      ' wsl2=' + GetIniString('hardware', 'wsl2Capable', '0', HwIniPath) +
+      ' recommend=' + HwRecProfile + '/' + HwRecRuntime);
+end;
+
+{ Human-readable summary shown on the setup-profile page. }
+function HardwareSummary(): string;
+var
+  S: string;
+begin
+  S := 'Detected: ';
+  if HwLaptop then
+    S := S + 'laptop'
+  else
+    S := S + 'desktop';
+
+  if HwGpuName <> '' then
+    S := S + ', ' + HwGpuName;
+
+  S := S + #13#10;
+
+  if HwCudaCapable then
+    S := S + 'NVIDIA driver responding, ' + HwVram + ' GB VRAM - CUDA acceleration is available.' + #13#10
+  else if HwNvidiaCard then
+    S := S + 'An NVIDIA GPU is present but its driver did not respond, so CUDA packages would not load.' + #13#10
+  else
+    S := S + 'No CUDA-capable GPU detected.' + #13#10;
+
+  if HwWsl2 then
+    S := S + 'Virtualization is available, so the containerized backend (Docker + WSL2) can be used.'
+  else
+    S := S + 'WSL2/Docker unavailable: ' + HwWslBlocker + ' RedSight will run in native mode instead, which needs no containers.';
+
+  Result := S;
+end;
+
+function IsApiProfile(): Boolean;
+begin
+  Result := (ProfilePage <> nil) and ProfilePage.Values[PROFILE_API];
+end;
+
+procedure InitializeWizard();
+begin
+  { --- Setup profile: the two initial options ------------------------------ }
+  ProfilePage := CreateInputOptionPage(wpWelcome,
+    'Setup type',
+    'How should RedSight run on this computer?',
+    'Setup checks your hardware and installs only the components this machine can actually use.',
+    True, False);
+  ProfilePage.Add('NVIDIA GPU - local inference with CUDA acceleration');
+  ProfilePage.Add('Laptop or PC - cloud AI providers using an API key');
+
+  ProfileInfo := TNewStaticText.Create(ProfilePage);
+  ProfileInfo.Parent := ProfilePage.Surface;
+  ProfileInfo.Top := ProfilePage.CheckListBox.Top + ProfilePage.CheckListBox.Height + ScaleY(12);
+  ProfileInfo.Left := ProfilePage.CheckListBox.Left;
+  ProfileInfo.Width := ProfilePage.SurfaceWidth;
+  ProfileInfo.AutoSize := False;
+  ProfileInfo.Height := ScaleY(80);
+  ProfileInfo.WordWrap := True;
+  ProfileInfo.Caption := '';
+
+  { --- Provider selection (API profile only) ------------------------------- }
+  ProviderPage := CreateInputOptionPage(ProfilePage.ID,
+    'AI provider',
+    'Which provider should RedSight use?',
+    'You can change this later in RedSight Settings, under AI Provider.',
+    True, False);
+  ProviderPage.Add('LM Studio (local, no API key needed)');
+  ProviderPage.Add('OpenAI');
+  ProviderPage.Add('Anthropic Claude');
+  ProviderPage.Add('Google Gemini');
+  ProviderPage.Add('Grok (xAI)');
+  ProviderPage.Add('Custom OpenAI-compatible endpoint');
+  ProviderPage.Values[1] := True;
+
+  { --- Provider credentials ------------------------------------------------ }
+  ApiPage := CreateInputQueryPage(ProviderPage.ID,
+    'Provider details',
+    'Enter your API key.',
+    'The key is stored encrypted for your Windows account (DPAPI), the same way the Settings dialog stores it. Leave blank to add it later in Settings.');
+  ApiPage.Add('API key:', True);
+  ApiPage.Add('Model (optional - leave blank for the default):', False);
+  ApiPage.Add('Base URL (only for a custom OpenAI-compatible endpoint):', False);
+
+  { --- Working directory --------------------------------------------------- }
+  WorkspacePage := CreateInputDirPage(ApiPage.ID,
+    'RedSight working folder',
+    'Where should RedSight keep your files?',
+    'Setup creates this folder and configures RedSight to use it for projects, generated output, memory and MCP server definitions. It must be writable, so it lives under your user profile rather than in Program Files.',
+    False, '');
+  WorkspacePage.Add('');
+  WorkspacePage.Values[0] := ExpandConstant('{userdocs}\..\RedSight');
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (ProfilePage <> nil) and (CurPageID = ProfilePage.ID) then
+  begin
+    ProfileInfo.Caption := HardwareSummary();
+    { Preselect what the hardware actually supports, but leave the choice open. }
+    if not ProfilePage.Values[PROFILE_CUDA] and not ProfilePage.Values[PROFILE_API] then
+    begin
+      if HwRecProfile = 'cuda' then
+        ProfilePage.Values[PROFILE_CUDA] := True
+      else
+        ProfilePage.Values[PROFILE_API] := True;
+    end;
+  end;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+
+  { Scan on the way out of the welcome page so the profile page can show real
+    findings without freezing the wizard at startup. }
+  if CurPageID = wpWelcome then
+    ScanHardware();
+
+  if (ProfilePage <> nil) and (CurPageID = ProfilePage.ID) then
+  begin
+    if ProfilePage.Values[PROFILE_CUDA] and not HwCudaCapable then
+    begin
+      if MsgBox('No responding NVIDIA driver was detected on this computer.' + #13#10#13#10 +
+                'CUDA packages are roughly 2.5 GB and will not load without one. ' +
+                'Continue with the CUDA setup anyway?' + #13#10#13#10 +
+                'Choose No to use the laptop / API setup instead.',
+                mbConfirmation, MB_YESNO) <> IDYES then
+      begin
+        ProfilePage.Values[PROFILE_CUDA] := False;
+        ProfilePage.Values[PROFILE_API] := True;
+      end;
+    end;
+  end;
+
+  { A cloud provider is useless without a key, but the user may prefer to add
+    it in Settings later, so warn rather than block. }
+  if (ApiPage <> nil) and (CurPageID = ApiPage.ID) then
+  begin
+    if (ProviderSlug(ProviderPage.SelectedValueIndex) <> 'lmstudio') and (Trim(ApiPage.Values[0]) = '') then
+    begin
+      if MsgBox('No API key was entered.' + #13#10#13#10 +
+                'RedSight will install, but it cannot reach ' +
+                ProviderSlug(ProviderPage.SelectedValueIndex) +
+                ' until you add a key in Settings -> AI Provider.' + #13#10#13#10 +
+                'Continue without a key?', mbConfirmation, MB_YESNO) <> IDYES then
+        Result := False;
+    end;
+  end;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  { The provider pages only make sense for the API profile. }
+  if (ProviderPage <> nil) and (PageID = ProviderPage.ID) then
+    Result := not IsApiProfile();
+  if (ApiPage <> nil) and (PageID = ApiPage.ID) then
+    Result := (not IsApiProfile()) or (ProviderSlug(ProviderPage.SelectedValueIndex) = 'lmstudio');
+end;
+
+{ ------------------------------------------------------------------------
+  Writes the wizard's answers to an INI file in the temp directory and returns
+  the bootstrap arguments.
+
+  The API key goes in the file rather than on the command line: Inno logs the
+  parameters of every [Run] entry, and a command line is visible to any process
+  on the machine. The bootstrap overwrites and deletes the file once read.
+  ------------------------------------------------------------------------ }
+function GetBootstrapArgs(Param: string): string;
+var
+  Args: string;
+  Lines: TArrayOfString;
+  Count: Integer;
+  Slug: string;
+  Workspace: string;
+begin
+  AnswerPath := ExpandConstant('{tmp}\rs-answers.ini');
+
+  SetArrayLength(Lines, 16);
+  Count := 0;
+  Lines[Count] := '[setup]'; Count := Count + 1;
+
+  if (ProfilePage <> nil) and ProfilePage.Values[PROFILE_CUDA] then
+    Lines[Count] := 'profile=cuda'
+  else if (ProfilePage <> nil) and ProfilePage.Values[PROFILE_API] then
+    Lines[Count] := 'profile=api'
+  else
+    Lines[Count] := 'profile=auto';
+  Count := Count + 1;
+
+  { Never ask for containers on a machine the scan says cannot run WSL2. }
+  if WizardIsComponentSelected('docker') and HwWsl2 then
+    Lines[Count] := 'runtimeMode=container'
+  else if WizardIsComponentSelected('docker') then
+    Lines[Count] := 'runtimeMode=auto'
+  else
+    Lines[Count] := 'runtimeMode=native';
+  Count := Count + 1;
+
+  Workspace := '';
+  if WorkspacePage <> nil then
+    Workspace := Trim(WorkspacePage.Values[0]);
+  if Workspace <> '' then
+  begin
+    Lines[Count] := 'workspace=' + Workspace; Count := Count + 1;
+  end;
+
+  if IsApiProfile() and (ProviderPage <> nil) then
+  begin
+    Slug := ProviderSlug(ProviderPage.SelectedValueIndex);
+    Lines[Count] := 'provider=' + Slug; Count := Count + 1;
+    if ApiPage <> nil then
+    begin
+      if Trim(ApiPage.Values[0]) <> '' then
+      begin
+        Lines[Count] := 'apiKey=' + Trim(ApiPage.Values[0]); Count := Count + 1;
+      end;
+      if Trim(ApiPage.Values[1]) <> '' then
+      begin
+        Lines[Count] := 'model=' + Trim(ApiPage.Values[1]); Count := Count + 1;
+      end;
+      if Trim(ApiPage.Values[2]) <> '' then
+      begin
+        Lines[Count] := 'baseUrl=' + Trim(ApiPage.Values[2]); Count := Count + 1;
+      end;
+    end;
+  end;
+
+  if HwJsonPath <> '' then
+  begin
+    Lines[Count] := 'hardwareProfile=' + HwJsonPath; Count := Count + 1;
+  end;
+
+  SetArrayLength(Lines, Count);
+  if not SaveStringsToFile(AnswerPath, Lines, False) then
+    Log('could not write the setup answer file to ' + AnswerPath);
+
+  Args := '-AnswerFile "' + AnswerPath + '"';
+
+  if WizardIsComponentSelected('docker') and HwWsl2 then
+    Args := Args + ' -InstallDocker -EnableWsl'
+  else
+    Args := Args + ' -SkipDocker';
+
+  if WizardIsComponentSelected('images') and HwWsl2 then
+    Args := Args + ' -BuildImages';
+
+  if WizardIsComponentSelected('node') then
+    Args := Args + ' -InstallNode';
+
+  if WizardIsTaskSelected('preferSystemPython') then
+    Args := Args + ' -PreferSystemPython';
+
+  if WizardIsTaskSelected('offline') then
+    Args := Args + ' -OfflineOnly';
+
+  if not WizardIsTaskSelected('desktopicon') then
+    Args := Args + ' -SkipShortcut';
+
+  if WizardSilent then
+    Args := Args + ' -NonInteractive';
+
+  Result := Trim(Args);
+end;
 
 { --------------------------------------------------------------------------
   Which launcher shipped in this payload? 11.2.0 and later carry
@@ -205,45 +590,6 @@ end;
 function NotHasDesktopLauncher(): Boolean;
 begin
   Result := not HasDesktopLauncher();
-end;
-
-{ --------------------------------------------------------------------------
-  Builds the argument list for Bootstrap-RedSight.ps1 from the components and
-  tasks the user selected. Keeping this in one place means the wizard, the
-  Start Menu repair shortcut and a manual re-run all behave identically.
-  -------------------------------------------------------------------------- }
-function GetBootstrapArgs(Param: string): string;
-var
-  Args: string;
-begin
-  Args := '';
-
-  if WizardIsComponentSelected('docker') then
-    Args := Args + ' -InstallDocker -EnableWsl'
-  else
-    Args := Args + ' -SkipDocker';
-
-  if WizardIsComponentSelected('images') then
-    Args := Args + ' -BuildImages';
-
-  if WizardIsComponentSelected('node') then
-    Args := Args + ' -InstallNode';
-
-  if WizardIsTaskSelected('preferSystemPython') then
-    Args := Args + ' -PreferSystemPython';
-
-  if WizardIsTaskSelected('offline') then
-    Args := Args + ' -OfflineOnly';
-
-  { The bootstrap creates the Desktop shortcut; skip it when the task is off. }
-  if not WizardIsTaskSelected('desktopicon') then
-    Args := Args + ' -SkipShortcut';
-
-  { A silent install must never wait on a console prompt. }
-  if WizardSilent then
-    Args := Args + ' -NonInteractive';
-
-  Result := Trim(Args);
 end;
 
 { --------------------------------------------------------------------------
@@ -266,9 +612,6 @@ begin
     Exit;
   end;
 
-  { The app tree, the private runtime and the Python wheels (PySide6, torch,
-    onnxruntime) together need several GB. Warn rather than refuse: the user
-    may be installing to a different, larger volume. }
   if GetSpaceOnDisk(ExpandConstant('{sd}\'), True, FreeMB, TotalMB) then
   begin
     if FreeMB < 8192 then
@@ -297,6 +640,14 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
+    { Belt and braces: the bootstrap erases the answer file itself, but if it
+      never ran, the key must not be left behind in the temp directory. }
+    if (AnswerPath <> '') and FileExists(AnswerPath) then
+    begin
+      DeleteFile(AnswerPath);
+      Log('removed a leftover setup answer file');
+    end;
+
     SummaryPath := ExpandConstant('{localappdata}\RedSight\setup-summary.json');
     if FileExists(SummaryPath) then
     begin

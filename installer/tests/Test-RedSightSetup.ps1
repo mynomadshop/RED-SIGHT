@@ -357,6 +357,200 @@ Assert-True -Name 'wheelhouse is found when present' `
             -Condition ($null -ne (Get-RsWheelhouse -ProjectRoot $tmpRoot))
 
 # ==========================================================================
+Write-Host "`n== Set-RsEnvValue / Get-RsEnvValue ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$envPath = Join-Path $tmpRoot 'dotenv\.env'
+New-Item -ItemType Directory -Path (Split-Path -Parent $envPath) -Force | Out-Null
+@('# RedSight config', 'LOG_LEVEL=INFO', '', '# Qdrant', 'QDRANT_URL=http://127.0.0.1:6333') |
+    Set-Content -LiteralPath $envPath -Encoding utf8
+
+Assert-True  -Name 'appends a new key'          -Condition (-not (Set-RsEnvValue -Path $envPath -Key 'REDSIGHT_WORKSPACE' -Value 'C:\ws'))
+Assert-Equal -Name 'new key reads back'         -Expected 'C:\ws' -Actual (Get-RsEnvValue -Path $envPath -Key 'REDSIGHT_WORKSPACE')
+Assert-True  -Name 'replaces an existing key'   -Condition (Set-RsEnvValue -Path $envPath -Key 'LOG_LEVEL' -Value 'DEBUG')
+Assert-Equal -Name 'replaced key reads back'    -Expected 'DEBUG' -Actual (Get-RsEnvValue -Path $envPath -Key 'LOG_LEVEL')
+Assert-Equal -Name 'unrelated key untouched'    -Expected 'http://127.0.0.1:6333' -Actual (Get-RsEnvValue -Path $envPath -Key 'QDRANT_URL')
+$envText = Get-Content -LiteralPath $envPath -Raw
+Assert-True  -Name 'comments are preserved'     -Condition ($envText -like '*# RedSight config*' -and $envText -like '*# Qdrant*')
+Assert-Equal -Name 'no duplicate key added'     -Expected 1 -Actual (@(Get-Content -LiteralPath $envPath | Where-Object { $_ -like 'LOG_LEVEL=*' }).Count)
+Assert-True  -Name 'empty values are allowed'   -Condition ([bool](Set-RsEnvValue -Path $envPath -Key 'QDRANT_URL' -Value '') -or $true)
+Assert-Equal -Name 'empty value reads as empty' -Expected '' -Actual (Get-RsEnvValue -Path $envPath -Key 'QDRANT_URL')
+Assert-True  -Name 'missing key returns null'   -Condition ($null -eq (Get-RsEnvValue -Path $envPath -Key 'NOT_PRESENT'))
+
+# ==========================================================================
+Write-Host "`n== Get-RsDependencyPlan (hardware-aware wheel selection) ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# The whole point: never download CUDA wheels for a machine that cannot use them.
+$hwCuda = [pscustomobject]@{ gpu = [pscustomobject]@{ cudaCapable = $true;  maxVramGB = 24.0; hasNvidiaHardware = $true } }
+$hwNone = [pscustomobject]@{ gpu = [pscustomobject]@{ cudaCapable = $false; maxVramGB = 0.0;  hasNvidiaHardware = $false } }
+$hwStale = [pscustomobject]@{ gpu = [pscustomobject]@{ cudaCapable = $false; maxVramGB = 0.0; hasNvidiaHardware = $true } }
+$hwTiny = [pscustomobject]@{ gpu = [pscustomobject]@{ cudaCapable = $true;  maxVramGB = 2.0;  hasNvidiaHardware = $true } }
+
+function Get-PlanArgs { param($Plan) ; return (($Plan.PreInstalls | ForEach-Object { $_.Args -join ' ' }) -join ' | ') }
+
+$planCuda = Get-RsDependencyPlan -SetupProfile 'auto' -Hardware $hwCuda
+Assert-Equal -Name 'auto picks cuda on a real NVIDIA GPU' -Expected 'cuda' -Actual $planCuda.Profile
+Assert-True  -Name 'cuda plan uses the cu124 wheel index' -Condition ((Get-PlanArgs $planCuda) -like '*download.pytorch.org/whl/cu124*')
+Assert-True  -Name 'cuda plan installs onnxruntime-gpu'   -Condition ((Get-PlanArgs $planCuda) -like '*onnxruntime-gpu*')
+
+$planNone = Get-RsDependencyPlan -SetupProfile 'auto' -Hardware $hwNone
+Assert-Equal -Name 'auto picks api with no GPU'           -Expected 'api' -Actual $planNone.Profile
+Assert-True  -Name 'api plan uses the CPU wheel index'    -Condition ((Get-PlanArgs $planNone) -like '*download.pytorch.org/whl/cpu*')
+Assert-True  -Name 'api plan never pulls CUDA wheels'     -Condition ((Get-PlanArgs $planNone) -notlike '*cu124*')
+Assert-True  -Name 'api plan avoids onnxruntime-gpu'      -Condition ((Get-PlanArgs $planNone) -notlike '*onnxruntime-gpu*')
+
+$planStale = Get-RsDependencyPlan -SetupProfile 'auto' -Hardware $hwStale
+Assert-Equal -Name 'NVIDIA card with no driver falls back to api' -Expected 'api' -Actual $planStale.Profile
+Assert-True  -Name 'and says why'                         -Condition ($planStale.Reason -like '*driver*')
+
+$planTiny = Get-RsDependencyPlan -SetupProfile 'auto' -Hardware $hwTiny
+Assert-Equal -Name 'a 2 GB GPU is not worth CUDA wheels'  -Expected 'api' -Actual $planTiny.Profile
+
+$planForced = Get-RsDependencyPlan -SetupProfile 'cuda' -Hardware $hwNone
+Assert-Equal -Name 'explicit cuda is honoured'            -Expected 'cuda' -Actual $planForced.Profile
+Assert-True  -Name 'but warns there is no driver'         -Condition ($planForced.Reason -like '*no working NVIDIA driver*')
+
+$planApiOnGpu = Get-RsDependencyPlan -SetupProfile 'api' -Hardware $hwCuda
+Assert-Equal -Name 'explicit api is honoured on a GPU box' -Expected 'api' -Actual $planApiOnGpu.Profile
+
+$planNoHw = Get-RsDependencyPlan -SetupProfile 'auto' -Hardware $null
+Assert-Equal -Name 'no hardware info degrades to api'     -Expected 'api' -Actual $planNoHw.Profile
+
+# ==========================================================================
+Write-Host "`n== Initialize-RsWorkspace ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$wsProj = Join-Path $tmpRoot 'WsProj'
+New-Item -ItemType Directory -Path $wsProj -Force | Out-Null
+$wsDir = Join-Path $tmpRoot 'RedSightWorkspace'
+
+$created = Initialize-RsWorkspace -ProjectRoot $wsProj -WorkspaceDir $wsDir -NativeMode
+Assert-Equal -Name 'returns the workspace path' -Expected $wsDir -Actual $created
+foreach ($sub in @('workspace', 'projects', 'inbox', 'outputs', 'memory', 'logs', 'mcp', 'data')) {
+    Assert-True -Name "creates $sub\" -Condition (Test-Path -LiteralPath (Join-Path $wsDir $sub))
+}
+Assert-True -Name 'writes a README into the workspace' -Condition (Test-Path -LiteralPath (Join-Path $wsDir 'README.txt'))
+
+$wsEnv = Join-Path $wsProj '.env'
+Assert-Equal -Name 'REDSIGHT_WORKSPACE written'   -Expected $wsDir -Actual (Get-RsEnvValue -Path $wsEnv -Key 'REDSIGHT_WORKSPACE')
+Assert-Equal -Name 'REDSIGHT_WORKING_DIR written' -Expected (Join-Path $wsDir 'workspace') -Actual (Get-RsEnvValue -Path $wsEnv -Key 'REDSIGHT_WORKING_DIR')
+Assert-Equal -Name 'REDSIGHT_MCP_DIR written'     -Expected (Join-Path $wsDir 'mcp') -Actual (Get-RsEnvValue -Path $wsEnv -Key 'REDSIGHT_MCP_DIR')
+Assert-Equal -Name 'native mode sets the data root' -Expected (Join-Path $wsDir 'data') -Actual (Get-RsEnvValue -Path $wsEnv -Key 'RED_SIGHT_DATA_ROOT')
+
+# Re-running must not duplicate anything or clobber a user edit.
+Set-Content -LiteralPath (Join-Path $wsDir 'README.txt') -Value 'user edited' -Encoding utf8
+$again2 = Initialize-RsWorkspace -ProjectRoot $wsProj -WorkspaceDir $wsDir -NativeMode
+Assert-Equal -Name 'workspace init is idempotent' -Expected $wsDir -Actual $again2
+Assert-True  -Name 'does not overwrite an edited README' `
+             -Condition ((Get-Content -LiteralPath (Join-Path $wsDir 'README.txt') -Raw) -like '*user edited*')
+Assert-Equal -Name 'no duplicate env entries on re-run' -Expected 1 `
+             -Actual (@(Get-Content -LiteralPath $wsEnv | Where-Object { $_ -like 'REDSIGHT_WORKSPACE=*' }).Count)
+
+# Container mode must leave RED_SIGHT_DATA_ROOT alone (compose supplies /data).
+$wsProj2 = Join-Path $tmpRoot 'WsProj2'
+New-Item -ItemType Directory -Path $wsProj2 -Force | Out-Null
+Initialize-RsWorkspace -ProjectRoot $wsProj2 -WorkspaceDir (Join-Path $tmpRoot 'Ws2') | Out-Null
+Assert-True -Name 'container mode leaves RED_SIGHT_DATA_ROOT unset' `
+            -Condition ($null -eq (Get-RsEnvValue -Path (Join-Path $wsProj2 '.env') -Key 'RED_SIGHT_DATA_ROOT'))
+
+# ==========================================================================
+Write-Host "`n== Install-RsMcpConfig ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$mcpSrc = Join-Path $tmpRoot 'mcp-source'
+New-Item -ItemType Directory -Path $mcpSrc -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $mcpSrc 'servers.json') -Value '{"mcp_servers":{"demo":{"url":"http://localhost:40404/mcp"}}}' -Encoding utf8
+Set-Content -LiteralPath (Join-Path $mcpSrc 'extra.yaml') -Value "mcp_servers:`n  other:`n    command: node" -Encoding utf8
+Set-Content -LiteralPath (Join-Path $mcpSrc 'notes.md') -Value 'ignored' -Encoding utf8
+
+$n = Install-RsMcpConfig -SourcePath $mcpSrc -WorkspaceDir $wsDir
+Assert-Equal -Name 'copies both MCP definition files' -Expected 2 -Actual $n
+Assert-True  -Name 'json definition registered' -Condition (Test-Path -LiteralPath (Join-Path $wsDir 'mcp\servers.json'))
+Assert-True  -Name 'yaml definition registered' -Condition (Test-Path -LiteralPath (Join-Path $wsDir 'mcp\extra.yaml'))
+Assert-True  -Name 'unrelated files ignored'    -Condition (-not (Test-Path -LiteralPath (Join-Path $wsDir 'mcp\notes.md')))
+
+$single = Install-RsMcpConfig -SourcePath (Join-Path $mcpSrc 'servers.json') -WorkspaceDir $wsDir
+Assert-Equal -Name 'accepts a single file path' -Expected 1 -Actual $single
+
+$mcpThrew = $false
+try { Install-RsMcpConfig -SourcePath (Join-Path $tmpRoot 'no-such-mcp') -WorkspaceDir $wsDir | Out-Null }
+catch { $mcpThrew = $true }
+Assert-True -Name 'rejects a missing MCP path' -Condition $mcpThrew
+
+$emptyMcp = Join-Path $tmpRoot 'mcp-empty'
+New-Item -ItemType Directory -Path $emptyMcp -Force | Out-Null
+$emptyThrew = $false
+try { Install-RsMcpConfig -SourcePath $emptyMcp -WorkspaceDir $wsDir | Out-Null } catch { $emptyThrew = $true }
+Assert-True -Name 'rejects a directory with no definitions' -Condition $emptyThrew
+
+# ==========================================================================
+Write-Host "`n== Set-RsProviderConfig ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Contain the writes: the function targets %LOCALAPPDATA%\RedSight\settings.
+$savedLocalAppData = $env:LOCALAPPDATA
+$env:LOCALAPPDATA = Join-Path $tmpRoot 'localappdata'
+New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
+try {
+    Set-RsProviderConfig -Provider 'openai' -ApiKey 'sk-test-not-a-real-key' -Model 'gpt-5.6-terra' | Out-Null
+    $provFile = Join-Path $env:LOCALAPPDATA 'RedSight\settings\provider.json'
+    Assert-True -Name 'provider.json written where Settings reads it' -Condition (Test-Path -LiteralPath $provFile)
+
+    $prov = Get-Content -LiteralPath $provFile -Raw | ConvertFrom-Json
+    Assert-Equal -Name 'active_provider recorded' -Expected 'openai' -Actual $prov.active_provider
+    Assert-Equal -Name 'schema version matches the app' -Expected 1 -Actual $prov.version
+    Assert-Equal -Name 'model recorded for the provider' -Expected 'gpt-5.6-terra' -Actual $prov.models.openai
+    Assert-True  -Name 'defaults kept for other providers' -Condition ([bool]$prov.models.anthropic)
+    Assert-True  -Name 'custom_base_url present' -Condition ($null -ne $prov.PSObject.Properties['custom_base_url'])
+
+    # Switching provider must preserve the other providers' models.
+    Set-RsProviderConfig -Provider 'anthropic' -Model 'claude-sonnet-5' | Out-Null
+    $prov2 = Get-Content -LiteralPath $provFile -Raw | ConvertFrom-Json
+    Assert-Equal -Name 'provider switch recorded' -Expected 'anthropic' -Actual $prov2.active_provider
+    Assert-Equal -Name 'previous provider model preserved' -Expected 'gpt-5.6-terra' -Actual $prov2.models.openai
+
+    # lmstudio is local and takes no key.
+    Set-RsProviderConfig -Provider 'lmstudio' | Out-Null
+    $prov3 = Get-Content -LiteralPath $provFile -Raw | ConvertFrom-Json
+    Assert-Equal -Name 'lmstudio selectable without a key' -Expected 'lmstudio' -Actual $prov3.active_provider
+} finally {
+    if ($savedLocalAppData) { $env:LOCALAPPDATA = $savedLocalAppData } else { Remove-Item Env:\LOCALAPPDATA -ErrorAction SilentlyContinue }
+}
+
+# ==========================================================================
+Write-Host "`n== RedSight-Hardware.ps1 ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# The scanner must produce a usable, conservative profile even where none of
+# the Windows APIs it queries exist - it runs before anything is installed.
+$hwScript = Join-Path $scripts 'RedSight-Hardware.ps1'
+Assert-True -Name 'hardware scanner is present' -Condition (Test-Path -LiteralPath $hwScript)
+
+$hwOut = Join-Path $tmpRoot 'hw.json'
+$pwshExe = (Get-Process -Id $PID).Path
+$hwProc = Invoke-RsProcess -FilePath $pwshExe `
+                           -Arguments @('-NoLogo', '-NoProfile', '-File', $hwScript, '-Quiet', '-OutFile', $hwOut) `
+                           -TimeoutSeconds 180 -Quiet
+Assert-Equal -Name 'hardware scan exits 0 even when degraded' -Expected 0 -Actual $hwProc.ExitCode
+Assert-True  -Name 'hardware scan writes its profile' -Condition (Test-Path -LiteralPath $hwOut)
+
+if (Test-Path -LiteralPath $hwOut) {
+    $hwJson = Get-Content -LiteralPath $hwOut -Raw | ConvertFrom-Json
+    foreach ($key in @('os', 'cpu', 'gpu', 'virtualization', 'recommend', 'warnings')) {
+        Assert-True -Name "profile has a '$key' section" -Condition ($null -ne $hwJson.PSObject.Properties[$key])
+    }
+    Assert-True -Name 'recommends a known setup profile' `
+                -Condition ($hwJson.recommend.setupProfile -in @('cuda', 'api'))
+    Assert-True -Name 'recommends a known runtime mode' `
+                -Condition ($hwJson.recommend.runtimeMode -in @('container', 'native'))
+    Assert-True -Name 'reports a wsl2Capable verdict' `
+                -Condition ($hwJson.virtualization.PSObject.Properties['wsl2Capable'] -ne $null)
+    Assert-True -Name 'explains any WSL2 blocker' `
+                -Condition ($hwJson.virtualization.wsl2Capable -or [bool]$hwJson.virtualization.wsl2Blocker)
+}
+
+# ==========================================================================
 Write-Host "`n== Logging and summary ==" -ForegroundColor Cyan
 # ==========================================================================
 
