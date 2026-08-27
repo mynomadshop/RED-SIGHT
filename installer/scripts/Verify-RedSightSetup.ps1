@@ -70,6 +70,14 @@ Add-RsCheck -Name 'install paths rewritten' -Required `
             -Status $(if ($leaked.Rewritten -eq 0) { 'pass' } else { 'fail' }) `
             -Detail $(if ($leaked.Rewritten -eq 0) { 'no build-machine paths remain' }
                       else { "$($leaked.Rewritten) file(s) still reference another install path" })
+if ($leaked.Rewritten -gt 0) {
+    # Naming the files is the difference between a verdict and something the
+    # user can act on. Repair-RedSight.ps1 shows the offending lines.
+    foreach ($f in @($leaked.Files)) {
+        Write-RsLog "    $($f.Substring($ProjectRoot.Length).TrimStart('\'))" -Level FAIL
+    }
+    Write-RsLog "    run scripts\windows\Repair-RedSight.ps1 to see the lines and fix them" -Level INFO
+}
 
 # --- Python ---------------------------------------------------------------
 
@@ -388,7 +396,11 @@ Write-RsLog ("{0} checks: {1} pass, {2} warn, {3} fail" -f $checks.Count,
 if ($requiredFailed.Count) {
     Write-RsLog 'RedSight is NOT ready to launch. Required checks failed:' -Level FAIL
     foreach ($c in $requiredFailed) { Write-RsLog "  - $($c.Name): $($c.Detail)" -Level FAIL }
-    Write-RsLog 'Re-run setup to repair:' -Level INFO
+    Write-RsLog 'Diagnose it (reports first, changes nothing):' -Level INFO
+    Write-RsLog "  powershell -ExecutionPolicy Bypass -File `"$ProjectRoot\scripts\windows\Repair-RedSight.ps1`"" -Level INFO
+    Write-RsLog 'Then apply the repairs it found:' -Level INFO
+    Write-RsLog "  powershell -ExecutionPolicy Bypass -File `"$ProjectRoot\scripts\windows\Repair-RedSight.ps1`" -Fix" -Level INFO
+    Write-RsLog 'Or re-run dependency setup from scratch:' -Level INFO
     Write-RsLog "  powershell -ExecutionPolicy Bypass -File `"$ProjectRoot\scripts\windows\Bootstrap-RedSight.ps1`" -InstallDocker -EnableWsl" -Level INFO
 } else {
     Write-RsLog 'RedSight is ready to launch.' -Level OK

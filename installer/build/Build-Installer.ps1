@@ -14,18 +14,18 @@
 
     Examples
       # from an application source tree
-      pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.1
+      pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.2
 
       # reusing the payload of the previously shipped installer (Windows only)
       pwsh -File installer/build/Build-Installer.ps1 `
-           -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.1
+           -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.2
 #>
 
 [CmdletBinding()]
 param(
     [string]$AppSource,
     [string]$LegacyInstaller,
-    [string]$Version = '11.5.1',
+    [string]$Version = '11.5.2',
     [string]$OutputDir = 'dist',
     [string]$StagingDir,
     [string]$IsccPath,
@@ -210,7 +210,8 @@ New-Item -ItemType Directory -Path $targetScripts -Force | Out-Null
 
 $overlay = @('RedSight-Common.ps1', 'RedSight-Hardware.ps1', 'RedSight-LmStudio.ps1',
              'RedSight-Provision.ps1', 'RedSight-Preflight.ps1', 'Bootstrap-RedSight.ps1',
-             'Verify-RedSightSetup.ps1', 'Start-RedSight.ps1', 'Uninstall-RedSightDocker.ps1')
+             'Verify-RedSightSetup.ps1', 'Start-RedSight.ps1', 'Uninstall-RedSightDocker.ps1',
+             'Repair-RedSight.ps1')
 foreach ($name in $overlay) {
     $src = Join-Path (Join-Path $installerRoot 'scripts') $name
     if (-not (Test-Path -LiteralPath $src)) { throw "setup script missing from the repository: $src" }
@@ -227,6 +228,21 @@ foreach ($expected in @('Install-RedSightDesktopShortcut.ps1', 'Uninstall-RedSig
 }
 
 Set-Content -LiteralPath (Join-Path $StagingDir 'VERSION') -Value $Version -Encoding utf8 -NoNewline
+
+# Record where this payload was built from. Setup rewrites that exact root to
+# the install directory; without it the rewriter has to guess from a pattern
+# ("any drive path ending in RedSight"), which also matches the user's own
+# working directory and rewrites it to the install root.
+$payloadManifest = [ordered]@{
+    version    = $Version
+    sourceRoot = if ($AppSource) { (Resolve-Path -LiteralPath $AppSource).Path.TrimEnd('\') } else { '' }
+    builtFrom  = if ($LegacyInstaller) { 'legacy-installer' } else { 'app-source' }
+}
+$payloadManifestJson = ([pscustomobject]$payloadManifest) | ConvertTo-Json -Depth 4
+[System.IO.File]::WriteAllText((Join-Path $StagingDir 'redsight-payload.json'),
+                               $payloadManifestJson,
+                               (New-Object System.Text.UTF8Encoding($false)))
+Write-RsLog "payload manifest records sourceRoot=$($payloadManifest.sourceRoot)" -Level OK
 
 # --------------------------------------------------------------------------
 # 3b. Application overlay (MCP settings tab)

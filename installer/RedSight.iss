@@ -6,7 +6,7 @@
 ;  offline wheelhouse into a staging tree and then invokes ISCC on this script.
 ;
 ;  Required preprocessor defines (all supplied by Build-Installer.ps1):
-;    AppVersion   product version, e.g. 11.5.1
+;    AppVersion   product version, e.g. 11.5.2
 ;    PayloadDir   staged application tree that becomes {app}
 ;    OutputDir    where the compiled setup exe is written
 ;    OutputBase   base name of the setup exe
@@ -16,7 +16,7 @@
 ; ===========================================================================
 
 #ifndef AppVersion
-  #define AppVersion "11.5.1"
+  #define AppVersion "11.5.2"
 #endif
 #ifndef PayloadDir
   #error PayloadDir must be defined (pass /DPayloadDir=... to ISCC)
@@ -151,6 +151,10 @@ Name: "{group}\RedSight health check"; \
     Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
     Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\windows\Verify-RedSightSetup.ps1"""; \
     WorkingDir: "{app}"; Comment: "Check that RedSight can launch"
+Name: "{group}\Diagnose RedSight"; \
+    Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
+    Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File ""{app}\scripts\windows\Repair-RedSight.ps1"""; \
+    WorkingDir: "{app}"; Comment: "Find and repair what is stopping RedSight from launching"
 Name: "{group}\Repair RedSight setup"; \
     Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
     Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\windows\Bootstrap-RedSight.ps1"" -InstallDocker -EnableWsl"; \

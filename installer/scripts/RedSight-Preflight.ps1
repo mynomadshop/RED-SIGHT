@@ -1193,23 +1193,70 @@ function New-RsEnvFile {
     return $true
 }
 
+# .env keys whose values are directories the user chose, not build-machine
+# leftovers. The workspace default is <UserProfile>\RedSight, so a pattern that
+# rewrites "any drive path ending in RedSight" rewrites the user's own working
+# directory to the install root - which is how an install ends up pointing half
+# at one tree and half at another.
+$script:RsUserPathKeys = @(
+    'REDSIGHT_WORKSPACE', 'REDSIGHT_WORKING_DIR', 'REDSIGHT_OUTPUT_DIR',
+    'REDSIGHT_MCP_DIR', 'RED_SIGHT_DATA_ROOT'
+)
+
+function Get-RsPayloadSourceRoot {
+    <#
+        The directory this payload was built from, as recorded at build time.
+
+        Knowing it turns the path rewrite from a guess into an exact
+        substitution. Returns an empty string for a payload built before the
+        manifest existed.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+
+    $manifest = Join-Path $ProjectRoot 'redsight-payload.json'
+    if (-not (Test-Path -LiteralPath $manifest)) { return '' }
+    try {
+        $parsed = Get-Content -LiteralPath $manifest -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($parsed.PSObject.Properties['sourceRoot']) { return "$($parsed.sourceRoot)".TrimEnd('\') }
+    } catch {
+        Write-RsLog "could not read $manifest ($($_.Exception.Message))" -Level WARN
+    }
+    return ''
+}
+
 function Repair-RsHardcodedPaths {
     <#
         RedSight ships source files containing the build machine's absolute
-        install path (e.g. C:\Users\walim\RedSight). Every such reference has to
-        become the real install directory or the app launches against a
-        non-existent tree.
+        install path. Every such reference has to become the real install
+        directory or the app launches against a non-existent tree.
 
-        Handles three encodings of the same path, which the previous bootstrap
-        missed two of:
-          plain      C:\Users\walim\RedSight
-          JSON/escaped  C:\\Users\\walim\\RedSight
-          forward slash C:/Users/walim/RedSight
+        Handles three encodings of the same path - for a build root of
+        <drive>:\<dir>\RedSight:
+          plain         one backslash between segments
+          JSON/escaped  two backslashes, as written inside a JSON string
+          forward slash slashes instead, as written in a URI or a POSIX path
+
+        No example is spelled out here on purpose: a literal build path in this
+        file would itself be matched and rewritten, and the health check would
+        then report a stale reference on every fresh install.
+
+        The root that gets rewritten comes from redsight-payload.json, written
+        at build time. When that is missing - a payload from an older build -
+        the previous heuristic applies: any drive path ending in \RedSight. That
+        heuristic is why this function needs the protections below, because the
+        user's own working directory defaults to <UserProfile>\RedSight and
+        matches it.
+
+        Never rewritten:
+          * the target path itself
+          * the values of the .env keys naming user-chosen directories
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ProjectRoot,
         [string[]]$Extensions = @('*.py', '*.ps1', '*.psm1', '*.json', '*.cmd', '*.bat', '*.txt', '*.yml', '*.yaml', '*.env', '*.ini', '*.cfg'),
+        [string]$SourceRoot,
         [switch]$WhatIf
     )
 
@@ -1217,62 +1264,107 @@ function Repair-RsHardcodedPaths {
     $targetEscaped = $target -replace '\\', '\\'
     $targetForward = $target -replace '\\', '/'
 
+    if (-not $PSBoundParameters.ContainsKey('SourceRoot')) {
+        $SourceRoot = Get-RsPayloadSourceRoot -ProjectRoot $target
+    }
+    $SourceRoot = "$SourceRoot".TrimEnd('\')
+
     # Directories that must never be rewritten: virtualenvs and package caches
     # contain thousands of files and their own absolute paths.
     $excluded = @('.venv', '.venv-ui', '.venv-actions', '.venv-release-test', 'runtime',
                   'node_modules', '__pycache__', '.git', '.pytest_cache', '.mypy_cache',
                   '.ruff_cache', 'backups', 'release')
 
-    $patterns = @(
+    # The manifest records the build root; rewriting it would erase the only
+    # thing that makes this an exact substitution rather than a guess. The setup
+    # scripts are overlaid fresh at build time and hold no install paths - only
+    # the code that computes them, and prose about them.
+    $excludedFiles = @('redsight-payload.json', 'RedSight-Common.ps1', 'RedSight-Hardware.ps1',
+                       'RedSight-LmStudio.ps1', 'RedSight-Provision.ps1', 'RedSight-Preflight.ps1',
+                       'Bootstrap-RedSight.ps1', 'Verify-RedSightSetup.ps1', 'Start-RedSight.ps1',
+                       'Uninstall-RedSightDocker.ps1', 'Repair-RedSight.ps1')
+
+    if ($SourceRoot -and ($SourceRoot -ne $target)) {
+        # The exact recorded root, in each encoding. Nothing else is touched.
+        $literal = [regex]::Escape($SourceRoot)
+        $patterns = @(
+            @{ Regex = [regex]::Escape(($SourceRoot -replace '\\', '\\')); Replacement = $targetEscaped; Label = 'escaped' }
+            @{ Regex = $literal;                                          Replacement = $target;        Label = 'plain' }
+            @{ Regex = [regex]::Escape(($SourceRoot -replace '\\', '/')); Replacement = $targetForward; Label = 'forward' }
+        )
+        Write-RsLog "rewriting the recorded build root $SourceRoot -> $target" -Level DEBUG
+    } elseif ($SourceRoot -eq $target) {
+        Write-RsLog 'the payload was built from this directory; no path rewrite is needed' -Level OK
+        return [pscustomobject]@{ Rewritten = 0; Failed = 0; Files = @(); SourceRoot = $SourceRoot }
+    } else {
         # A drive-letter path ending in \RedSight, in each of the three encodings.
-        @{ Regex = '[A-Za-z]:\\\\(?:[^\\/:*?"<>|\r\n]+\\\\)*?RedSight'; Replacement = $targetEscaped; Label = 'escaped' }
-        @{ Regex = '[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*?RedSight';     Replacement = $target;        Label = 'plain' }
-        @{ Regex = '[A-Za-z]:/(?:[^\\/:*?"<>|\r\n]+/)*?RedSight';       Replacement = $targetForward; Label = 'forward' }
-    )
+        $patterns = @(
+            @{ Regex = '[A-Za-z]:\\\\(?:[^\\/:*?"<>|\r\n]+\\\\)*?RedSight'; Replacement = $targetEscaped; Label = 'escaped' }
+            @{ Regex = '[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*?RedSight';     Replacement = $target;        Label = 'plain' }
+            @{ Regex = '[A-Za-z]:/(?:[^\\/:*?"<>|\r\n]+/)*?RedSight';       Replacement = $targetForward; Label = 'forward' }
+        )
+        Write-RsLog 'no build root recorded in this payload; matching any path ending in \RedSight' -Level DEBUG
+    }
+
+    # Lines assigning a user-chosen directory keep their value verbatim.
+    $protectedLine = '^\s*(' + (($script:RsUserPathKeys | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\s*='
 
     $rewritten = 0
     $failed = 0
     $filesTouched = New-Object System.Collections.Generic.List[string]
 
-    Get-ChildItem -LiteralPath $target -Recurse -Include $Extensions -File -ErrorAction SilentlyContinue |
+    # -Force so dotfiles are included: .env is the one file where a wrong
+    # rewrite does the most damage, and it is hidden on some systems.
+    Get-ChildItem -LiteralPath $target -Recurse -Include $Extensions -File -Force -ErrorAction SilentlyContinue |
         Where-Object {
-            $rel = $_.FullName.Substring($target.Length).TrimStart('\')
+            $rel = $_.FullName.Substring($target.Length).TrimStart('\', '/')
             $first = ($rel -split '[\\/]')[0]
-            -not ($excluded -contains $first)
+            (-not ($excluded -contains $first)) -and (-not ($excludedFiles -contains $_.Name))
         } |
         ForEach-Object {
             $file = $_.FullName
             try { $content = Get-Content -LiteralPath $file -Raw -ErrorAction Stop } catch { return }
             if ($null -eq $content -or $content.Length -eq 0) { return }
 
-            $updated = $content
-            foreach ($p in $patterns) {
-                if ($updated -notmatch $p.Regex) { continue }
-                # A literal replacement: the target path may contain $ or \ which
-                # would otherwise be interpreted as regex substitutions.
-                $updated = [regex]::Replace($updated, $p.Regex, { param($m) $p.Replacement })
+            # Rewrite line by line so a protected assignment can be skipped
+            # without giving up the rest of the file.
+            $newline = if ($content -match "`r`n") { "`r`n" } else { "`n" }
+            $lines = $content -split "`r?`n"
+            $changed = $false
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                $line = $lines[$i]
+                if ($line -match $protectedLine) { continue }
+                $updatedLine = $line
+                foreach ($p in $patterns) {
+                    if ($updatedLine -notmatch $p.Regex) { continue }
+                    # A literal replacement: the target path may contain $ or \
+                    # which would otherwise be read as regex substitutions.
+                    $updatedLine = [regex]::Replace($updatedLine, $p.Regex, { param($m) $p.Replacement })
+                }
+                if ($updatedLine -ne $line) { $lines[$i] = $updatedLine; $changed = $true }
             }
 
-            if ($updated -ne $content) {
-                if ($WhatIf) {
-                    $filesTouched.Add($file)
-                    $rewritten++
-                    return
-                }
-                try {
-                    # -NoNewline keeps file bytes identical apart from the path.
-                    Set-Content -LiteralPath $file -Value $updated -NoNewline -Encoding UTF8 -ErrorAction Stop
-                    $filesTouched.Add($file)
-                    $rewritten++
-                } catch {
-                    $failed++
-                    Write-RsLog "    could not rewrite $file : $($_.Exception.Message)" -Level WARN
-                }
+            if (-not $changed) { return }
+
+            if ($WhatIf) {
+                $filesTouched.Add($file)
+                $rewritten++
+                return
+            }
+            try {
+                $updated = ($lines -join $newline)
+                # -NoNewline keeps file bytes identical apart from the paths.
+                Set-Content -LiteralPath $file -Value $updated -NoNewline -Encoding UTF8 -ErrorAction Stop
+                $filesTouched.Add($file)
+                $rewritten++
+            } catch {
+                $failed++
+                Write-RsLog "    could not rewrite $file : $($_.Exception.Message)" -Level WARN
             }
         }
 
     Write-RsLog "rewrote install-path references in $rewritten file(s), $failed failure(s)" -Level $(if ($failed) { 'WARN' } else { 'OK' })
-    return [pscustomobject]@{ Rewritten = $rewritten; Failed = $failed; Files = $filesTouched }
+    return [pscustomobject]@{ Rewritten = $rewritten; Failed = $failed; Files = $filesTouched; SourceRoot = $SourceRoot }
 }
 
 function Install-RsShortcuts {

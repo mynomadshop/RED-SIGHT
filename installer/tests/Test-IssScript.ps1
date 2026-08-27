@@ -444,6 +444,13 @@ Assert-True -Name 'the visual-effects budget reaches the bootstrap' `
 Assert-True -Name 'animation is reduced by default on every machine' `
             -Condition ($codeText -match 'ReduceEffects\.Checked\s*:=\s*True')
 
+# The tool a user reaches for when the UI will not start has to be reachable
+# without a command line.
+Assert-True -Name 'the Start Menu offers the diagnostics tool' `
+            -Condition ($raw -match 'Repair-RedSight\.ps1')
+Assert-True -Name 'the diagnostics window stays open so its output can be read' `
+            -Condition ($raw -match 'Repair-RedSight\.ps1[\s\S]{0,200}' -and $raw -match '-NoExit')
+
 # --------------------------------------------------------------------------
 # v5: shortcuts must start the action/memory gateway
 # --------------------------------------------------------------------------

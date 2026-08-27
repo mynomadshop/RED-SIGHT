@@ -115,6 +115,53 @@ wired to each other, so each is described plainly below.
     with two copies.
 
 
+FIXED IN 11.5.2 - MIXED-UP INSTALLATIONS, AND A REPAIR TOOL
+-----------------------------------------------------------
+  * "Some file points to the older installation." Setup rewrites the
+    build machine's path to your install directory, and it did that by
+    matching any drive path ending in \RedSight. Your working directory
+    defaults to <YourProfile>\RedSight - so the rewrite caught that too
+    and pointed it at the install folder. A health check on a working
+    install would then report a file "still referencing another install
+    path", and a repair run really did mix the two folders together.
+
+    The build now records where it was built from, so the rewrite is an
+    exact substitution instead of a pattern. Your working directory,
+    output folder and data folder are never rewritten, whatever their
+    paths.
+
+  * A working directory that is itself a RedSight installation is now
+    declined, and <YourProfile>\RedSight-Data used instead. Nothing
+    already in the folder is moved or deleted. This is what put workspace
+    subfolders in among application files.
+
+  * NEW: Start Menu -> "Diagnose RedSight". One command that reports
+    everything relevant when RedSight will not start, and changes
+    nothing until you ask it to:
+
+      - every RedSight installation on the device, and which one your
+        shortcuts actually point at (two installations is the usual
+        reason a working install stops working)
+      - which files reference a different installation, with the exact
+        lines
+      - whether your working directory collides with an installation
+      - the LM Studio endpoint and model the backend will really read
+      - the actual Command Center error, captured by starting it
+        headlessly, plus the tail of the last launch logs
+      - whether the backend and the action/memory gateway are answering
+
+    Run it again with -Fix and it repairs what it found: paths,
+    shortcuts, the working directory and the runtime configuration.
+
+      powershell -ExecutionPolicy Bypass -File ^
+        "<install>\scripts\windows\Repair-RedSight.ps1"
+      powershell -ExecutionPolicy Bypass -File ^
+        "<install>\scripts\windows\Repair-RedSight.ps1" -Fix
+
+  * The health check now names the files it is complaining about instead
+    of only counting them.
+
+
 FIXED IN 11.5.1 - GPU ACCELERATION ON RTX 50-SERIES CARDS
 ----------------------------------------------------------
   * The CUDA setup type installed a PyTorch build that could not
@@ -268,6 +315,9 @@ Setup writes a full timestamped log and a machine-readable summary:
 
     %LOCALAPPDATA%\RedSight\logs\bootstrap-<timestamp>.log
     %LOCALAPPDATA%\RedSight\setup-summary.json
+
+If RedSight will not launch, start with the diagnostics - Start Menu ->
+"Diagnose RedSight". It reports what is wrong and can repair it.
 
 To check an existing install at any time, use the Start Menu entry
 "RedSight health check", or run:

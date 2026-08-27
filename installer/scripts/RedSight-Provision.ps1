@@ -78,6 +78,24 @@ function Get-RsEnvValue {
 # Working directory
 # --------------------------------------------------------------------------
 
+function Test-RsIsAppTree {
+    <#
+        Does this directory hold a RedSight installation?
+
+        Used to keep the working directory out of one. The launcher is the
+        distinguishing file: a workspace never contains it, and every install
+        does.
+    #>
+    [CmdletBinding()]
+    param([string]$Path)
+
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $false }
+    foreach ($marker in @('launch_redsight_command_center.py', 'docker-compose.yml', 'pyproject.toml')) {
+        if (Test-Path -LiteralPath (Join-Path $Path $marker)) { return $true }
+    }
+    return $false
+}
+
 function Initialize-RsWorkspace {
     <#
         Creates the RedSight working directory and records it in .env.
@@ -85,6 +103,13 @@ function Initialize-RsWorkspace {
         This is where the agent reads and writes by default, so it lives under
         the user's profile rather than inside Program Files: the application
         directory is not user-writable on a normal install.
+
+        The default is <UserProfile>\RedSight, which is also exactly where a
+        hand-installed RedSight usually lives. Putting a workspace inside an
+        application tree mixes the two - workspace subdirectories land among the
+        source, and a later path rewrite has two roots to confuse - so a
+        directory that looks like an install is declined in favour of
+        <UserProfile>\RedSight-Data.
     #>
     [CmdletBinding()]
     param(
@@ -93,10 +118,34 @@ function Initialize-RsWorkspace {
         [switch]$NativeMode
     )
 
-    if (-not $WorkspaceDir) {
-        $base = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath('UserProfile') }
-        if (-not $base) { $base = $ProjectRoot }
-        $WorkspaceDir = Join-Path $base 'RedSight'
+    $installRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path.TrimEnd('\')
+    $base = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath('UserProfile') }
+    if (-not $base) { $base = $installRoot }
+
+    if (-not $WorkspaceDir) { $WorkspaceDir = Join-Path $base 'RedSight' }
+
+    $resolved = $WorkspaceDir
+    try { if (Test-Path -LiteralPath $WorkspaceDir) { $resolved = (Resolve-Path -LiteralPath $WorkspaceDir).Path } } catch { }
+    $resolved = "$resolved".TrimEnd('\')
+
+    $rejection = ''
+    if ($resolved -eq $installRoot) {
+        $rejection = 'it is the RedSight installation directory itself'
+    } elseif ($resolved.ToLowerInvariant().StartsWith(($installRoot + [System.IO.Path]::DirectorySeparatorChar).ToLowerInvariant()) -or
+              $resolved.ToLowerInvariant().StartsWith(($installRoot + '\').ToLowerInvariant())) {
+        $rejection = 'it is inside the RedSight installation directory'
+    } elseif (Test-RsIsAppTree -Path $resolved) {
+        $rejection = 'it already holds a RedSight installation'
+    }
+
+    if ($rejection) {
+        $fallback = Join-Path $base 'RedSight-Data'
+        if ((Test-RsIsAppTree -Path $fallback) -or ($fallback.TrimEnd('\') -eq $installRoot)) {
+            $fallback = Join-Path $base 'RedSight-Workspace'
+        }
+        Write-RsLog "the requested working directory cannot be used - $rejection : $WorkspaceDir" -Level WARN
+        Write-RsLog "using $fallback instead" -Level WARN
+        $WorkspaceDir = $fallback
     }
 
     $subdirs = @('workspace', 'projects', 'inbox', 'outputs', 'memory', 'logs', 'mcp', 'data')

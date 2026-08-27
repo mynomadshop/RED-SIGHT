@@ -1113,6 +1113,149 @@ $noTorch = Test-RsTorchCuda -VenvPython (Join-Path $tmpRoot 'no-such-python.exe'
 Assert-True -Name 'a missing interpreter is reported, not thrown' -Condition (-not $noTorch.Ok)
 
 # ==========================================================================
+Write-Host "`n== Install-path rewriting ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# The rewriter used to match "any drive path ending in \RedSight". The working
+# directory defaults to <UserProfile>\RedSight, so it rewrote the user's own
+# workspace to the install root - which is what left an installation pointing
+# half at one tree and half at another.
+$rwRoot = Join-Path $tmpRoot 'rewrite'
+New-Item -ItemType Directory -Path $rwRoot -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $rwRoot 'redsight-payload.json') `
+            -Value '{ "version": "1", "sourceRoot": "C:\\Users\\builder\\RedSight" }' -Encoding ascii
+
+Assert-Equal -Name 'the recorded build root is read back' -Expected 'C:\Users\builder\RedSight' `
+             -Actual (Get-RsPayloadSourceRoot -ProjectRoot $rwRoot)
+Assert-Equal -Name 'a payload with no manifest reports no build root' -Expected '' `
+             -Actual (Get-RsPayloadSourceRoot -ProjectRoot $tmpRoot)
+
+@'
+ROOT = r"C:\Users\builder\RedSight"
+LOGS = r"C:/Users/builder/RedSight/logs"
+UNRELATED = r"C:\Users\builder\Documents"
+OTHER_APP = r"D:\Tools\RedSight"
+'@ | Set-Content -LiteralPath (Join-Path $rwRoot 'launcher.py') -Encoding ascii
+
+@'
+REDSIGHT_WORKSPACE=C:\Users\walim\RedSight
+REDSIGHT_WORKING_DIR=C:\Users\walim\RedSight\workspace
+REDSIGHT_OUTPUT_DIR=C:\Users\walim\RedSight\outputs
+REDSIGHT_MCP_DIR=C:\Users\walim\RedSight\mcp
+RED_SIGHT_DATA_ROOT=C:\Users\walim\RedSight\data
+STALE_REFERENCE=C:\Users\builder\RedSight\thing
+'@ | Set-Content -LiteralPath (Join-Path $rwRoot 'settings.env') -Encoding ascii
+
+Set-Content -LiteralPath (Join-Path $rwRoot 'escaped.json') `
+            -Value '{ "root": "C:\\Users\\builder\\RedSight", "keep": "C:\\Users\\builder\\Music" }' -Encoding ascii
+
+$rw = Repair-RsHardcodedPaths -ProjectRoot $rwRoot
+Assert-True -Name 'the rewrite reports the root it used' -Condition ($rw.SourceRoot -eq 'C:\Users\builder\RedSight')
+
+$launcherText = Get-Content -LiteralPath (Join-Path $rwRoot 'launcher.py') -Raw
+Assert-True -Name 'the plain form is rewritten' -Condition ($launcherText -match [regex]::Escape("r`"$rwRoot`""))
+Assert-True -Name 'the forward-slash form is rewritten' `
+            -Condition ($launcherText -match [regex]::Escape(($rwRoot -replace '\\', '/')))
+Assert-True -Name 'an unrelated path under the same profile is left alone' `
+            -Condition ($launcherText -match 'builder\\Documents')
+Assert-True -Name "another application's RedSight folder is left alone" `
+            -Condition ($launcherText -match 'D:\\Tools\\RedSight')
+
+$escapedText = Get-Content -LiteralPath (Join-Path $rwRoot 'escaped.json') -Raw
+Assert-True -Name 'the JSON-escaped form is rewritten' -Condition ($escapedText -notmatch 'builder\\\\RedSight')
+Assert-True -Name 'an unrelated escaped path is left alone' -Condition ($escapedText -match 'builder\\\\Music')
+
+$envText = Get-Content -LiteralPath (Join-Path $rwRoot 'settings.env') -Raw
+foreach ($key in @('REDSIGHT_WORKSPACE', 'REDSIGHT_WORKING_DIR', 'REDSIGHT_OUTPUT_DIR',
+                   'REDSIGHT_MCP_DIR', 'RED_SIGHT_DATA_ROOT')) {
+    Assert-True -Name "$key keeps the directory the user chose" `
+                -Condition ($envText -match ("(?m)^" + $key + "=C:\\Users\\walim\\RedSight"))
+}
+Assert-True -Name 'an unprotected key in the same file is still rewritten' `
+            -Condition ($envText -match '(?m)^STALE_REFERENCE=' -and $envText -notmatch 'STALE_REFERENCE=C:')
+
+$manifestText = Get-Content -LiteralPath (Join-Path $rwRoot 'redsight-payload.json') -Raw
+Assert-True -Name 'the manifest is never rewritten' -Condition ($manifestText -match 'builder\\\\RedSight')
+
+# Re-running must be a no-op: a rewrite that keeps finding work is the symptom
+# the health check reports as "a file still points at another installation".
+$again = Repair-RsHardcodedPaths -ProjectRoot $rwRoot -WhatIf
+Assert-Equal -Name 'a second pass finds nothing left to do' -Expected 0 -Actual $again.Rewritten
+
+# A payload built from the directory it is installed into needs no rewrite.
+$selfRoot = Join-Path $tmpRoot 'self'
+New-Item -ItemType Directory -Path $selfRoot -Force | Out-Null
+$selfJson = '{ "sourceRoot": "' + ($selfRoot -replace '\\', '\\\\') + '" }'
+Set-Content -LiteralPath (Join-Path $selfRoot 'redsight-payload.json') -Value $selfJson -Encoding ascii
+Assert-Equal -Name 'a payload built in place rewrites nothing' -Expected 0 `
+             -Actual (Repair-RsHardcodedPaths -ProjectRoot $selfRoot).Rewritten
+
+# Our own setup scripts hold no install paths, only prose about them; a literal
+# example in one of them made the health check fail on every fresh install.
+$scriptNames = @('RedSight-Common.ps1', 'RedSight-Hardware.ps1', 'RedSight-LmStudio.ps1',
+                 'RedSight-Provision.ps1', 'RedSight-Preflight.ps1', 'Bootstrap-RedSight.ps1',
+                 'Verify-RedSightSetup.ps1', 'Start-RedSight.ps1', 'Repair-RedSight.ps1',
+                 'Uninstall-RedSightDocker.ps1')
+$literalOffenders = New-Object System.Collections.Generic.List[string]
+foreach ($name in $scriptNames) {
+    $path = Join-Path $scripts $name
+    if (-not (Test-Path -LiteralPath $path)) { continue }
+    $text = Get-Content -LiteralPath $path -Raw
+    if ($text -match '[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*?RedSight[\\"'']') { $literalOffenders.Add($name) }
+}
+Assert-True -Name 'no setup script contains a rewritable install-path literal' `
+            -Condition ($literalOffenders.Count -eq 0)
+
+# ==========================================================================
+Write-Host "`n== Working directory placement ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# The default is <UserProfile>\RedSight, which is also where a hand-installed
+# RedSight usually lives; putting a workspace inside one mixes the two trees.
+$wsBase = Join-Path $tmpRoot 'wsbase'
+$wsInstall = Join-Path $wsBase 'install'
+New-Item -ItemType Directory -Path $wsInstall -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $wsInstall 'docker-compose.yml') -Value 'services: {}' -Encoding ascii
+
+Assert-True  -Name 'an installation tree is recognised' -Condition (Test-RsIsAppTree -Path $wsInstall)
+Assert-True  -Name 'an ordinary folder is not' -Condition (-not (Test-RsIsAppTree -Path $wsBase))
+Assert-True  -Name 'a missing folder is not' -Condition (-not (Test-RsIsAppTree -Path (Join-Path $wsBase 'nope')))
+
+$savedProfile = $env:USERPROFILE
+$env:USERPROFILE = $wsBase
+try {
+    $collide = Join-Path $wsBase 'RedSight'
+    New-Item -ItemType Directory -Path $collide -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $collide 'launch_redsight_command_center.py') -Value '' -Encoding ascii
+
+    $chosen = Initialize-RsWorkspace -ProjectRoot $wsInstall
+    Assert-True -Name 'a default that holds an installation is declined' `
+                -Condition ((Split-Path -Leaf $chosen) -ne 'RedSight')
+    Assert-True -Name 'the fallback is a separate folder' -Condition ((Split-Path -Leaf $chosen) -eq 'RedSight-Data')
+    Assert-True -Name "the existing installation's files are untouched" `
+                -Condition (Test-Path -LiteralPath (Join-Path $collide 'launch_redsight_command_center.py'))
+    Assert-True -Name 'no workspace subdirectory lands in the installation' `
+                -Condition (-not (Test-Path -LiteralPath (Join-Path $collide 'outputs')))
+
+    $insideInstall = Initialize-RsWorkspace -ProjectRoot $wsInstall -WorkspaceDir $wsInstall
+    Assert-True -Name 'the installation directory itself is declined' `
+                -Condition ($insideInstall.TrimEnd('\') -ne $wsInstall.TrimEnd('\'))
+
+    $nested = Join-Path $wsInstall 'data-here'
+    $nestedChosen = Initialize-RsWorkspace -ProjectRoot $wsInstall -WorkspaceDir $nested
+    Assert-True -Name 'a folder inside the installation is declined' `
+                -Condition ($nestedChosen.TrimEnd('\') -ne $nested.TrimEnd('\'))
+
+    $clean = Join-Path $tmpRoot 'clean-workspace'
+    Assert-Equal -Name 'a clean directory is honoured' -Expected $clean `
+                 -Actual (Initialize-RsWorkspace -ProjectRoot $wsInstall -WorkspaceDir $clean)
+    Assert-True -Name 'the workspace subdirectories are created' `
+                -Condition (Test-Path -LiteralPath (Join-Path $clean 'outputs'))
+} finally {
+    if ($null -ne $savedProfile) { $env:USERPROFILE = $savedProfile }
+}
+
+# ==========================================================================
 Write-Host "`n== Logging and summary ==" -ForegroundColor Cyan
 # ==========================================================================
 

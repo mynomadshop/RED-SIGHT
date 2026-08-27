@@ -23,6 +23,7 @@ installer/
     RedSight-Preflight.ps1      the dependency engine (detect / provision / verify)
     Bootstrap-RedSight.ps1      first-run orchestrator, run by the installer
     Verify-RedSightSetup.ps1    health check ("can RedSight launch right now?")
+    Repair-RedSight.ps1         diagnose and repair an install that will not launch
     Start-RedSight.ps1          launcher dispatcher every shortcut points at
     Uninstall-RedSightDocker.ps1  removes containers/images, asks about volumes
   app-overlay/                  additive application modules merged into the payload
@@ -199,6 +200,65 @@ the overlay:
 | `get_lm_model()` blocks the GUI thread on an HTTP request every 10 s | a multi-second freeze whenever LM Studio is unreachable | the model list is fetched on a background thread and cached |
 | `AmbientSupervisuals` repaints a translucent, full-window overlay every 50 ms | a permanent cost on integrated graphics | the cadence is budgeted (`full` / `reduced` / `off`), selectable in the wizard and in Settings |
 
+## When it will not launch
+
+`scripts\windows\Repair-RedSight.ps1` is the one command to reach for. It
+reports first and changes nothing:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\windows\Repair-RedSight.ps1
+powershell -ExecutionPolicy Bypass -File scripts\windows\Repair-RedSight.ps1 -Fix
+```
+
+It is also **Start Menu → Diagnose RedSight**. What it checks, in the order
+that matters when the UI will not start:
+
+| Area | What it answers |
+| --- | --- |
+| installations | how many RedSight trees exist on this device, and which one the shortcuts point at |
+| shortcuts | whether the Desktop and Start Menu entries target *this* installation |
+| paths | which files reference a different root, **with the offending lines** |
+| workspace | whether the working directory collides with an installation |
+| runtime config | the LM Studio endpoint and model the backend will actually read |
+| ui | the real Command Center traceback, captured headlessly, plus the tail of the last launcher logs |
+| services | the backend on 8000 and the action/memory gateway on 8765 |
+
+`-Fix` rewrites paths, re-creates the shortcut against this installation, moves
+a colliding working directory (never touching its contents), and re-installs
+the runtime configuration into both virtualenvs. `-RecreateVenv` additionally
+rebuilds `.venv-ui` from scratch.
+
+### Two installations on one device
+
+This is the usual reason a working install stops working. Setup refuses to
+create a second one — it installs over the recorded install and skips the
+directory page — but a tree that predates the installer, or one moved by hand,
+is still there. The diagnostics list every tree it finds; keep one.
+
+### Why paths get rewritten at all, and what is never rewritten
+
+The payload carries the build machine's absolute install path, so setup
+rewrites it to the real install directory. Until 11.5.2 it did that by matching
+*any* drive path ending in `\RedSight` — and the working directory defaults to
+`<UserProfile>\RedSight`, so the rewrite also caught the user's own workspace
+and pointed it at the install root. That is what made a health check report a
+file "still referencing another install path" on a working install, and what
+mixed the two trees on a repair run.
+
+Two things fix it. The build now records its source root in
+`redsight-payload.json`, so the rewrite is an exact substitution rather than a
+pattern. And these are never rewritten, whichever way the root was determined:
+
+- the values of `REDSIGHT_WORKSPACE`, `REDSIGHT_WORKING_DIR`,
+  `REDSIGHT_OUTPUT_DIR`, `REDSIGHT_MCP_DIR` and `RED_SIGHT_DATA_ROOT` — the
+  user chose those directories
+- `redsight-payload.json` itself, which holds the only record of the build root
+- the setup scripts, which contain no install paths, only the code that
+  computes them
+
+A working directory that is itself a RedSight installation is now declined in
+favour of `<UserProfile>\RedSight-Data`, with its existing contents untouched.
+
 ## Runtime modes
 
 | | Container mode | Native mode |
@@ -272,11 +332,11 @@ on the `windows-latest` runner via `.github/workflows/build-windows-installer.ym
 
 ```powershell
 # from a source tree
-pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.1
+pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.2
 
 # reusing the payload of the previously shipped installer
 pwsh -File installer/build/Build-Installer.ps1 `
-     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.1
+     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.2
 ```
 
 Useful switches:
@@ -303,11 +363,11 @@ snapshot; that class of leftover is now removed by pattern rather than by hand.
 
 ```bash
 pwsh -File installer/tests/Test-RedSightSetup.ps1   # 228 assertions
-pwsh -File installer/tests/Test-IssScript.ps1       #  74 static checks
+pwsh -File installer/tests/Test-IssScript.ps1       #  76 static checks
 python3 installer/tests/test_app_overlay.py         #  96 assertions
 ```
 
-448 assertions covering version parsing and gating, the install-path rewriter
+480 assertions covering version parsing and gating, the install-path rewriter
 (plain, JSON-escaped and forward-slash forms, exclusions, idempotency), `.env`
 seeding, retry/backoff behaviour, process timeout and exit-code handling, the
 venv import probe, bundled-Python provisioning (hash verification, tamper
