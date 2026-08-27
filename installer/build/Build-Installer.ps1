@@ -227,6 +227,23 @@ foreach ($expected in @('Install-RedSightDesktopShortcut.ps1', 'Uninstall-RedSig
 
 Set-Content -LiteralPath (Join-Path $StagingDir 'VERSION') -Value $Version -Encoding utf8 -NoNewline
 
+# --------------------------------------------------------------------------
+# 3b. Application overlay (MCP settings tab)
+# --------------------------------------------------------------------------
+
+$overlayScript = Join-Path (Join-Path $installerRoot 'app-overlay') 'Apply-AppOverlay.ps1'
+if (Test-Path -LiteralPath $overlayScript) {
+    Write-RsLog 'applying the application overlay' -Level STEP
+    $shell = (Get-RsCommand -Name 'pwsh')
+    $shellPath = if ($shell) { $shell.Source } else { Get-RsPowerShellExe }
+    $r = Invoke-RsProcess -FilePath $shellPath `
+                          -Arguments @('-NoLogo', '-NoProfile', '-File', $overlayScript, '-PayloadDir', $StagingDir) `
+                          -TimeoutSeconds 600
+    if ($r.ExitCode -ne 0) { throw "Apply-AppOverlay.ps1 failed with exit code $($r.ExitCode)" }
+} else {
+    Write-RsLog "application overlay not found at $overlayScript" -Level WARN
+}
+
 # ==========================================================================
 # 4. Offline bundle
 # ==========================================================================

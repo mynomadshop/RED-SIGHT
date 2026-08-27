@@ -17,18 +17,81 @@ installer/
     Fetch-Bundles.ps1           download CPython 3.12 + the pip wheelhouse
   scripts/                      installed into {app}\scripts\windows
     RedSight-Common.ps1         logging, retries, downloads, process exec, PATH
+    RedSight-Hardware.ps1       standalone capability scan (GPU, virtualization)
+    RedSight-Provision.ps1      profiles, workspace, provider keys, runtime mode
     RedSight-Preflight.ps1      the dependency engine (detect / provision / verify)
     Bootstrap-RedSight.ps1      first-run orchestrator, run by the installer
     Verify-RedSightSetup.ps1    health check ("can RedSight launch right now?")
+  app-overlay/                  additive application modules merged into the payload
+    Apply-AppOverlay.ps1        copies the modules and wires the launcher hook
+    app/ui/action_palette_stage114_mcp.py   MCP Servers tab in Settings
   tests/
     Test-RedSightSetup.ps1      cross-platform tests for the setup logic
     Test-IssScript.ps1          static checks for RedSight.iss
+    test_app_overlay.py         tests for the MCP path handling
   docs/
     README.template.txt         becomes README.txt in the release zip
   legacy/
     RedSight-Setup-11.2.0.exe   previously shipped installer, used as the
                                 authoritative source of the application payload
 ```
+
+## Setup options
+
+The wizard asks two things before installing anything, both informed by a
+hardware scan that runs first:
+
+1. **Setup type** - *NVIDIA GPU (CUDA local inference)* or *Laptop / PC (cloud
+   AI providers)*. This decides which Python wheels are downloaded. The scan's
+   recommendation is preselected, and choosing CUDA without a responding NVIDIA
+   driver warns before continuing.
+2. **AI provider and key** (API profile only) - LM Studio, OpenAI, Anthropic,
+   Gemini, xAI or a custom OpenAI-compatible endpoint.
+
+It then asks for the **working folder**, which setup creates and wires into
+`.env`.
+
+### Why the profile matters
+
+| | CUDA profile | API / laptop profile |
+| --- | --- | --- |
+| PyTorch | `--index-url .../whl/cu124`, ~2.5 GB | `--index-url .../whl/cpu`, ~200 MB |
+| ONNX Runtime | `onnxruntime-gpu` | `onnxruntime` |
+
+On a machine with no working NVIDIA driver the CUDA build is not merely wasted
+download - it fails to load. `PreInstalls` are installed before anything else so
+the chosen torch is already satisfied when the rest of the dependency graph
+resolves, and nothing pulls the default build over the top.
+
+### Hardware detection
+
+`RedSight-Hardware.ps1` is standalone so the Inno wizard can extract it to a
+temp folder and run it before installing. It reports GPU/CUDA (via `nvidia-smi`,
+not just the adapter name), chassis type, RAM, disk, Windows build and firmware
+virtualization, then emits JSON for the bootstrap and INI for the wizard.
+
+One subtlety worth knowing: `Win32_Processor.VirtualizationFirmwareEnabled`
+reports **false** whenever a hypervisor is already running, because the CPU is
+itself virtualized. Reading it alone would conclude that a machine already
+running WSL2 cannot run WSL2, so it is OR'd with
+`Win32_ComputerSystem.HypervisorPresent`.
+
+## Runtime modes
+
+| | Container mode | Native mode |
+| --- | --- | --- |
+| Backend | `docker compose` (redsight + qdrant) | `scripts/start.py` in `.venv-ui` |
+| Vector store | Qdrant container | Qdrant embedded, in-process |
+| Requires | WSL2 + Docker Desktop | nothing beyond Python |
+| Chosen when | firmware virtualization is available | it is not, or Docker is skipped |
+
+Native mode exists because of a real failure: setup used to enable the WSL2
+features and install Docker on laptops whose firmware has virtualization
+switched off, leaving a machine that reboots and still cannot start the engine.
+Setup now refuses that path up front, explains how to enable virtualization in
+the firmware, and runs RedSight without containers instead - which works because
+the application's vector store already supports `QdrantClient(path=...)` and
+falls back to it when no server answers.
 
 ## What setup provisions
 
@@ -116,8 +179,9 @@ snapshot; that class of leftover is now removed by pattern rather than by hand.
 ## Testing
 
 ```bash
-pwsh -File installer/tests/Test-RedSightSetup.ps1   # 66 assertions
-pwsh -File installer/tests/Test-IssScript.ps1       # 30 static checks
+pwsh -File installer/tests/Test-RedSightSetup.ps1   # 137 assertions
+pwsh -File installer/tests/Test-IssScript.ps1       #  45 static checks
+python3 installer/tests/test_app_overlay.py         #  35 assertions
 ```
 
 66 assertions covering version parsing and gating, the install-path rewriter

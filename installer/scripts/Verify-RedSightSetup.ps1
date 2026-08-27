@@ -119,14 +119,22 @@ Add-RsCheck -Name '.env present' `
 
 # --- Docker ---------------------------------------------------------------
 
+# In native mode Docker is genuinely not needed, so its absence is informational
+# rather than a failure - the whole point of that mode.
+$nativeMode = (Get-RsEnvValue -Path (Join-Path $ProjectRoot '.env') -Key 'REDSIGHT_RUNTIME_MODE') -eq 'native'
+$dockerRequired = -not $nativeMode
+
 $dockerCli = Find-RsDockerCli
 if (-not $dockerCli) {
-    Add-RsCheck -Name 'docker CLI' -Status 'fail' -Required -Detail 'Docker Desktop is not installed'
+    Add-RsCheck -Name 'docker CLI' -Required:$dockerRequired `
+                -Status $(if ($dockerRequired) { 'fail' } else { 'skip' }) `
+                -Detail $(if ($dockerRequired) { 'Docker Desktop is not installed' }
+                          else { 'not needed in native mode' })
 } else {
-    Add-RsCheck -Name 'docker CLI' -Status 'pass' -Required -Detail $dockerCli
+    Add-RsCheck -Name 'docker CLI' -Status 'pass' -Required:$dockerRequired -Detail $dockerCli
 
     if (Test-RsDockerEngine -DockerCli $dockerCli) {
-        Add-RsCheck -Name 'docker engine' -Status 'pass' -Required -Detail 'daemon is responding'
+        Add-RsCheck -Name 'docker engine' -Status 'pass' -Required:$dockerRequired -Detail 'daemon is responding'
 
         # Does the compose file parse against this engine?
         $r = Invoke-RsProcess -FilePath $dockerCli -Arguments @('compose', 'config', '--quiet') `
@@ -143,7 +151,9 @@ if (-not $dockerCli) {
                     -Status $(if ($hasQdrant) { 'pass' } else { 'warn' }) `
                     -Detail $(if ($hasQdrant) { 'qdrant image present' } else { 'will be built on first launch' })
     } else {
-        Add-RsCheck -Name 'docker engine' -Status 'fail' -Required -Detail 'Docker Desktop is installed but not running'
+        Add-RsCheck -Name 'docker engine' -Required:$dockerRequired `
+                    -Status $(if ($dockerRequired) { 'fail' } else { 'skip' }) `
+                    -Detail 'Docker Desktop is installed but not running'
     }
 }
 
@@ -152,8 +162,10 @@ if (-not $dockerCli) {
 $wsl = Get-RsWslState
 $wslOk = $wsl.SubsystemEnabled -and $wsl.VirtualMachinePlatform
 Add-RsCheck -Name 'WSL2 platform' `
-            -Status $(if ($wslOk) { 'pass' } else { 'warn' }) `
-            -Detail "subsystem=$($wsl.SubsystemEnabled) vmp=$($wsl.VirtualMachinePlatform) kernel=$($wsl.KernelInstalled)"
+            -Status $(if ($wslOk) { 'pass' } elseif ($nativeMode) { 'skip' } else { 'warn' }) `
+            -Detail $(if ($wslOk) { "subsystem=$($wsl.SubsystemEnabled) vmp=$($wsl.VirtualMachinePlatform) kernel=$($wsl.KernelInstalled)" }
+                      elseif ($nativeMode) { 'not needed in native mode' }
+                      else { "subsystem=$($wsl.SubsystemEnabled) vmp=$($wsl.VirtualMachinePlatform) kernel=$($wsl.KernelInstalled)" })
 
 # --- Optional integrations -----------------------------------------------
 
@@ -174,6 +186,107 @@ try {
 Add-RsCheck -Name 'LM Studio local server' `
             -Status $(if ($lmUp) { 'pass' } else { 'skip' }) `
             -Detail $(if ($lmUp) { 'responding on 127.0.0.1:1234' } else { 'not running (start it for local inference)' })
+
+# --- Agent capabilities ---------------------------------------------------
+
+# Multi-step planning, multiple tool calls per task and skill-driven workflows
+# are what make the agent useful, so check the pieces are actually present
+# rather than assuming the payload carried them.
+$agentFiles = @{
+    'redsight_actions\stage113_task_runner.py'  = 'multi-step task runner (plan, approve, cancel)'
+    'app\ui\action_palette_stage113.py'         = 'TASK PLAN panel with per-step status'
+    'app\ui\action_palette_stage113_wiring.py'  = '/agent command routed through the step-tracked runner'
+}
+foreach ($rel in $agentFiles.Keys) {
+    $p = Join-Path $ProjectRoot $rel
+    Add-RsCheck -Name "agent: $($agentFiles[$rel])" `
+                -Status $(if (Test-Path -LiteralPath $p) { 'pass' } else { 'warn' }) `
+                -Detail $(if (Test-Path -LiteralPath $p) { $rel } else { "missing: $rel" })
+}
+
+# The inherited skill catalog is what "advanced workflows" draws on.
+$skillRoot = Join-Path $ProjectRoot 'data\heritage\hermes\skills'
+$skillCount = 0
+if (Test-Path -LiteralPath $skillRoot) {
+    $skillCount = @(Get-ChildItem -LiteralPath $skillRoot -Recurse -Filter 'SKILL.md' -File -ErrorAction SilentlyContinue).Count
+}
+Add-RsCheck -Name 'agent: inherited skill catalog' `
+            -Status $(if ($skillCount -gt 0) { 'pass' } else { 'warn' }) `
+            -Detail "$skillCount skill(s) under data\heritage"
+
+# If the backend is up, confirm the multi-step run API answers. Read-only: the
+# health check must never start an agent run of its own.
+$apiBase = 'http://127.0.0.1:8000'
+$envApi = Get-RsEnvValue -Path (Join-Path $ProjectRoot '.env') -Key 'REDSIGHT_API_URL'
+if ($envApi) { $apiBase = $envApi }
+$agentApi = 'skip'
+$agentDetail = 'backend not running - start RedSight and re-run to check'
+try {
+    $req = [System.Net.HttpWebRequest]::Create("$apiBase/agent/run")
+    $req.Method = 'GET'
+    $req.Timeout = 4000
+    $resp = $req.GetResponse()
+    $resp.Dispose()
+    $agentApi = 'pass'
+    $agentDetail = "$apiBase/agent/run answered"
+} catch {
+    if ($_.Exception.Response) {
+        # A protocol response means the backend is up; 404 means the route is absent.
+        $code = [int]$_.Exception.Response.StatusCode
+        $_.Exception.Response.Dispose()
+        if ($code -eq 404) {
+            $agentApi = 'warn'
+            $agentDetail = "backend is running but $apiBase/agent/run returned 404 - the multi-step run API is not registered"
+        } else {
+            $agentApi = 'pass'
+            $agentDetail = "$apiBase/agent/run answered with HTTP $code"
+        }
+    }
+}
+Add-RsCheck -Name 'agent: multi-step run API' -Status $agentApi -Detail $agentDetail
+
+# --- MCP servers ----------------------------------------------------------
+
+$mcpConfig = Join-Path (Get-RsLocalAppData) 'RedSight\private\mcp-native.json'
+$mcpCount = 0
+if (Test-Path -LiteralPath $mcpConfig) {
+    try {
+        $mcpRaw = Get-Content -LiteralPath $mcpConfig -Raw | ConvertFrom-Json
+        $servers = $mcpRaw.PSObject.Properties['mcp_servers']
+        if ($servers -and $servers.Value) { $mcpCount = @($servers.Value.PSObject.Properties).Count }
+    } catch { }
+}
+Add-RsCheck -Name 'MCP servers configured' `
+            -Status $(if ($mcpCount -gt 0) { 'pass' } else { 'skip' }) `
+            -Detail $(if ($mcpCount -gt 0) { "$mcpCount server(s) in $mcpConfig" }
+                      else { 'none yet - add one in Settings -> MCP Servers by pasting a path' })
+
+# --- Working directory ----------------------------------------------------
+
+$wsPath = Get-RsEnvValue -Path (Join-Path $ProjectRoot '.env') -Key 'REDSIGHT_WORKSPACE'
+if ($wsPath -and (Test-Path -LiteralPath $wsPath)) {
+    $writable = $false
+    try {
+        $probe = Join-Path $wsPath '.redsight-health-probe'
+        Set-Content -LiteralPath $probe -Value 'ok' -Encoding ascii -ErrorAction Stop
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        $writable = $true
+    } catch { }
+    Add-RsCheck -Name 'working directory' -Required `
+                -Status $(if ($writable) { 'pass' } else { 'fail' }) `
+                -Detail $(if ($writable) { $wsPath } else { "not writable: $wsPath" })
+} else {
+    Add-RsCheck -Name 'working directory' -Status 'fail' -Required `
+                -Detail 'REDSIGHT_WORKSPACE is not set or the folder is missing'
+}
+
+# --- Runtime mode ---------------------------------------------------------
+
+$runtimeMode = Get-RsEnvValue -Path (Join-Path $ProjectRoot '.env') -Key 'REDSIGHT_RUNTIME_MODE'
+if (-not $runtimeMode) { $runtimeMode = 'container' }
+Add-RsCheck -Name 'runtime mode' -Status 'pass' `
+            -Detail $(if ($runtimeMode -eq 'native') { 'native - backend in-process, embedded vector store, no Docker needed' }
+                      else { 'container - Docker + WSL2 backend' })
 
 # --- Shortcut -------------------------------------------------------------
 

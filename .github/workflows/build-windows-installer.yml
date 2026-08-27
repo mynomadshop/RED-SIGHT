@@ -58,6 +58,9 @@ jobs:
         shell: pwsh
         run: pwsh -NoLogo -NoProfile -File installer/tests/Test-IssScript.ps1
 
+      - name: Test the application overlay
+        run: python3 installer/tests/test_app_overlay.py
+
       - name: Check every script parses
         shell: pwsh
         run: |
