@@ -1,0 +1,421 @@
+<#
+    Verify-RedSightSetup.ps1
+
+    Health check for an installed RedSight. Answers one question: can RedSight
+    actually launch and work right now, and if not, what exactly is missing?
+
+    Run it any time:
+        powershell -ExecutionPolicy Bypass -File scripts\windows\Verify-RedSightSetup.ps1
+
+    Exit codes
+        0   every required check passed
+        1   at least one required check failed
+#>
+
+[CmdletBinding()]
+param(
+    [string]$ProjectRoot,
+    [switch]$Json
+)
+
+Set-StrictMode -Version Latest
+
+$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+
+# Captured before dot-sourcing: RedSight-Preflight.ps1 declares its own
+# [string]$ProjectRoot, and a dot-sourced param() block runs in this scope and
+# would reset ours to ''.
+$requestedRoot = if ($PSBoundParameters.ContainsKey('ProjectRoot')) { $ProjectRoot } else { '' }
+
+. (Join-Path $scriptDir 'RedSight-Preflight.ps1')
+
+$ProjectRoot = $requestedRoot
+if (-not $ProjectRoot) {
+    $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir '..\..'))
+}
+
+Initialize-RsLog -Name 'verify' | Out-Null
+
+$checks = New-Object System.Collections.Generic.List[object]
+
+function Add-RsCheck {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][ValidateSet('pass', 'fail', 'warn', 'skip')][string]$Status,
+        [string]$Detail = '',
+        [switch]$Required
+    )
+    $checks.Add([pscustomobject]@{
+        Name     = $Name
+        Status   = $Status
+        Detail   = $Detail
+        Required = [bool]$Required
+    })
+    $level = switch ($Status) { 'pass' { 'OK' } 'fail' { 'FAIL' } 'warn' { 'WARN' } default { 'INFO' } }
+    Write-RsLog ("{0,-34} {1,-5} {2}" -f $Name, $Status.ToUpperInvariant(), $Detail) -Level $level
+}
+
+Write-RsLog ('=' * 70)
+Write-RsLog "REDSIGHT HEALTH CHECK  ($ProjectRoot)"
+Write-RsLog ('=' * 70)
+
+# --- Application tree -----------------------------------------------------
+
+foreach ($rel in @('docker-compose.yml', 'launch_redsight_command_center.py', 'app', 'redsight_actions')) {
+    $p = Join-Path $ProjectRoot $rel
+    Add-RsCheck -Name "app file: $rel" -Required `
+                -Status $(if (Test-Path -LiteralPath $p) { 'pass' } else { 'fail' }) `
+                -Detail $(if (Test-Path -LiteralPath $p) { '' } else { "missing: $p" })
+}
+
+# --- Leftover build-machine paths -----------------------------------------
+
+# A single surviving author-machine path breaks the launcher at runtime, so this
+# is a required check rather than a cosmetic one.
+$leaked = Repair-RsHardcodedPaths -ProjectRoot $ProjectRoot -WhatIf
+Add-RsCheck -Name 'install paths rewritten' -Required `
+            -Status $(if ($leaked.Rewritten -eq 0) { 'pass' } else { 'fail' }) `
+            -Detail $(if ($leaked.Rewritten -eq 0) { 'no build-machine paths remain' }
+                      else { "$($leaked.Rewritten) file(s) still reference another install path" })
+if ($leaked.Rewritten -gt 0) {
+    # Naming the files is the difference between a verdict and something the
+    # user can act on. Repair-RedSight.ps1 shows the offending lines.
+    foreach ($f in @($leaked.Files)) {
+        Write-RsLog "    $($f.Substring($ProjectRoot.Length).TrimStart('\'))" -Level FAIL
+    }
+    Write-RsLog "    run scripts\windows\Repair-RedSight.ps1 to see the lines and fix them" -Level INFO
+}
+
+# --- Python ---------------------------------------------------------------
+
+$python = $null
+$runtimeExe = Join-Path (Get-RsRuntimePythonDir -ProjectRoot $ProjectRoot) 'python.exe'
+if ((Test-Path -LiteralPath $runtimeExe) -and (Test-RsPythonUsable -PythonExe $runtimeExe)) {
+    $python = $runtimeExe
+} else {
+    $python = Find-RsSystemPython
+}
+if ($python) {
+    $v = Get-RsPythonVersion -PythonExe $python
+    Add-RsCheck -Name 'python 3.12 runtime' -Status 'pass' -Required -Detail "$python ($v)"
+} else {
+    Add-RsCheck -Name 'python 3.12 runtime' -Status 'fail' -Required -Detail 'no usable Python 3.12 found'
+}
+
+# --- Virtual environments -------------------------------------------------
+
+$uiPython = Join-Path $ProjectRoot '.venv-ui\Scripts\python.exe'
+if (Test-Path -LiteralPath $uiPython) {
+    # These four are exactly what the Command Center imports at startup.
+    $modules = @('PySide6', 'qasync', 'httpx', 'pydantic')
+    $ok = Test-RsVenvImports -VenvPython $uiPython -Modules $modules
+    Add-RsCheck -Name 'desktop UI env (.venv-ui)' -Required `
+                -Status $(if ($ok) { 'pass' } else { 'fail' }) `
+                -Detail $(if ($ok) { "imports $($modules -join ', ')" } else { 'required modules missing' })
+} else {
+    Add-RsCheck -Name 'desktop UI env (.venv-ui)' -Status 'fail' -Required -Detail "missing: $uiPython"
+}
+
+# --- GPU acceleration -----------------------------------------------------
+
+# The question worth asking is whether torch can run this machine's GPUs, not
+# whether a CUDA build is present. A wheel with no kernels for the installed
+# architecture imports cleanly, reports CUDA as available, and then fails on the
+# first operation - which is what an RTX 50-series card gets from a cu124 build.
+if (Test-Path -LiteralPath $uiPython) {
+    $torch = Test-RsTorchCuda -VenvPython $uiPython -ProjectRoot $ProjectRoot
+    if (-not $torch.Ok) {
+        Add-RsCheck -Name 'PyTorch' -Status 'skip' -Detail $torch.Detail
+    } elseif ($torch.Usable) {
+        Add-RsCheck -Name 'GPU acceleration (PyTorch)' -Status 'pass' -Detail $torch.Detail
+    } elseif ($torch.Devices) {
+        Add-RsCheck -Name 'GPU acceleration (PyTorch)' -Status 'fail' -Detail $torch.Detail
+        Write-RsLog "    $($torch.Devices)" -Level FAIL
+        Write-RsLog '    re-run setup to install the build that matches these GPUs' -Level INFO
+    } else {
+        # No CUDA device at all is the normal, correct state on the API profile.
+        Add-RsCheck -Name 'GPU acceleration (PyTorch)' -Status 'skip' -Detail $torch.Detail
+    }
+}
+
+$actionsPython = Join-Path $ProjectRoot '.venv-actions\Scripts\python.exe'
+if (Test-Path -LiteralPath $actionsPython) {
+    $ok = Test-RsVenvImports -VenvPython $actionsPython -Modules @('fastapi', 'uvicorn', 'httpx')
+    Add-RsCheck -Name 'gateway env (.venv-actions)' `
+                -Status $(if ($ok) { 'pass' } else { 'warn' }) `
+                -Detail $(if ($ok) { 'imports fastapi, uvicorn, httpx' } else { 'some modules missing' })
+} else {
+    Add-RsCheck -Name 'gateway env (.venv-actions)' -Status 'warn' -Detail 'not created'
+}
+
+# --- Configuration --------------------------------------------------------
+
+Add-RsCheck -Name '.env present' `
+            -Status $(if (Test-Path -LiteralPath (Join-Path $ProjectRoot '.env')) { 'pass' } else { 'warn' }) `
+            -Detail 'LM Studio / Qdrant settings'
+
+# --- Docker ---------------------------------------------------------------
+
+# In native mode Docker is genuinely not needed, so its absence is informational
+# rather than a failure - the whole point of that mode.
+$nativeMode = (Get-RsEnvValue -Path (Join-Path $ProjectRoot '.env') -Key 'REDSIGHT_RUNTIME_MODE') -eq 'native'
+$dockerRequired = -not $nativeMode
+
+$dockerCli = Find-RsDockerCli
+if (-not $dockerCli) {
+    Add-RsCheck -Name 'docker CLI' -Required:$dockerRequired `
+                -Status $(if ($dockerRequired) { 'fail' } else { 'skip' }) `
+                -Detail $(if ($dockerRequired) { 'Docker Desktop is not installed' }
+                          else { 'not needed in native mode' })
+} else {
+    Add-RsCheck -Name 'docker CLI' -Status 'pass' -Required:$dockerRequired -Detail $dockerCli
+
+    if (Test-RsDockerEngine -DockerCli $dockerCli) {
+        Add-RsCheck -Name 'docker engine' -Status 'pass' -Required:$dockerRequired -Detail 'daemon is responding'
+
+        # Does the compose file parse against this engine?
+        $r = Invoke-RsProcess -FilePath $dockerCli -Arguments @('compose', 'config', '--quiet') `
+                              -WorkingDirectory $ProjectRoot -TimeoutSeconds 180 -Quiet
+        Add-RsCheck -Name 'docker compose config' `
+                    -Status $(if ($r.ExitCode -eq 0) { 'pass' } else { 'warn' }) `
+                    -Detail $(if ($r.ExitCode -eq 0) { 'docker-compose.yml is valid' } else { "exit $($r.ExitCode)" })
+
+        # Are the images already built? Not required - first launch builds them.
+        $r = Invoke-RsProcess -FilePath $dockerCli -Arguments @('images', '--format', '{{.Repository}}') `
+                              -TimeoutSeconds 120 -Quiet
+        $hasQdrant = $r.StdOut -match 'qdrant'
+        Add-RsCheck -Name 'docker images built' `
+                    -Status $(if ($hasQdrant) { 'pass' } else { 'warn' }) `
+                    -Detail $(if ($hasQdrant) { 'qdrant image present' } else { 'will be built on first launch' })
+    } else {
+        Add-RsCheck -Name 'docker engine' -Required:$dockerRequired `
+                    -Status $(if ($dockerRequired) { 'fail' } else { 'skip' }) `
+                    -Detail 'Docker Desktop is installed but not running'
+    }
+}
+
+# --- WSL2 -----------------------------------------------------------------
+
+$wsl = Get-RsWslState
+$wslOk = $wsl.SubsystemEnabled -and $wsl.VirtualMachinePlatform
+Add-RsCheck -Name 'WSL2 platform' `
+            -Status $(if ($wslOk) { 'pass' } elseif ($nativeMode) { 'skip' } else { 'warn' }) `
+            -Detail $(if ($wslOk) { "subsystem=$($wsl.SubsystemEnabled) vmp=$($wsl.VirtualMachinePlatform) kernel=$($wsl.KernelInstalled)" }
+                      elseif ($nativeMode) { 'not needed in native mode' }
+                      else { "subsystem=$($wsl.SubsystemEnabled) vmp=$($wsl.VirtualMachinePlatform) kernel=$($wsl.KernelInstalled)" })
+
+# --- Optional integrations -----------------------------------------------
+
+$node = Get-RsCommand -Name 'node'
+Add-RsCheck -Name 'Node.js (WhatsApp bridge)' `
+            -Status $(if ($node) { 'pass' } else { 'skip' }) `
+            -Detail $(if ($node) { $node.Source } else { 'optional feature not installed' })
+
+# --- LM Studio ------------------------------------------------------------
+
+# The endpoint the backend will actually use, not a hardcoded guess. This is the
+# check that distinguishes "LM Studio is off" from "RedSight is pointed at the
+# wrong place", which is what made a passing Settings test sit beside a
+# connection error in the UI.
+$lmConfig = Read-RsLmStudioConfig
+$lmProbe = Test-RsLmStudioEndpoint -BaseUrl $lmConfig['base_url']
+Add-RsCheck -Name 'LM Studio local server' `
+            -Status $(if ($lmProbe.Ok) { 'pass' } else { 'skip' }) `
+            -Detail $(if ($lmProbe.Ok) { "responding at $($lmConfig['base_url'])" }
+                      else { "not answering at $($lmConfig['base_url']) - start it, or change the endpoint in Settings -> LM Studio" })
+
+if ($lmProbe.Ok) {
+    # A request naming a model LM Studio has not got is answered with 404, so an
+    # empty model list means chat cannot work even though the server is up.
+    $lmModels = @($lmProbe.Models)
+    Add-RsCheck -Name 'LM Studio model loaded' `
+                -Status $(if ($lmModels.Count -gt 0) { 'pass' } else { 'warn' }) `
+                -Detail $(if ($lmModels.Count -gt 0) { "$($lmModels.Count) model(s): $(($lmModels | Select-Object -First 4) -join ', ')" }
+                          else { 'no model loaded in LM Studio - load one, then Settings -> LM Studio -> Detect models' })
+}
+
+# The endpoint has to reach the backend through the process environment, because
+# nothing in the application loads .env for these names.
+$bootstrapOk = $false
+$bootstrapDetail = 'redsight_bootstrap is not installed in .venv-ui'
+if (Test-Path -LiteralPath $uiPython) {
+    $r = Invoke-RsProcess -FilePath $uiPython -TimeoutSeconds 60 -Quiet `
+                          -Arguments @('-c', 'import redsight_bootstrap,os;print(os.environ.get("LM_STUDIO_BASE_URL",""))')
+    if ($r.ExitCode -eq 0 -and $r.StdOut.Trim()) {
+        $bootstrapOk = $true
+        $bootstrapDetail = "the backend will read LM_STUDIO_BASE_URL=$($r.StdOut.Trim())"
+    }
+}
+Add-RsCheck -Name 'LM Studio endpoint reaches the backend' -Required `
+            -Status $(if ($bootstrapOk) { 'pass' } else { 'fail' }) `
+            -Detail $bootstrapDetail
+
+# --- Action/memory gateway ------------------------------------------------
+
+# Every chat goes through this service: /memory/build before the model call and
+# /memory/commit after it, and the UI's memory indicator reads /memory/status
+# here. With it down the UI reports memory as missing and no query is answered.
+$gatewayModule = Join-Path $ProjectRoot 'redsight_actions\gateway_stage10.py'
+Add-RsCheck -Name 'action/memory gateway module' -Required `
+            -Status $(if (Test-Path -LiteralPath $gatewayModule) { 'pass' } else { 'fail' }) `
+            -Detail $(if (Test-Path -LiteralPath $gatewayModule) { 'redsight_actions\gateway_stage10.py' }
+                      else { "missing: $gatewayModule" })
+
+$gatewayUp = $false
+try {
+    $req = [System.Net.HttpWebRequest]::Create('http://127.0.0.1:8765/memory/status')
+    $req.Timeout = 4000
+    $req.Proxy = $null
+    $resp = $req.GetResponse()
+    $resp.Dispose()
+    $gatewayUp = $true
+} catch { }
+Add-RsCheck -Name 'action/memory gateway running' `
+            -Status $(if ($gatewayUp) { 'pass' } else { 'skip' }) `
+            -Detail $(if ($gatewayUp) { 'answering on 127.0.0.1:8765' }
+                      else { 'not running - it is started by the RedSight launcher; if memory shows as missing in the UI, check %LOCALAPPDATA%\RedSight\logs\native-gateway.err.log' })
+
+# --- Desktop responsiveness ----------------------------------------------
+
+Add-RsCheck -Name 'desktop visual effects' -Status 'pass' `
+            -Detail $(if ($lmConfig['ui_effects'] -eq 'full') { 'full - as shipped' }
+                      elseif ($lmConfig['ui_effects'] -eq 'off') { 'off - no ambient animation' }
+                      else { 'reduced - calmer animation, less input latency' })
+
+# --- Agent capabilities ---------------------------------------------------
+
+# Multi-step planning, multiple tool calls per task and skill-driven workflows
+# are what make the agent useful, so check the pieces are actually present
+# rather than assuming the payload carried them.
+$agentFiles = @{
+    'redsight_actions\stage113_task_runner.py'  = 'multi-step task runner (plan, approve, cancel)'
+    'app\ui\action_palette_stage113.py'         = 'TASK PLAN panel with per-step status'
+    'app\ui\action_palette_stage113_wiring.py'  = '/agent command routed through the step-tracked runner'
+}
+foreach ($rel in $agentFiles.Keys) {
+    $p = Join-Path $ProjectRoot $rel
+    Add-RsCheck -Name "agent: $($agentFiles[$rel])" `
+                -Status $(if (Test-Path -LiteralPath $p) { 'pass' } else { 'warn' }) `
+                -Detail $(if (Test-Path -LiteralPath $p) { $rel } else { "missing: $rel" })
+}
+
+# The inherited skill catalog is what "advanced workflows" draws on.
+$skillRoot = Join-Path $ProjectRoot 'data\heritage\hermes\skills'
+$skillCount = 0
+if (Test-Path -LiteralPath $skillRoot) {
+    $skillCount = @(Get-ChildItem -LiteralPath $skillRoot -Recurse -Filter 'SKILL.md' -File -ErrorAction SilentlyContinue).Count
+}
+Add-RsCheck -Name 'agent: inherited skill catalog' `
+            -Status $(if ($skillCount -gt 0) { 'pass' } else { 'warn' }) `
+            -Detail "$skillCount skill(s) under data\heritage"
+
+# If the backend is up, confirm the multi-step run API answers. Read-only: the
+# health check must never start an agent run of its own.
+$apiBase = 'http://127.0.0.1:8000'
+$envApi = Get-RsEnvValue -Path (Join-Path $ProjectRoot '.env') -Key 'REDSIGHT_API_URL'
+if ($envApi) { $apiBase = $envApi }
+$agentApi = 'skip'
+$agentDetail = 'backend not running - start RedSight and re-run to check'
+try {
+    $req = [System.Net.HttpWebRequest]::Create("$apiBase/agent/run")
+    $req.Method = 'GET'
+    $req.Timeout = 4000
+    $resp = $req.GetResponse()
+    $resp.Dispose()
+    $agentApi = 'pass'
+    $agentDetail = "$apiBase/agent/run answered"
+} catch {
+    if ($_.Exception.Response) {
+        # A protocol response means the backend is up; 404 means the route is absent.
+        $code = [int]$_.Exception.Response.StatusCode
+        $_.Exception.Response.Dispose()
+        if ($code -eq 404) {
+            $agentApi = 'warn'
+            $agentDetail = "backend is running but $apiBase/agent/run returned 404 - the multi-step run API is not registered"
+        } else {
+            $agentApi = 'pass'
+            $agentDetail = "$apiBase/agent/run answered with HTTP $code"
+        }
+    }
+}
+Add-RsCheck -Name 'agent: multi-step run API' -Status $agentApi -Detail $agentDetail
+
+# --- MCP servers ----------------------------------------------------------
+
+$mcpConfig = Join-Path (Get-RsLocalAppData) 'RedSight\private\mcp-native.json'
+$mcpCount = 0
+if (Test-Path -LiteralPath $mcpConfig) {
+    try {
+        $mcpRaw = Get-Content -LiteralPath $mcpConfig -Raw | ConvertFrom-Json
+        $servers = $mcpRaw.PSObject.Properties['mcp_servers']
+        if ($servers -and $servers.Value) { $mcpCount = @($servers.Value.PSObject.Properties).Count }
+    } catch { }
+}
+Add-RsCheck -Name 'MCP servers configured' `
+            -Status $(if ($mcpCount -gt 0) { 'pass' } else { 'skip' }) `
+            -Detail $(if ($mcpCount -gt 0) { "$mcpCount server(s) in $mcpConfig" }
+                      else { 'none yet - add one in Settings -> MCP Servers by pasting a path' })
+
+# --- Working directory ----------------------------------------------------
+
+$wsPath = Get-RsEnvValue -Path (Join-Path $ProjectRoot '.env') -Key 'REDSIGHT_WORKSPACE'
+if ($wsPath -and (Test-Path -LiteralPath $wsPath)) {
+    $writable = $false
+    try {
+        $probe = Join-Path $wsPath '.redsight-health-probe'
+        Set-Content -LiteralPath $probe -Value 'ok' -Encoding ascii -ErrorAction Stop
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        $writable = $true
+    } catch { }
+    Add-RsCheck -Name 'working directory' -Required `
+                -Status $(if ($writable) { 'pass' } else { 'fail' }) `
+                -Detail $(if ($writable) { $wsPath } else { "not writable: $wsPath" })
+} else {
+    Add-RsCheck -Name 'working directory' -Status 'fail' -Required `
+                -Detail 'REDSIGHT_WORKSPACE is not set or the folder is missing'
+}
+
+# --- Runtime mode ---------------------------------------------------------
+
+$runtimeMode = Get-RsEnvValue -Path (Join-Path $ProjectRoot '.env') -Key 'REDSIGHT_RUNTIME_MODE'
+if (-not $runtimeMode) { $runtimeMode = 'container' }
+Add-RsCheck -Name 'runtime mode' -Status 'pass' `
+            -Detail $(if ($runtimeMode -eq 'native') { 'native - backend in-process, embedded vector store, no Docker needed' }
+                      else { 'container - Docker + WSL2 backend' })
+
+# --- Shortcut -------------------------------------------------------------
+
+$lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'RedSight.lnk'
+Add-RsCheck -Name 'desktop shortcut' `
+            -Status $(if (Test-Path -LiteralPath $lnk) { 'pass' } else { 'warn' }) `
+            -Detail $lnk
+
+# --- Result ---------------------------------------------------------------
+
+$requiredFailed = @($checks | Where-Object { $_.Required -and $_.Status -eq 'fail' })
+$warned = @($checks | Where-Object { $_.Status -eq 'warn' })
+
+Write-RsLog ('=' * 70)
+Write-RsLog ("{0} checks: {1} pass, {2} warn, {3} fail" -f $checks.Count,
+             @($checks | Where-Object { $_.Status -eq 'pass' }).Count, $warned.Count,
+             @($checks | Where-Object { $_.Status -eq 'fail' }).Count)
+
+if ($requiredFailed.Count) {
+    Write-RsLog 'RedSight is NOT ready to launch. Required checks failed:' -Level FAIL
+    foreach ($c in $requiredFailed) { Write-RsLog "  - $($c.Name): $($c.Detail)" -Level FAIL }
+    Write-RsLog 'Diagnose it (reports first, changes nothing):' -Level INFO
+    Write-RsLog "  powershell -ExecutionPolicy Bypass -File `"$ProjectRoot\scripts\windows\Repair-RedSight.ps1`"" -Level INFO
+    Write-RsLog 'Then apply the repairs it found:' -Level INFO
+    Write-RsLog "  powershell -ExecutionPolicy Bypass -File `"$ProjectRoot\scripts\windows\Repair-RedSight.ps1`" -Fix" -Level INFO
+    Write-RsLog 'Or re-run dependency setup from scratch:' -Level INFO
+    Write-RsLog "  powershell -ExecutionPolicy Bypass -File `"$ProjectRoot\scripts\windows\Bootstrap-RedSight.ps1`" -InstallDocker -EnableWsl" -Level INFO
+} else {
+    Write-RsLog 'RedSight is ready to launch.' -Level OK
+}
+Write-RsLog ('=' * 70)
+
+if ($Json) {
+    $checks | ConvertTo-Json -Depth 4
+}
+
+exit $(if ($requiredFailed.Count) { 1 } else { 0 })

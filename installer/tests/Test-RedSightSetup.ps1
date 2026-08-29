@@ -1,0 +1,1409 @@
+<#
+    Test-RedSightSetup.ps1
+
+    Self-contained tests for the platform-independent parts of the RedSight
+    setup pipeline. No Pester dependency, so this runs anywhere PowerShell does
+    (including Linux CI), which is what makes it useful as a pre-build gate.
+
+    Windows-only behaviour (DISM, Docker Desktop, MSI installs) is exercised by
+    the build workflow's install test on a real Windows runner, not here.
+
+        pwsh -File installer/tests/Test-RedSightSetup.ps1
+#>
+
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$scripts = Join-Path (Split-Path -Parent $scriptDir) 'scripts'
+. (Join-Path $scripts 'RedSight-Preflight.ps1')
+
+$script:Pass = 0
+$script:Fail = 0
+$script:Failures = New-Object System.Collections.Generic.List[string]
+
+function Assert-True {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][AllowNull()]$Condition)
+    if ($Condition) {
+        $script:Pass++
+        Write-Host "  PASS  $Name" -ForegroundColor Green
+    } else {
+        $script:Fail++
+        $script:Failures.Add($Name)
+        Write-Host "  FAIL  $Name" -ForegroundColor Red
+    }
+}
+
+function Assert-Equal {
+    param([Parameter(Mandatory)][string]$Name, [AllowNull()]$Expected, [AllowNull()]$Actual)
+    $ok = ($null -eq $Expected -and $null -eq $Actual) -or
+          ($null -ne $Expected -and $null -ne $Actual -and $Expected.ToString() -eq $Actual.ToString())
+    if ($ok) {
+        $script:Pass++
+        Write-Host "  PASS  $Name" -ForegroundColor Green
+    } else {
+        $script:Fail++
+        $script:Failures.Add("$Name (expected '$Expected', got '$Actual')")
+        Write-Host "  FAIL  $Name -- expected '$Expected', got '$Actual'" -ForegroundColor Red
+    }
+}
+
+$tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-test-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
+
+try {
+
+# ==========================================================================
+Write-Host "`n== ConvertTo-RsVersion ==" -ForegroundColor Cyan
+# ==========================================================================
+
+Assert-Equal -Name 'parses a plain python version'      -Expected '3.12.10' -Actual (ConvertTo-RsVersion -Text '3.12.10')
+Assert-Equal -Name 'parses python banner output'        -Expected '3.12.10' -Actual (ConvertTo-RsVersion -Text 'Python 3.12.10')
+Assert-Equal -Name 'parses a docker version banner'     -Expected '27.4.0'  -Actual (ConvertTo-RsVersion -Text 'Docker version 27.4.0, build bde2b89')
+Assert-Equal -Name 'parses a node v-prefixed version'   -Expected '22.14.0' -Actual (ConvertTo-RsVersion -Text 'v22.14.0')
+Assert-Equal -Name 'parses a two-component version'     -Expected '3.13'    -Actual (ConvertTo-RsVersion -Text 'Python 3.13')
+Assert-True  -Name 'returns null for non-version text'  -Condition ($null -eq (ConvertTo-RsVersion -Text 'no digits here'))
+Assert-True  -Name 'returns null for empty input'       -Condition ($null -eq (ConvertTo-RsVersion -Text ''))
+
+# ==========================================================================
+Write-Host "`n== Test-RsVersionInRange ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$min = [version]'3.12.0'
+$max = [version]'3.14.0'
+Assert-True -Name '3.12.0 is in [3.12, 3.14)'      -Condition (Test-RsVersionInRange -Version ([version]'3.12.0') -Minimum $min -ExclusiveMaximum $max)
+Assert-True -Name '3.12.10 is in range'            -Condition (Test-RsVersionInRange -Version ([version]'3.12.10') -Minimum $min -ExclusiveMaximum $max)
+Assert-True -Name '3.13.2 is in range'             -Condition (Test-RsVersionInRange -Version ([version]'3.13.2') -Minimum $min -ExclusiveMaximum $max)
+Assert-True -Name '3.11.9 is rejected (too old)'   -Condition (-not (Test-RsVersionInRange -Version ([version]'3.11.9') -Minimum $min -ExclusiveMaximum $max))
+Assert-True -Name '3.14.0 is rejected (upper excl)' -Condition (-not (Test-RsVersionInRange -Version ([version]'3.14.0') -Minimum $min -ExclusiveMaximum $max))
+Assert-True -Name 'null version is rejected'       -Condition (-not (Test-RsVersionInRange -Version $null -Minimum $min -ExclusiveMaximum $max))
+Assert-True -Name 'no upper bound accepts 99.0'    -Condition (Test-RsVersionInRange -Version ([version]'99.0') -Minimum $min -ExclusiveMaximum $null)
+
+# ==========================================================================
+Write-Host "`n== Repair-RsHardcodedPaths ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Build a fake install tree containing the author-machine path in all three
+# encodings that appear in the shipped RedSight payload.
+$proj = Join-Path $tmpRoot 'RedSightInstall'
+New-Item -ItemType Directory -Path $proj -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $proj '.venv-ui') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $proj 'scripts') -Force | Out-Null
+
+# plain backslash form, as in LAUNCH-REDSIGHT-DESKTOP.ps1
+Set-Content -LiteralPath (Join-Path $proj 'launcher.ps1') -NoNewline -Encoding utf8 `
+    -Value '$R=''C:\Users\walim\RedSight''; & (Join-Path $R ''RESTART-REDSIGHT.ps1'')'
+# python raw string, as in launch_redsight_command_center.py
+Set-Content -LiteralPath (Join-Path $proj 'launcher.py') -NoNewline -Encoding utf8 `
+    -Value 'ROOT = r"C:\Users\walim\RedSight"'
+# JSON-escaped form - the case the previous bootstrap could not match
+Set-Content -LiteralPath (Join-Path $proj 'config.json') -NoNewline -Encoding utf8 `
+    -Value '{"root": "C:\\Users\\walim\\RedSight", "log": "C:\\Users\\walim\\RedSight\\logs"}'
+# forward-slash form
+Set-Content -LiteralPath (Join-Path $proj 'settings.yml') -NoNewline -Encoding utf8 `
+    -Value 'root: C:/Users/walim/RedSight'
+# a deeper path that must keep its trailing segments
+Set-Content -LiteralPath (Join-Path $proj 'scripts\deep.py') -NoNewline -Encoding utf8 `
+    -Value 'P = r"C:\Users\walim\RedSight\.venv-ui\Scripts\python.exe"'
+# a file that must be left completely alone
+Set-Content -LiteralPath (Join-Path $proj 'untouched.py') -NoNewline -Encoding utf8 `
+    -Value 'X = "nothing to see here"'
+# a file inside an excluded directory
+Set-Content -LiteralPath (Join-Path $proj '.venv-ui\excluded.py') -NoNewline -Encoding utf8 `
+    -Value 'ROOT = r"C:\Users\walim\RedSight"'
+
+$result = Repair-RsHardcodedPaths -ProjectRoot $proj
+$sep = [System.IO.Path]::DirectorySeparatorChar
+$expected = (Resolve-Path -LiteralPath $proj).Path.TrimEnd('\')
+$expectedEsc = $expected -replace '\\', '\\'
+$expectedFwd = $expected -replace '\\', '/'
+
+Assert-Equal -Name 'rewrote exactly the five affected files' -Expected 5 -Actual $result.Rewritten
+Assert-Equal -Name 'no rewrite failures'                     -Expected 0 -Actual $result.Failed
+
+$launcher = Get-Content -LiteralPath (Join-Path $proj 'launcher.ps1') -Raw
+Assert-True -Name 'plain path replaced in launcher.ps1'  -Condition ($launcher -like "*$expected*")
+Assert-True -Name 'author path gone from launcher.ps1'   -Condition ($launcher -notlike '*walim*')
+
+$py = Get-Content -LiteralPath (Join-Path $proj 'launcher.py') -Raw
+Assert-True -Name 'python raw string rewritten'          -Condition ($py -notlike '*walim*')
+
+$json = Get-Content -LiteralPath (Join-Path $proj 'config.json') -Raw
+Assert-True -Name 'JSON-escaped path rewritten'          -Condition ($json -notlike '*walim*')
+Assert-True -Name 'JSON stays escaped after rewrite'     -Condition ($json -like "*$expectedEsc*")
+$jsonValid = $false
+try { $null = $json | ConvertFrom-Json; $jsonValid = $true } catch { $jsonValid = $false }
+Assert-True -Name 'JSON is still valid JSON'             -Condition $jsonValid
+
+$yml = Get-Content -LiteralPath (Join-Path $proj 'settings.yml') -Raw
+Assert-True -Name 'forward-slash path rewritten'         -Condition ($yml -notlike '*walim*')
+Assert-True -Name 'forward-slash form preserved'         -Condition ($yml -like "*$expectedFwd*")
+
+$deep = Get-Content -LiteralPath (Join-Path $proj 'scripts\deep.py') -Raw
+Assert-True -Name 'trailing segments preserved on a deep path' `
+            -Condition ($deep -like '*.venv-ui*Scripts*python.exe*' -and $deep -notlike '*walim*')
+
+$untouched = Get-Content -LiteralPath (Join-Path $proj 'untouched.py') -Raw
+Assert-Equal -Name 'unrelated file untouched' -Expected 'X = "nothing to see here"' -Actual $untouched
+
+$excluded = Get-Content -LiteralPath (Join-Path $proj '.venv-ui\excluded.py') -Raw
+Assert-True -Name 'files inside .venv-ui are excluded' -Condition ($excluded -like '*walim*')
+
+# Idempotency: a second pass must find nothing left to do.
+$again = Repair-RsHardcodedPaths -ProjectRoot $proj
+Assert-Equal -Name 'second pass rewrites nothing (idempotent)' -Expected 0 -Actual $again.Rewritten
+
+# ==========================================================================
+Write-Host "`n== New-RsEnvFile ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$envProj = Join-Path $tmpRoot 'EnvProj'
+New-Item -ItemType Directory -Path $envProj -Force | Out-Null
+Assert-True -Name 'no .env created without .env.example' -Condition (-not (New-RsEnvFile -ProjectRoot $envProj))
+
+Set-Content -LiteralPath (Join-Path $envProj '.env.example') -Value 'LM_STUDIO_BASE_URL=http://127.0.0.1:1234/v1' -Encoding utf8
+Assert-True -Name '.env created from .env.example' -Condition (New-RsEnvFile -ProjectRoot $envProj)
+Assert-True -Name '.env now exists'                -Condition (Test-Path -LiteralPath (Join-Path $envProj '.env'))
+
+Set-Content -LiteralPath (Join-Path $envProj '.env') -Value 'EDITED=1' -Encoding utf8
+Assert-True -Name 'existing .env is not overwritten' -Condition (-not (New-RsEnvFile -ProjectRoot $envProj))
+Assert-True -Name 'user edits to .env survive' `
+            -Condition ((Get-Content -LiteralPath (Join-Path $envProj '.env') -Raw) -like '*EDITED=1*')
+
+# ==========================================================================
+Write-Host "`n== Invoke-RsRetry ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$script:attempts = 0
+$value = Invoke-RsRetry -Description 'flaky operation' -MaxAttempts 4 -InitialDelaySeconds 1 -Action {
+    $script:attempts++
+    if ($script:attempts -lt 3) { throw "transient failure $($script:attempts)" }
+    return 'succeeded'
+}
+Assert-Equal -Name 'retries until success'        -Expected 'succeeded' -Actual $value
+Assert-Equal -Name 'took exactly three attempts'  -Expected 3 -Actual $script:attempts
+
+$script:attempts2 = 0
+$threw = $false
+try {
+    Invoke-RsRetry -Description 'always fails' -MaxAttempts 2 -InitialDelaySeconds 1 -Action {
+        $script:attempts2++
+        throw 'permanent failure'
+    }
+} catch { $threw = $true }
+Assert-True  -Name 'rethrows after exhausting attempts' -Condition $threw
+Assert-Equal -Name 'honoured MaxAttempts'               -Expected 2 -Actual $script:attempts2
+
+# A retry that returns nothing must not inject $null into the caller's output.
+$emitted = @(Invoke-RsRetry -Description 'silent' -MaxAttempts 1 -Action { })
+Assert-Equal -Name 'no null emitted for a void action' -Expected 0 -Actual $emitted.Count
+
+# ==========================================================================
+Write-Host "`n== Invoke-RsProcess ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Use a shell that exists on whichever platform the tests run on.
+$isWin = ($PSVersionTable.PSEdition -eq 'Desktop') -or
+         [bool](Get-Variable -Name IsWindows -ValueOnly -ErrorAction SilentlyContinue)
+if ($isWin) {
+    $shell = Get-RsSystem32 'cmd.exe'
+    $okArgs = @('/c', 'echo hello')
+    $failArgs = @('/c', 'exit 7')
+    $slowArgs = @('/c', 'ping -n 12 127.0.0.1 >nul')
+} else {
+    $shell = '/bin/sh'
+    $okArgs = @('-c', 'echo hello')
+    $failArgs = @('-c', 'exit 7')
+    $slowArgs = @('-c', 'sleep 12')
+}
+
+$r = Invoke-RsProcess -FilePath $shell -Arguments $okArgs -TimeoutSeconds 60 -Quiet
+Assert-Equal -Name 'captures a zero exit code' -Expected 0 -Actual $r.ExitCode
+Assert-True  -Name 'captures stdout'           -Condition ($r.StdOut -like '*hello*')
+Assert-True  -Name 'not marked as timed out'   -Condition (-not $r.TimedOut)
+
+$r = Invoke-RsProcess -FilePath $shell -Arguments $failArgs -TimeoutSeconds 60 -Quiet
+Assert-Equal -Name 'reports a non-zero exit code without throwing' -Expected 7 -Actual $r.ExitCode
+
+$r = Invoke-RsProcess -FilePath $shell -Arguments $slowArgs -TimeoutSeconds 3 -Quiet
+Assert-True  -Name 'kills a process that exceeds its timeout' -Condition $r.TimedOut
+Assert-Equal -Name 'timed-out process reports exit code -1'   -Expected -1 -Actual $r.ExitCode
+
+# ==========================================================================
+Write-Host "`n== Test-RsVenvImports ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Exercise the import probe against whatever Python is on this machine. This is
+# the check the installer uses to decide whether .venv-ui is usable, so a bug
+# here reports a broken install on a perfectly good one.
+$localPy = $null
+foreach ($n in @('python3', 'python')) {
+    $c = Get-RsCommand -Name $n
+    if ($c) { $localPy = $c.Source; break }
+}
+if (-not $localPy) {
+    Write-Host '  SKIP  no local Python available for the import probe' -ForegroundColor DarkGray
+} else {
+    Assert-True -Name 'import probe accepts modules that exist' `
+                -Condition (Test-RsVenvImports -VenvPython $localPy -Modules @('json', 'sys', 'os'))
+    Assert-True -Name 'import probe rejects a missing module' `
+                -Condition (-not (Test-RsVenvImports -VenvPython $localPy -Modules @('json', 'definitely_not_a_real_module_xyz')))
+    Assert-True -Name 'import probe rejects an unusable interpreter path' `
+                -Condition (-not (Test-RsVenvImports -VenvPython (Join-Path $tmpRoot 'no-python.exe') -Modules @('json')))
+}
+
+# ==========================================================================
+Write-Host "`n== Expand-RsArchive ==" -ForegroundColor Cyan
+# ==========================================================================
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+$srcDir = Join-Path $tmpRoot 'zipsrc'
+New-Item -ItemType Directory -Path (Join-Path $srcDir 'tools\Lib') -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $srcDir 'tools\python.exe') -Value 'not-really-an-exe' -Encoding utf8
+Set-Content -LiteralPath (Join-Path $srcDir 'tools\Lib\venv.py') -Value 'venv' -Encoding utf8
+$zipPath = Join-Path $tmpRoot 'sample.zip'
+[System.IO.Compression.ZipFile]::CreateFromDirectory($srcDir, $zipPath)
+
+$outDir = Join-Path $tmpRoot 'zipout'
+Expand-RsArchive -Path $zipPath -Destination $outDir -Force | Out-Null
+Assert-True -Name 'archive expands nested files' `
+            -Condition (Test-Path -LiteralPath (Join-Path $outDir 'tools/Lib/venv.py'))
+Assert-True -Name 'archive expands top-level files' `
+            -Condition (Test-Path -LiteralPath (Join-Path $outDir 'tools/python.exe'))
+
+# Re-expanding over an existing directory must succeed (idempotent bundles).
+Expand-RsArchive -Path $zipPath -Destination $outDir | Out-Null
+Assert-True -Name 'expanding twice is safe' `
+            -Condition (Test-Path -LiteralPath (Join-Path $outDir 'tools/python.exe'))
+
+# ==========================================================================
+Write-Host "`n== Install-RsBundledPython ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Build a synthetic bundle with the same layout as the official CPython nuget
+# package, then drive the real provisioning path: hash verification, expansion
+# and promotion to {app}\runtime\python.
+$bundleProj = Join-Path $tmpRoot 'BundleProj'
+$bundleDir = Join-Path $bundleProj 'runtime\bundle'
+New-Item -ItemType Directory -Path $bundleDir -Force | Out-Null
+
+$fakeSrc = Join-Path $tmpRoot 'fakepy'
+New-Item -ItemType Directory -Path (Join-Path $fakeSrc 'tools\Lib\venv') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $fakeSrc 'tools\Lib\ensurepip') -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $fakeSrc 'tools\python.exe') -Value 'stub' -Encoding ascii
+Set-Content -LiteralPath (Join-Path $fakeSrc 'tools\Lib\venv\__init__.py') -Value '# venv' -Encoding ascii
+Set-Content -LiteralPath (Join-Path $fakeSrc 'tools\Lib\ensurepip\__init__.py') -Value '# ensurepip' -Encoding ascii
+
+$fakeNupkg = Join-Path $bundleDir 'python-3.12.10-win-x64.nupkg'
+[System.IO.Compression.ZipFile]::CreateFromDirectory($fakeSrc, $fakeNupkg)
+$fakeHash = (Get-FileHash -LiteralPath $fakeNupkg -Algorithm SHA256).Hash.ToLowerInvariant()
+
+# Correct manifest -> provisioning succeeds.
+@{ python = @{ version = '3.12.10'; file = 'python-3.12.10-win-x64.nupkg'; sha256 = $fakeHash } } |
+    ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $bundleDir 'bundle-manifest.json') -Encoding utf8
+
+$provisioned = Install-RsBundledPython -ProjectRoot $bundleProj
+Assert-True -Name 'bundled python provisioned from the package' -Condition ($null -ne $provisioned)
+Assert-True -Name 'runtime python.exe is in place' `
+            -Condition (Test-Path -LiteralPath (Join-Path $bundleProj 'runtime\python\python.exe'))
+Assert-True -Name 'runtime carries the venv module' `
+            -Condition (Test-Path -LiteralPath (Join-Path $bundleProj 'runtime\python\Lib\venv\__init__.py'))
+Assert-True -Name 'nuget tools\ prefix is stripped' `
+            -Condition (-not (Test-Path -LiteralPath (Join-Path $bundleProj 'runtime\python\tools')))
+
+# Tampered manifest -> provisioning must refuse rather than ship a bad runtime.
+@{ python = @{ version = '3.12.10'; file = 'python-3.12.10-win-x64.nupkg'
+               sha256 = '0000000000000000000000000000000000000000000000000000000000000000' } } |
+    ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $bundleDir 'bundle-manifest.json') -Encoding utf8
+$refused = $false
+try { Install-RsBundledPython -ProjectRoot $bundleProj -Force | Out-Null } catch { $refused = $true }
+Assert-True -Name 'a hash mismatch is refused' -Condition $refused
+
+# Missing bundle -> returns null so the caller can fall back to a download.
+$emptyProj = Join-Path $tmpRoot 'EmptyProj'
+New-Item -ItemType Directory -Path $emptyProj -Force | Out-Null
+Assert-True -Name 'absent bundle returns null (caller falls back)' `
+            -Condition ($null -eq (Install-RsBundledPython -ProjectRoot $emptyProj))
+
+# ==========================================================================
+Write-Host "`n== Get-RsFileHashSafe ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$hashFile = Join-Path $tmpRoot 'hash.txt'
+Set-Content -LiteralPath $hashFile -Value 'abc' -NoNewline -Encoding ascii
+Assert-Equal -Name 'sha256 of "abc" matches the known digest' `
+             -Expected 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' `
+             -Actual (Get-RsFileHashSafe -Path $hashFile)
+Assert-True -Name 'missing file hashes to null' `
+            -Condition ($null -eq (Get-RsFileHashSafe -Path (Join-Path $tmpRoot 'does-not-exist')))
+
+# ==========================================================================
+Write-Host "`n== Bundle/runtime path helpers ==" -ForegroundColor Cyan
+# ==========================================================================
+
+Assert-True -Name 'bundle root sits under runtime\bundle' `
+            -Condition ((Get-RsBundleRoot -ProjectRoot $tmpRoot) -like '*runtime*bundle*')
+Assert-True -Name 'runtime python dir sits under runtime\python' `
+            -Condition ((Get-RsRuntimePythonDir -ProjectRoot $tmpRoot) -like '*runtime*python*')
+Assert-True -Name 'wheelhouse is null when absent' `
+            -Condition ($null -eq (Get-RsWheelhouse -ProjectRoot $tmpRoot))
+
+$wh = Join-Path $tmpRoot 'runtime\bundle\wheelhouse'
+New-Item -ItemType Directory -Path $wh -Force | Out-Null
+Assert-True -Name 'wheelhouse is found when present' `
+            -Condition ($null -ne (Get-RsWheelhouse -ProjectRoot $tmpRoot))
+
+# ==========================================================================
+Write-Host "`n== Set-RsEnvValue / Get-RsEnvValue ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$envPath = Join-Path $tmpRoot 'dotenv\.env'
+New-Item -ItemType Directory -Path (Split-Path -Parent $envPath) -Force | Out-Null
+@('# RedSight config', 'LOG_LEVEL=INFO', '', '# Qdrant', 'QDRANT_URL=http://127.0.0.1:6333') |
+    Set-Content -LiteralPath $envPath -Encoding utf8
+
+Assert-True  -Name 'appends a new key'          -Condition (-not (Set-RsEnvValue -Path $envPath -Key 'REDSIGHT_WORKSPACE' -Value 'C:\ws'))
+Assert-Equal -Name 'new key reads back'         -Expected 'C:\ws' -Actual (Get-RsEnvValue -Path $envPath -Key 'REDSIGHT_WORKSPACE')
+Assert-True  -Name 'replaces an existing key'   -Condition (Set-RsEnvValue -Path $envPath -Key 'LOG_LEVEL' -Value 'DEBUG')
+Assert-Equal -Name 'replaced key reads back'    -Expected 'DEBUG' -Actual (Get-RsEnvValue -Path $envPath -Key 'LOG_LEVEL')
+Assert-Equal -Name 'unrelated key untouched'    -Expected 'http://127.0.0.1:6333' -Actual (Get-RsEnvValue -Path $envPath -Key 'QDRANT_URL')
+$envText = Get-Content -LiteralPath $envPath -Raw
+Assert-True  -Name 'comments are preserved'     -Condition ($envText -like '*# RedSight config*' -and $envText -like '*# Qdrant*')
+Assert-Equal -Name 'no duplicate key added'     -Expected 1 -Actual (@(Get-Content -LiteralPath $envPath | Where-Object { $_ -like 'LOG_LEVEL=*' }).Count)
+Assert-True  -Name 'empty values are allowed'   -Condition ([bool](Set-RsEnvValue -Path $envPath -Key 'QDRANT_URL' -Value '') -or $true)
+Assert-Equal -Name 'empty value reads as empty' -Expected '' -Actual (Get-RsEnvValue -Path $envPath -Key 'QDRANT_URL')
+Assert-True  -Name 'missing key returns null'   -Condition ($null -eq (Get-RsEnvValue -Path $envPath -Key 'NOT_PRESENT'))
+
+# dotenv parsers trip over a BOM in front of the first key, the same way the
+# Windows INI API does.
+$envBytes = [System.IO.File]::ReadAllBytes($envPath)
+$envBom = ($envBytes.Length -ge 3 -and $envBytes[0] -eq 0xEF -and $envBytes[1] -eq 0xBB -and $envBytes[2] -eq 0xBF)
+Assert-True -Name '.env is written without a BOM' -Condition (-not $envBom)
+
+# ==========================================================================
+Write-Host "`n== Get-RsDependencyPlan (hardware-aware wheel selection) ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# The whole point: never download CUDA wheels for a machine that cannot use them.
+$hwCuda = [pscustomobject]@{ gpu = [pscustomobject]@{ cudaCapable = $true;  maxVramGB = 24.0; hasNvidiaHardware = $true } }
+$hwNone = [pscustomobject]@{ gpu = [pscustomobject]@{ cudaCapable = $false; maxVramGB = 0.0;  hasNvidiaHardware = $false } }
+$hwStale = [pscustomobject]@{ gpu = [pscustomobject]@{ cudaCapable = $false; maxVramGB = 0.0; hasNvidiaHardware = $true } }
+$hwTiny = [pscustomobject]@{ gpu = [pscustomobject]@{ cudaCapable = $true;  maxVramGB = 2.0;  hasNvidiaHardware = $true } }
+
+function Get-PlanArgs { param($Plan) ; return (($Plan.PreInstalls | ForEach-Object { $_.Args -join ' ' }) -join ' | ') }
+
+$planCuda = Get-RsDependencyPlan -SetupProfile 'auto' -Hardware $hwCuda
+Assert-Equal -Name 'auto picks cuda on a real NVIDIA GPU' -Expected 'cuda' -Actual $planCuda.Profile
+Assert-True  -Name 'cuda plan uses the cu124 wheel index' -Condition ((Get-PlanArgs $planCuda) -like '*download.pytorch.org/whl/cu124*')
+Assert-True  -Name 'cuda plan installs onnxruntime-gpu'   -Condition ((Get-PlanArgs $planCuda) -like '*onnxruntime-gpu*')
+
+$planNone = Get-RsDependencyPlan -SetupProfile 'auto' -Hardware $hwNone
+Assert-Equal -Name 'auto picks api with no GPU'           -Expected 'api' -Actual $planNone.Profile
+Assert-True  -Name 'api plan uses the CPU wheel index'    -Condition ((Get-PlanArgs $planNone) -like '*download.pytorch.org/whl/cpu*')
+Assert-True  -Name 'api plan never pulls CUDA wheels'     -Condition ((Get-PlanArgs $planNone) -notlike '*cu124*')
+Assert-True  -Name 'api plan avoids onnxruntime-gpu'      -Condition ((Get-PlanArgs $planNone) -notlike '*onnxruntime-gpu*')
+
+$planStale = Get-RsDependencyPlan -SetupProfile 'auto' -Hardware $hwStale
+Assert-Equal -Name 'NVIDIA card with no driver falls back to api' -Expected 'api' -Actual $planStale.Profile
+Assert-True  -Name 'and says why'                         -Condition ($planStale.Reason -like '*driver*')
+
+$planTiny = Get-RsDependencyPlan -SetupProfile 'auto' -Hardware $hwTiny
+Assert-Equal -Name 'a 2 GB GPU is not worth CUDA wheels'  -Expected 'api' -Actual $planTiny.Profile
+
+$planForced = Get-RsDependencyPlan -SetupProfile 'cuda' -Hardware $hwNone
+Assert-Equal -Name 'explicit cuda is honoured'            -Expected 'cuda' -Actual $planForced.Profile
+Assert-True  -Name 'but warns there is no driver'         -Condition ($planForced.Reason -like '*no working NVIDIA driver*')
+
+$planApiOnGpu = Get-RsDependencyPlan -SetupProfile 'api' -Hardware $hwCuda
+Assert-Equal -Name 'explicit api is honoured on a GPU box' -Expected 'api' -Actual $planApiOnGpu.Profile
+
+$planNoHw = Get-RsDependencyPlan -SetupProfile 'auto' -Hardware $null
+Assert-Equal -Name 'no hardware info degrades to api'     -Expected 'api' -Actual $planNoHw.Profile
+
+# ==========================================================================
+Write-Host "`n== Initialize-RsWorkspace ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$wsProj = Join-Path $tmpRoot 'WsProj'
+New-Item -ItemType Directory -Path $wsProj -Force | Out-Null
+$wsDir = Join-Path $tmpRoot 'RedSightWorkspace'
+
+$created = Initialize-RsWorkspace -ProjectRoot $wsProj -WorkspaceDir $wsDir -NativeMode
+Assert-Equal -Name 'returns the workspace path' -Expected $wsDir -Actual $created
+foreach ($sub in @('workspace', 'projects', 'inbox', 'outputs', 'memory', 'logs', 'mcp', 'data')) {
+    Assert-True -Name "creates $sub\" -Condition (Test-Path -LiteralPath (Join-Path $wsDir $sub))
+}
+Assert-True -Name 'writes a README into the workspace' -Condition (Test-Path -LiteralPath (Join-Path $wsDir 'README.txt'))
+
+$wsEnv = Join-Path $wsProj '.env'
+Assert-Equal -Name 'REDSIGHT_WORKSPACE written'   -Expected $wsDir -Actual (Get-RsEnvValue -Path $wsEnv -Key 'REDSIGHT_WORKSPACE')
+Assert-Equal -Name 'REDSIGHT_WORKING_DIR written' -Expected (Join-Path $wsDir 'workspace') -Actual (Get-RsEnvValue -Path $wsEnv -Key 'REDSIGHT_WORKING_DIR')
+Assert-Equal -Name 'REDSIGHT_MCP_DIR written'     -Expected (Join-Path $wsDir 'mcp') -Actual (Get-RsEnvValue -Path $wsEnv -Key 'REDSIGHT_MCP_DIR')
+Assert-Equal -Name 'native mode sets the data root' -Expected (Join-Path $wsDir 'data') -Actual (Get-RsEnvValue -Path $wsEnv -Key 'RED_SIGHT_DATA_ROOT')
+
+# Re-running must not duplicate anything or clobber a user edit.
+Set-Content -LiteralPath (Join-Path $wsDir 'README.txt') -Value 'user edited' -Encoding utf8
+$again2 = Initialize-RsWorkspace -ProjectRoot $wsProj -WorkspaceDir $wsDir -NativeMode
+Assert-Equal -Name 'workspace init is idempotent' -Expected $wsDir -Actual $again2
+Assert-True  -Name 'does not overwrite an edited README' `
+             -Condition ((Get-Content -LiteralPath (Join-Path $wsDir 'README.txt') -Raw) -like '*user edited*')
+Assert-Equal -Name 'no duplicate env entries on re-run' -Expected 1 `
+             -Actual (@(Get-Content -LiteralPath $wsEnv | Where-Object { $_ -like 'REDSIGHT_WORKSPACE=*' }).Count)
+
+# Container mode must leave RED_SIGHT_DATA_ROOT alone (compose supplies /data).
+$wsProj2 = Join-Path $tmpRoot 'WsProj2'
+New-Item -ItemType Directory -Path $wsProj2 -Force | Out-Null
+Initialize-RsWorkspace -ProjectRoot $wsProj2 -WorkspaceDir (Join-Path $tmpRoot 'Ws2') | Out-Null
+Assert-True -Name 'container mode leaves RED_SIGHT_DATA_ROOT unset' `
+            -Condition ($null -eq (Get-RsEnvValue -Path (Join-Path $wsProj2 '.env') -Key 'RED_SIGHT_DATA_ROOT'))
+
+# ==========================================================================
+Write-Host "`n== Install-RsMcpConfig ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$mcpSrc = Join-Path $tmpRoot 'mcp-source'
+New-Item -ItemType Directory -Path $mcpSrc -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $mcpSrc 'servers.json') -Value '{"mcp_servers":{"demo":{"url":"http://localhost:40404/mcp"}}}' -Encoding utf8
+Set-Content -LiteralPath (Join-Path $mcpSrc 'extra.yaml') -Value "mcp_servers:`n  other:`n    command: node" -Encoding utf8
+Set-Content -LiteralPath (Join-Path $mcpSrc 'notes.md') -Value 'ignored' -Encoding utf8
+
+$n = Install-RsMcpConfig -SourcePath $mcpSrc -WorkspaceDir $wsDir
+Assert-Equal -Name 'copies both MCP definition files' -Expected 2 -Actual $n
+Assert-True  -Name 'json definition registered' -Condition (Test-Path -LiteralPath (Join-Path $wsDir 'mcp\servers.json'))
+Assert-True  -Name 'yaml definition registered' -Condition (Test-Path -LiteralPath (Join-Path $wsDir 'mcp\extra.yaml'))
+Assert-True  -Name 'unrelated files ignored'    -Condition (-not (Test-Path -LiteralPath (Join-Path $wsDir 'mcp\notes.md')))
+
+$single = Install-RsMcpConfig -SourcePath (Join-Path $mcpSrc 'servers.json') -WorkspaceDir $wsDir
+Assert-Equal -Name 'accepts a single file path' -Expected 1 -Actual $single
+
+$mcpThrew = $false
+try { Install-RsMcpConfig -SourcePath (Join-Path $tmpRoot 'no-such-mcp') -WorkspaceDir $wsDir | Out-Null }
+catch { $mcpThrew = $true }
+Assert-True -Name 'rejects a missing MCP path' -Condition $mcpThrew
+
+$emptyMcp = Join-Path $tmpRoot 'mcp-empty'
+New-Item -ItemType Directory -Path $emptyMcp -Force | Out-Null
+$emptyThrew = $false
+try { Install-RsMcpConfig -SourcePath $emptyMcp -WorkspaceDir $wsDir | Out-Null } catch { $emptyThrew = $true }
+Assert-True -Name 'rejects a directory with no definitions' -Condition $emptyThrew
+
+# ==========================================================================
+Write-Host "`n== Set-RsProviderConfig ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Contain the writes: the function targets %LOCALAPPDATA%\RedSight\settings.
+$savedLocalAppData = $env:LOCALAPPDATA
+$env:LOCALAPPDATA = Join-Path $tmpRoot 'localappdata'
+New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
+try {
+    Set-RsProviderConfig -Provider 'openai' -ApiKey 'sk-test-not-a-real-key' -Model 'gpt-5.6-terra' | Out-Null
+    $provFile = Join-Path $env:LOCALAPPDATA 'RedSight\settings\provider.json'
+    Assert-True -Name 'provider.json written where Settings reads it' -Condition (Test-Path -LiteralPath $provFile)
+
+    $prov = Get-Content -LiteralPath $provFile -Raw | ConvertFrom-Json
+    Assert-Equal -Name 'active_provider recorded' -Expected 'openai' -Actual $prov.active_provider
+    Assert-Equal -Name 'schema version matches the app' -Expected 1 -Actual $prov.version
+    Assert-Equal -Name 'model recorded for the provider' -Expected 'gpt-5.6-terra' -Actual $prov.models.openai
+    Assert-True  -Name 'defaults kept for other providers' -Condition ([bool]$prov.models.anthropic)
+    Assert-True  -Name 'custom_base_url present' -Condition ($null -ne $prov.PSObject.Properties['custom_base_url'])
+
+    # Switching provider must preserve the other providers' models.
+    Set-RsProviderConfig -Provider 'anthropic' -Model 'claude-sonnet-5' | Out-Null
+    $prov2 = Get-Content -LiteralPath $provFile -Raw | ConvertFrom-Json
+    Assert-Equal -Name 'provider switch recorded' -Expected 'anthropic' -Actual $prov2.active_provider
+    Assert-Equal -Name 'previous provider model preserved' -Expected 'gpt-5.6-terra' -Actual $prov2.models.openai
+
+    # lmstudio is local and takes no key.
+    Set-RsProviderConfig -Provider 'lmstudio' | Out-Null
+    $prov3 = Get-Content -LiteralPath $provFile -Raw | ConvertFrom-Json
+    Assert-Equal -Name 'lmstudio selectable without a key' -Expected 'lmstudio' -Actual $prov3.active_provider
+} finally {
+    if ($savedLocalAppData) { $env:LOCALAPPDATA = $savedLocalAppData } else { Remove-Item Env:\LOCALAPPDATA -ErrorAction SilentlyContinue }
+}
+
+# ==========================================================================
+Write-Host "`n== Test-RsUiLaunch ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Build a stand-in for the Command Center import chain so the probe's real code
+# path runs without a Qt install. This is the check that answers "why did the UI
+# not launch?", so its failure reporting matters as much as its success case.
+$uiPy = $null
+foreach ($n in @('python3', 'python')) {
+    $c = Get-RsCommand -Name $n
+    if ($c) { $uiPy = $c.Source; break }
+}
+if (-not $uiPy) {
+    Write-Host '  SKIP  no local Python for the UI launch probe' -ForegroundColor DarkGray
+} else {
+    $uiRoot = Join-Path $tmpRoot 'FakeUi'
+    New-Item -ItemType Directory -Path (Join-Path $uiRoot 'PySide6') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $uiRoot 'qasync') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $uiRoot 'app\ui') -Force | Out-Null
+
+    Set-Content -LiteralPath (Join-Path $uiRoot 'PySide6\__init__.py') -Value '' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $uiRoot 'PySide6\QtWidgets.py') -Encoding ascii -Value @(
+        'class QApplication:',
+        '    @staticmethod',
+        '    def instance(): return None',
+        '    def __init__(self, argv=None): pass'
+    )
+    Set-Content -LiteralPath (Join-Path $uiRoot 'qasync\__init__.py') -Value '' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $uiRoot 'app\__init__.py') -Value '' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $uiRoot 'app\ui\__init__.py') -Value '' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $uiRoot 'app\ui\qt_bootstrap.py') -Encoding ascii -Value @(
+        'def configure_qt_pre_application():',
+        '    return True'
+    )
+    Set-Content -LiteralPath (Join-Path $uiRoot 'app\ui\command_center.py') -Encoding ascii -Value @(
+        'class CommandCenterMainWindow:',
+        '    pass'
+    )
+
+    $ok = Test-RsUiLaunch -VenvPython $uiPy -ProjectRoot $uiRoot
+    Assert-True  -Name 'a healthy UI chain reports success' -Condition $ok.Ok
+    Assert-True  -Name 'success says so in plain words'     -Condition ($ok.Detail -like '*loads cleanly*')
+    Assert-Equal -Name 'no traceback on success'            -Expected '' -Actual $ok.Traceback
+
+    # The 11.1 regression in miniature: the environment resolves but a module raises.
+    Set-Content -LiteralPath (Join-Path $uiRoot 'app\ui\command_center.py') -Encoding ascii -Value @(
+        'raise ImportError("No module named ''qasync''")'
+    )
+    $bad = Test-RsUiLaunch -VenvPython $uiPy -ProjectRoot $uiRoot
+    Assert-True -Name 'a broken UI chain reports failure'   -Condition (-not $bad.Ok)
+    Assert-True -Name 'and names the stage that failed'     -Condition ($bad.Detail -like '*command_center*')
+    Assert-True -Name 'and captures the traceback'          -Condition ($bad.Traceback -like '*ImportError*')
+
+    # A missing qasync must be caught before the app is declared ready.
+    Remove-Item -LiteralPath (Join-Path $uiRoot 'qasync') -Recurse -Force
+    $noQasync = Test-RsUiLaunch -VenvPython $uiPy -ProjectRoot $uiRoot
+    Assert-True -Name 'a missing qasync fails the probe'    -Condition (-not $noQasync.Ok)
+    Assert-True -Name 'and points at qasync'                -Condition ($noQasync.Detail -like '*qasync*')
+
+    Assert-True -Name 'a missing interpreter fails cleanly' `
+                -Condition (-not (Test-RsUiLaunch -VenvPython (Join-Path $tmpRoot 'no-python.exe') -ProjectRoot $uiRoot).Ok)
+}
+
+# ==========================================================================
+Write-Host "`n== RedSight-Hardware.ps1 ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# The scanner must produce a usable, conservative profile even where none of
+# the Windows APIs it queries exist - it runs before anything is installed.
+$hwScript = Join-Path $scripts 'RedSight-Hardware.ps1'
+Assert-True -Name 'hardware scanner is present' -Condition (Test-Path -LiteralPath $hwScript)
+
+$hwOut = Join-Path $tmpRoot 'hw.json'
+$pwshExe = (Get-Process -Id $PID).Path
+$hwProc = Invoke-RsProcess -FilePath $pwshExe `
+                           -Arguments @('-NoLogo', '-NoProfile', '-File', $hwScript, '-Quiet', '-OutFile', $hwOut) `
+                           -TimeoutSeconds 180 -Quiet
+Assert-Equal -Name 'hardware scan exits 0 even when degraded' -Expected 0 -Actual $hwProc.ExitCode
+Assert-True  -Name 'hardware scan writes its profile' -Condition (Test-Path -LiteralPath $hwOut)
+
+if (Test-Path -LiteralPath $hwOut) {
+    $hwJson = Get-Content -LiteralPath $hwOut -Raw | ConvertFrom-Json
+    foreach ($key in @('os', 'cpu', 'gpu', 'virtualization', 'recommend', 'warnings')) {
+        Assert-True -Name "profile has a '$key' section" -Condition ($null -ne $hwJson.PSObject.Properties[$key])
+    }
+    Assert-True -Name 'recommends a known setup profile' `
+                -Condition ($hwJson.recommend.setupProfile -in @('cuda', 'api'))
+    Assert-True -Name 'recommends a known runtime mode' `
+                -Condition ($hwJson.recommend.runtimeMode -in @('container', 'native'))
+    Assert-True -Name 'reports a wsl2Capable verdict' `
+                -Condition ($hwJson.virtualization.PSObject.Properties['wsl2Capable'] -ne $null)
+    foreach ($gk in @('nvidiaGpuCount', 'totalVramGB', 'names', 'nvidia')) {
+        Assert-True -Name "gpu section reports '$gk'" `
+                    -Condition ($null -ne $hwJson.gpu.PSObject.Properties[$gk])
+    }
+    Assert-True -Name 'explains any WSL2 blocker' `
+                -Condition ($hwJson.virtualization.wsl2Capable -or [bool]$hwJson.virtualization.wsl2Blocker)
+}
+
+$hwIni = Join-Path $tmpRoot 'hw.ini'
+$iniProc = Invoke-RsProcess -FilePath $pwshExe `
+                            -Arguments @('-NoLogo', '-NoProfile', '-File', $hwScript, '-Quiet', '-IniFile', $hwIni) `
+                            -TimeoutSeconds 180 -Quiet
+Assert-Equal -Name 'hardware scan writes the wizard INI' -Expected 0 -Actual $iniProc.ExitCode
+if (Test-Path -LiteralPath $hwIni) {
+    $iniText = Get-Content -LiteralPath $hwIni -Raw
+    # These are exactly the keys RedSight.iss reads with GetIniString.
+    foreach ($key in @('cudaCapable', 'hasNvidiaHardware', 'nvidiaGpuCount', 'gpuNames',
+                       'maxVramGB', 'totalVramGB', 'wsl2Capable', 'wsl2Blocker',
+                       'recommendProfile', 'recommendRuntime', 'isLaptop')) {
+        Assert-True -Name "wizard INI carries '$key'" -Condition ($iniText -match "(?m)^$key=")
+    }
+    # The regression that broke a real install: Windows PowerShell 5.1 writes a
+    # BOM with -Encoding utf8, and the Windows INI API then fails to match the
+    # first section header, so every GetIniString returns its default.
+    $iniBytes = [System.IO.File]::ReadAllBytes($hwIni)
+    $hasBom = ($iniBytes.Length -ge 3 -and $iniBytes[0] -eq 0xEF -and $iniBytes[1] -eq 0xBB -and $iniBytes[2] -eq 0xBF)
+    Assert-True -Name 'wizard INI has no UTF-8 BOM' -Condition (-not $hasBom)
+    Assert-True -Name 'wizard INI starts with the section header' `
+                -Condition ($iniText.StartsWith('[hardware]'))
+    Assert-True -Name 'wizard INI carries maxComputeCap' -Condition ($iniText -match '(?m)^maxComputeCap=')
+Assert-True -Name 'wizard INI carries the scanOk sentinel' -Condition ($iniText -match '(?m)^scanOk=1')
+
+    Assert-True -Name 'INI values are single-line' `
+                -Condition (@($iniText -split "`r?`n" | Where-Object { $_ -and ($_ -notmatch '^\[') -and ($_ -notmatch '=') }).Count -eq 0)
+}
+
+# ==========================================================================
+Write-Host "`n== LM Studio endpoint normalisation ==" -ForegroundColor Cyan
+# ==========================================================================
+
+Assert-Equal -Name 'bare host:port gains a scheme and /v1' -Expected 'http://127.0.0.1:1234/v1' `
+             -Actual (ConvertTo-RsLmBaseUrl -Value '127.0.0.1:1234')
+Assert-Equal -Name 'an existing /v1 is kept once' -Expected 'http://h:1/v1' `
+             -Actual (ConvertTo-RsLmBaseUrl -Value 'http://h:1/v1')
+Assert-Equal -Name 'a /models tail is trimmed' -Expected 'http://h:1/v1' `
+             -Actual (ConvertTo-RsLmBaseUrl -Value 'http://h:1/v1/models')
+Assert-Equal -Name 'a /chat/completions tail is trimmed' -Expected 'http://h:1/v1' `
+             -Actual (ConvertTo-RsLmBaseUrl -Value 'http://h:1/v1/chat/completions')
+Assert-Equal -Name 'surrounding whitespace is ignored' -Expected 'http://h:1/v1' `
+             -Actual (ConvertTo-RsLmBaseUrl -Value '  http://h:1/  ')
+Assert-Equal -Name 'https is preserved' -Expected 'https://h/v1' `
+             -Actual (ConvertTo-RsLmBaseUrl -Value 'https://h/v1')
+Assert-Equal -Name 'an empty value stays empty' -Expected '' -Actual (ConvertTo-RsLmBaseUrl -Value '')
+Assert-Equal -Name 'the root URL drops the version segment' -Expected 'http://a:1234' `
+             -Actual (Get-RsLmStudioRootUrl -BaseUrl 'http://a:1234/v1')
+
+# ==========================================================================
+Write-Host "`n== LM Studio model selection ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# A chat request naming an embedding model is answered with nonsense or an
+# error, so those ids must never be picked as the chat model.
+Assert-Equal -Name 'an embedding model is skipped' -Expected 'qwen/qwen3-8b' `
+             -Actual (Select-RsLmStudioChatModel -Models @('text-embedding-nomic-embed-text-v1.5', 'qwen/qwen3-8b'))
+Assert-Equal -Name 'a reranker is skipped' -Expected 'llama-3-8b' `
+             -Actual (Select-RsLmStudioChatModel -Models @('bge-reranker-v2-m3', 'llama-3-8b'))
+Assert-Equal -Name 'a loaded preferred model wins' -Expected 'b' `
+             -Actual (Select-RsLmStudioChatModel -Models @('a', 'b') -Preferred 'b')
+Assert-Equal -Name 'a preferred model that is not loaded is not used' -Expected 'a' `
+             -Actual (Select-RsLmStudioChatModel -Models @('a', 'b') -Preferred 'gone')
+Assert-Equal -Name 'an empty list yields no model' -Expected '' -Actual (Select-RsLmStudioChatModel -Models @())
+
+# ==========================================================================
+Write-Host "`n== LM Studio configuration file ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$lmConfigPath = Join-Path $tmpRoot 'lmstudio.json'
+Save-RsLmStudioConfig -Config @{ base_url = 'lan-box:1234'; model = 'qwen/q3' } -Path $lmConfigPath | Out-Null
+Assert-True -Name 'the configuration file is written' -Condition (Test-Path -LiteralPath $lmConfigPath)
+
+# Python's json.load rejects a byte order mark, and a BOM in the hardware INI is
+# exactly what made the 11.3 wizard read every value as its default.
+$lmBytes = [System.IO.File]::ReadAllBytes($lmConfigPath)
+Assert-True -Name 'the configuration file has no UTF-8 BOM' `
+            -Condition (-not ($lmBytes[0] -eq 0xEF -and $lmBytes[1] -eq 0xBB -and $lmBytes[2] -eq 0xBF))
+
+$lmRead = Read-RsLmStudioConfig -Path $lmConfigPath
+Assert-Equal -Name 'the endpoint is normalised on the way in' -Expected 'http://lan-box:1234/v1' -Actual $lmRead['base_url']
+Assert-Equal -Name 'the model round-trips' -Expected 'qwen/q3' -Actual $lmRead['model']
+Assert-Equal -Name 'an unset timeout takes the default' -Expected 180 -Actual $lmRead['timeout_seconds']
+
+# Each writer must merge rather than replace: a whitelist here silently lost the
+# runtime mode and the effects budget, so the backend never learned either.
+Save-RsLmStudioConfig -Config @{ runtime_mode = 'native'; data_root = 'C:\rs\data'; ui_effects = 'off' } -Path $lmConfigPath | Out-Null
+$lmMerged = Read-RsLmStudioConfig -Path $lmConfigPath
+Assert-Equal -Name 'the runtime mode persists' -Expected 'native' -Actual $lmMerged['runtime_mode']
+Assert-Equal -Name 'the data root persists' -Expected 'C:\rs\data' -Actual $lmMerged['data_root']
+Assert-Equal -Name 'the effects budget persists' -Expected 'off' -Actual $lmMerged['ui_effects']
+Assert-Equal -Name 'writing one key preserves the endpoint' -Expected 'http://lan-box:1234/v1' -Actual $lmMerged['base_url']
+Assert-Equal -Name 'writing one key preserves the model' -Expected 'qwen/q3' -Actual $lmMerged['model']
+Save-RsLmStudioConfig -Config @{ ui_effects = 'nonsense' } -Path $lmConfigPath | Out-Null
+Assert-Equal -Name 'an unknown effects level falls back to reduced' -Expected 'reduced' `
+             -Actual (Read-RsLmStudioConfig -Path $lmConfigPath)['ui_effects']
+
+Set-Content -LiteralPath $lmConfigPath -Value '{ not json' -Encoding ascii
+$lmBroken = Read-RsLmStudioConfig -Path $lmConfigPath
+Assert-Equal -Name 'a corrupt file degrades to the local default' -Expected 'http://127.0.0.1:1234/v1' -Actual $lmBroken['base_url']
+
+$lmMissing = Read-RsLmStudioConfig -Path (Join-Path $tmpRoot 'no-such-file.json')
+Assert-Equal -Name 'a missing file degrades to the local default' -Expected 'http://127.0.0.1:1234/v1' -Actual $lmMissing['base_url']
+
+# ==========================================================================
+Write-Host "`n== LM Studio environment export ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Nothing in the application calls load_dotenv and its settings use the
+# RED_SIGHT_ prefix, so these process variables are the only way the endpoint
+# reaches the backend at all.
+Save-RsLmStudioConfig -Config @{ base_url = 'http://lan:1234/v1'; model = 'm1' } -Path $lmConfigPath | Out-Null
+$lmEnv = Get-RsLmStudioEnvironment -ConfigPath $lmConfigPath
+Assert-Equal -Name 'LM_STUDIO_BASE_URL is exported' -Expected 'http://lan:1234/v1' -Actual $lmEnv['LM_STUDIO_BASE_URL']
+Assert-Equal -Name 'the historical LM_BASE_URL is exported' -Expected 'http://lan:1234/v1' -Actual $lmEnv['LM_BASE_URL']
+Assert-Equal -Name 'LM_STUDIO_URL carries the server root' -Expected 'http://lan:1234' -Actual $lmEnv['LM_STUDIO_URL']
+Assert-Equal -Name 'the model is exported' -Expected 'm1' -Actual $lmEnv['LM_STUDIO_MODEL']
+Assert-Equal -Name 'the pydantic-native name is exported too' -Expected 'http://lan:1234/v1' `
+             -Actual $lmEnv['RED_SIGHT_LMSTUDIO__BASE_URL']
+Assert-Equal -Name 'the models URL for the redirected UI probes is exported' -Expected 'http://lan:1234/v1/models' `
+             -Actual $lmEnv['LM_STUDIO_MODELS_URL']
+
+Save-RsLmStudioConfig -Config @{ runtime_mode = 'native'; data_root = 'D:\rs\data' } -Path $lmConfigPath | Out-Null
+$lmEnvNative = Get-RsLmStudioEnvironment -ConfigPath $lmConfigPath
+Assert-Equal -Name 'native mode asks for the embedded vector store' -Expected 'true' -Actual $lmEnvNative['VECTOR_BACKEND_EMBEDDED']
+Assert-Equal -Name 'native mode stops the container hostname being used' -Expected '127.0.0.1' -Actual $lmEnvNative['VECTOR_BACKEND_HOST']
+Assert-Equal -Name 'the data root is exported with the nested delimiter' -Expected 'D:\rs\data' `
+             -Actual $lmEnvNative['RED_SIGHT_PLATFORM__DATA_ROOT']
+Save-RsLmStudioConfig -Config @{ runtime_mode = 'container' } -Path $lmConfigPath | Out-Null
+Assert-True -Name 'container mode leaves the vector backend alone' `
+            -Condition (-not (Get-RsLmStudioEnvironment -ConfigPath $lmConfigPath).Contains('VECTOR_BACKEND_EMBEDDED'))
+
+# A model of '' has to clear the variable, or the backend keeps naming a model
+# that is no longer loaded.
+$lmCleared = Read-RsLmStudioConfig -Path $lmConfigPath
+$lmCleared['model'] = ''
+Save-RsLmStudioConfig -Config $lmCleared -Path $lmConfigPath | Out-Null
+Assert-True -Name 'no model means no model variable' `
+            -Condition (-not (Get-RsLmStudioEnvironment -ConfigPath $lmConfigPath).Contains('LM_STUDIO_MODEL'))
+
+# ==========================================================================
+Write-Host "`n== Container and launcher endpoint rewriting ==" -ForegroundColor Cyan
+# ==========================================================================
+
+Assert-Equal -Name 'a loopback endpoint becomes host.docker.internal' -Expected 'http://host.docker.internal:1234/v1' `
+             -Actual (Get-RsLmStudioContainerUrl -BaseUrl 'http://127.0.0.1:1234/v1')
+Assert-Equal -Name 'a non-default port is preserved' -Expected 'http://host.docker.internal:1235/v1' `
+             -Actual (Get-RsLmStudioContainerUrl -BaseUrl 'http://localhost:1235/v1')
+Assert-Equal -Name 'a LAN endpoint is reachable as it stands' -Expected 'http://192.168.1.5:1234/v1' `
+             -Actual (Get-RsLmStudioContainerUrl -BaseUrl 'http://192.168.1.5:1234/v1')
+
+# The shipped compose files carry the author's own LAN address, so a
+# containerized install would otherwise talk to someone else's machine.
+$composeRoot = Join-Path $tmpRoot 'compose'
+New-Item -ItemType Directory -Path $composeRoot -Force | Out-Null
+@'
+services:
+  redsight:
+    environment:
+      - RED_SIGHT_MODE=local_preferred
+      - LM_STUDIO_BASE_URL=http://192.168.50.139:1234/v1
+      - LM_STUDIO_MODEL=someone/elses-model
+      - QDRANT_URL=http://qdrant:6333
+'@ | Set-Content -LiteralPath (Join-Path $composeRoot 'docker-compose.yml')
+@'
+services:
+  redsight:
+    environment:
+      LM_STUDIO_URL: "http://192.168.50.139:1234"
+      LM_STUDIO_BASE_URL: "http://192.168.50.139:1234/v1"
+'@ | Set-Content -LiteralPath (Join-Path $composeRoot 'docker-compose.override.yml')
+
+$composeChanged = Repair-RsComposeLmStudio -ProjectRoot $composeRoot -BaseUrl 'http://127.0.0.1:1234/v1' -Model 'my/model'
+Assert-Equal -Name 'both compose files are rewritten' -Expected 2 -Actual $composeChanged
+$composeMain = Get-Content -LiteralPath (Join-Path $composeRoot 'docker-compose.yml') -Raw
+Assert-True -Name 'the list form is rewritten' -Condition ($composeMain -match '- LM_STUDIO_BASE_URL=http://host\.docker\.internal:1234/v1')
+Assert-True -Name 'the model is rewritten too' -Condition ($composeMain -match '- LM_STUDIO_MODEL=my/model')
+Assert-True -Name "the author's address is gone from compose" -Condition ($composeMain -notmatch '192\.168\.50\.139')
+$composeOver = Get-Content -LiteralPath (Join-Path $composeRoot 'docker-compose.override.yml') -Raw
+Assert-True -Name 'the mapping form is rewritten' -Condition ($composeOver -match 'LM_STUDIO_BASE_URL: "http://host\.docker\.internal:1234/v1"')
+Assert-True -Name 'unrelated keys are untouched' -Condition ($composeMain -match 'RED_SIGHT_MODE=local_preferred')
+
+# The shipped launchers hard-assign the same variables, which would override
+# whatever setup recorded.
+@'
+$env:PYTHONNOUSERSITE = "1"
+$env:LM_STUDIO_URL = "http://127.0.0.1:1234"
+$env:LM_STUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
+$env:LM_BASE_URL = "http://127.0.0.1:1234/v1"
+'@ | Set-Content -LiteralPath (Join-Path $composeRoot 'START-REDSIGHT.ps1')
+$launcherChanged = Repair-RsAppLauncher -ProjectRoot $composeRoot -BaseUrl 'http://192.168.1.7:1234/v1' -Model 'my/model'
+Assert-Equal -Name 'the shipped launcher is rewritten' -Expected 1 -Actual $launcherChanged
+$launcherText = Get-Content -LiteralPath (Join-Path $composeRoot 'START-REDSIGHT.ps1') -Raw
+Assert-True -Name 'the launcher base URL follows the configuration' `
+            -Condition ($launcherText -match '\$env:LM_STUDIO_BASE_URL = "http://192\.168\.1\.7:1234/v1"')
+Assert-True -Name 'the launcher server root follows the configuration' `
+            -Condition ($launcherText -match '\$env:LM_STUDIO_URL = "http://192\.168\.1\.7:1234"')
+Assert-True -Name 'unrelated launcher lines are untouched' `
+            -Condition ($launcherText -match '\$env:PYTHONNOUSERSITE = "1"')
+$launcherParse = $null
+$null = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Resolve-Path (Join-Path $composeRoot 'START-REDSIGHT.ps1')).Path, [ref]$null, [ref]$launcherParse)
+Assert-True -Name 'the rewritten launcher still parses' -Condition (-not ($launcherParse -and $launcherParse.Count))
+
+# ==========================================================================
+Write-Host "`n== Native launcher ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$nativeRoot = Join-Path $tmpRoot 'native'
+New-Item -ItemType Directory -Path $nativeRoot -Force | Out-Null
+$nativePath = New-RsNativeLauncher -ProjectRoot $nativeRoot -WorkspaceDir $nativeRoot
+Assert-True -Name 'the native launcher is written' -Condition (Test-Path -LiteralPath $nativePath)
+$nativeErrors = $null
+$null = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Resolve-Path $nativePath).Path, [ref]$null, [ref]$nativeErrors)
+Assert-True -Name 'the native launcher parses' -Condition (-not ($nativeErrors -and $nativeErrors.Count))
+
+$nativeText = Get-Content -LiteralPath $nativePath -Raw
+# gateway_stage10 exposes an ASGI app: running the file as a script starts
+# nothing, which is what left memory showing as missing in the UI.
+Assert-True -Name 'the gateway is served by uvicorn' `
+            -Condition ($nativeText -match "uvicorn'.*\r?\n.*'redsight_actions\.gateway_stage10:app'" -or
+                        $nativeText -match "'-m', 'uvicorn',\s*\r?\n?\s*'redsight_actions\.gateway_stage10:app'")
+Assert-True -Name 'the gateway is never run as a plain script' `
+            -Condition ($nativeText -notmatch "ArgumentList @\(\`$Gateway\)")
+Assert-True -Name 'the launcher waits for the gateway to answer' `
+            -Condition ($nativeText -match '/memory/status')
+Assert-True -Name 'a gateway failure is explained in terms of the symptom' `
+            -Condition ($nativeText -match 'memory will show as missing')
+Assert-True -Name 'the LM Studio endpoint is exported into the environment' `
+            -Condition ($nativeText -match 'redsight_bootstrap' -and $nativeText -match 'LM_STUDIO_BASE_URL')
+Assert-True -Name 'the backend is started with the recorded environment' `
+            -Condition ($nativeText -match 'scripts\\start\.py' -and $nativeText -match 'app\.server:app')
+Assert-True -Name 'loopback probes bypass any system proxy' -Condition ($nativeText -match '\$req\.Proxy = \$null')
+Assert-True -Name 'Qt scale rounding is set for crisp text' `
+            -Condition ($nativeText -match 'QT_SCALE_FACTOR_ROUNDING_POLICY')
+
+# ==========================================================================
+Write-Host "`n== Launcher dispatch ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Shortcuts must go through the dispatcher: it picks the launcher that starts
+# the action/memory gateway, which the UI needs for memory and for chat.
+$dispatchRoot = Join-Path $tmpRoot 'dispatch'
+New-Item -ItemType Directory -Path (Join-Path $dispatchRoot 'scripts\windows') -Force | Out-Null
+New-Item -ItemType File -Path (Join-Path $dispatchRoot 'LAUNCH-REDSIGHT-DESKTOP.ps1') -Force | Out-Null
+New-Item -ItemType File -Path (Join-Path $dispatchRoot 'START-REDSIGHT.ps1') -Force | Out-Null
+Assert-True -Name 'without a dispatcher, the gateway launcher wins' `
+            -Condition ((Split-Path -Leaf (Get-RsLauncherPath -ProjectRoot $dispatchRoot -Mode 'container')) -eq 'START-REDSIGHT.ps1')
+New-Item -ItemType File -Path (Join-Path $dispatchRoot 'scripts\windows\Start-RedSight.ps1') -Force | Out-Null
+Assert-True -Name 'the dispatcher is preferred once present' `
+            -Condition ((Split-Path -Leaf (Get-RsLauncherPath -ProjectRoot $dispatchRoot -Mode 'container')) -eq 'Start-RedSight.ps1')
+
+$dispatcher = Join-Path $scripts 'Start-RedSight.ps1'
+Assert-True -Name 'the dispatcher script exists' -Condition (Test-Path -LiteralPath $dispatcher)
+$dispatchText = Get-Content -LiteralPath $dispatcher -Raw
+Assert-True -Name 'the dispatcher reads the recorded runtime mode' -Condition ($dispatchText -match 'REDSIGHT_RUNTIME_MODE')
+Assert-True -Name 'native mode prefers the native launcher' `
+            -Condition ($dispatchText -match "'START-REDSIGHT-NATIVE\.ps1', 'START-REDSIGHT\.ps1'")
+Assert-True -Name 'container mode prefers the gateway launcher' `
+            -Condition ($dispatchText -match "'START-REDSIGHT\.ps1', 'LAUNCH-REDSIGHT-DESKTOP\.ps1'")
+
+# ==========================================================================
+Write-Host "`n== Runtime bootstrap installation ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# The .pth is what puts the endpoint into the environment before any
+# application code runs, whichever way a RedSight process is started.
+$bootRoot = Join-Path $tmpRoot 'boot'
+$bootVenv = Join-Path $bootRoot '.venv-ui'
+$bootSite = Join-Path $bootVenv 'Lib\site-packages'
+New-Item -ItemType Directory -Path $bootSite -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $bootVenv 'Scripts') -Force | Out-Null
+$bootPython = Join-Path $bootVenv 'Scripts\python.exe'
+New-Item -ItemType File -Path $bootPython -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $bootRoot 'redsight_bootstrap.py') -Value '# runtime configuration' -Encoding ascii
+
+$bootOk = Install-RsRuntimeBootstrap -VenvPython $bootPython -ProjectRoot $bootRoot
+Assert-True -Name 'the runtime module is installed into site-packages' -Condition $bootOk
+Assert-True -Name 'the module is copied' -Condition (Test-Path -LiteralPath (Join-Path $bootSite 'redsight_bootstrap.py'))
+$pthPath = Join-Path $bootSite 'redsight_bootstrap.pth'
+Assert-True -Name 'a .pth is written' -Condition (Test-Path -LiteralPath $pthPath)
+Assert-True -Name 'the .pth imports the module at interpreter startup' `
+            -Condition ((Get-Content -LiteralPath $pthPath -Raw).Trim() -eq 'import redsight_bootstrap')
+$pthBytes = [System.IO.File]::ReadAllBytes($pthPath)
+Assert-True -Name 'the .pth has no UTF-8 BOM' `
+            -Condition (-not ($pthBytes[0] -eq 0xEF -and $pthBytes[1] -eq 0xBB -and $pthBytes[2] -eq 0xBF))
+Assert-True -Name 'a payload with no runtime module is reported, not assumed' `
+            -Condition (-not (Install-RsRuntimeBootstrap -VenvPython $bootPython -ProjectRoot (Join-Path $tmpRoot 'nothing-here')))
+
+# ==========================================================================
+Write-Host "`n== Long-running child processes report progress ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# A child's output cannot be read until its pipes close, so "docker compose
+# build" printed nothing for twenty minutes and read as a hang.
+$sleepExe = (Get-Command 'sleep' -CommandType Application -ErrorAction SilentlyContinue |
+             Select-Object -First 1)
+if (-not $sleepExe) {
+    $sleepExe = (Get-Command 'timeout' -CommandType Application -ErrorAction SilentlyContinue |
+                 Select-Object -First 1)
+}
+if ($sleepExe -and $sleepExe.Name -like 'sleep*') {
+    $hbLog = Join-Path $tmpRoot 'heartbeat.log'
+    Initialize-RsLog -Name 'heartbeat' -LogDir $tmpRoot | Out-Null
+    $hb = Invoke-RsProcess -FilePath $sleepExe.Source -Arguments @('2') `
+                           -HeartbeatSeconds 1 -TimeoutSeconds 30 -Quiet
+    Assert-Equal -Name 'a heartbeat run still returns the exit code' -Expected 0 -Actual $hb.ExitCode
+    Assert-True  -Name 'a heartbeat run does not report a timeout' -Condition (-not $hb.TimedOut)
+    $hbText = Get-Content -LiteralPath (Get-RsLogPath) -Raw
+    Assert-True -Name 'progress is written while the child runs' -Condition ($hbText -match 'still running after')
+
+    $hbTimeout = Invoke-RsProcess -FilePath $sleepExe.Source -Arguments @('30') `
+                                  -HeartbeatSeconds 1 -TimeoutSeconds 2 -Quiet
+    Assert-True  -Name 'the heartbeat path still enforces the timeout' -Condition $hbTimeout.TimedOut
+    Assert-Equal -Name 'a timeout still reports exit code -1' -Expected -1 -Actual $hbTimeout.ExitCode
+
+    $noHb = Invoke-RsProcess -FilePath $sleepExe.Source -Arguments @('1') -TimeoutSeconds 30 -Quiet
+    Assert-Equal -Name 'without a heartbeat nothing changes' -Expected 0 -Actual $noHb.ExitCode
+} else {
+    Write-Host '  SKIP  no sleep executable for the heartbeat checks' -ForegroundColor Yellow
+}
+
+# ==========================================================================
+Write-Host "`n== PyTorch wheel selection by GPU architecture ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# A cu124 wheel carries no kernels for sm_120, so on an RTX 50-series card it
+# imports, reports CUDA as available, and then fails on the first operation.
+$t120 = Get-RsTorchPlan -ComputeCapability '12.0'
+Assert-Equal -Name 'Blackwell gets the CUDA 12.8 index' -Expected 'https://download.pytorch.org/whl/cu128' -Actual $t120.Index
+Assert-Equal -Name 'Blackwell gets a version floor so a wrong build is replaced' -Expected 'torch>=2.7' -Actual $t120.Spec
+Assert-True  -Name 'the Blackwell label names the architecture' -Condition ($t120.Label -match 'sm_120')
+
+foreach ($cap in @('9.0', '8.9', '8.6', '7.5', '6.1')) {
+    Assert-Equal -Name "compute capability $cap keeps the CUDA 12.4 index" `
+                 -Expected 'https://download.pytorch.org/whl/cu124' `
+                 -Actual (Get-RsTorchPlan -ComputeCapability $cap).Index
+}
+Assert-Equal -Name 'an unknown capability keeps the long-standing default' `
+             -Expected 'https://download.pytorch.org/whl/cu124' -Actual (Get-RsTorchPlan -ComputeCapability '').Index
+Assert-Equal -Name 'unparseable text does not throw' `
+             -Expected 'https://download.pytorch.org/whl/cu124' -Actual (Get-RsTorchPlan -ComputeCapability 'n/a').Index
+
+$hwBlackwell = [pscustomobject]@{
+    gpu = [pscustomobject]@{
+        cudaCapable = $true; maxVramGB = 31.8; hasNvidiaHardware = $true; maxComputeCap = '12.0'
+    }
+}
+$planBlackwell = Get-RsDependencyPlan -SetupProfile 'cuda' -Hardware $hwBlackwell
+Assert-Equal -Name 'the plan carries the Blackwell index' `
+             -Expected 'https://download.pytorch.org/whl/cu128' -Actual $planBlackwell.TorchIndex
+Assert-Equal -Name 'the plan reports the capability it decided from' -Expected '12.0' -Actual $planBlackwell.ComputeCap
+$blackwellArgs = ($planBlackwell.PreInstalls[0].Args -join ' ')
+Assert-True -Name 'the pre-install pins the version and the index' `
+            -Condition ($blackwellArgs -eq 'torch>=2.7 --index-url https://download.pytorch.org/whl/cu128')
+Assert-Equal -Name 'the GPU ONNX runtime is still chosen' -Expected 'onnxruntime-gpu' -Actual $planBlackwell.PreInstalls[1].Args[0]
+
+$hwAda = [pscustomobject]@{
+    gpu = [pscustomobject]@{
+        cudaCapable = $true; maxVramGB = 24.0; hasNvidiaHardware = $true; maxComputeCap = '8.9'
+    }
+}
+Assert-Equal -Name 'an Ada card is unaffected' -Expected 'https://download.pytorch.org/whl/cu124' `
+             -Actual (Get-RsDependencyPlan -SetupProfile 'cuda' -Hardware $hwAda).TorchIndex
+
+# A hardware profile from an older scanner has no maxComputeCap at all.
+$hwLegacy = [pscustomobject]@{
+    gpu = [pscustomobject]@{ cudaCapable = $true; maxVramGB = 12.0; hasNvidiaHardware = $true }
+}
+$planLegacy = Get-RsDependencyPlan -SetupProfile 'cuda' -Hardware $hwLegacy
+Assert-Equal -Name 'a profile without the field still yields a plan' `
+             -Expected 'https://download.pytorch.org/whl/cu124' -Actual $planLegacy.TorchIndex
+
+$planApi = Get-RsDependencyPlan -SetupProfile 'api' -Hardware $hwBlackwell
+Assert-True -Name 'the api profile installs no CUDA wheel' `
+            -Condition (($planApi.PreInstalls[0].Args -join ' ') -match '/whl/cpu')
+Assert-Equal -Name 'the api profile records no torch index' -Expected '' -Actual $planApi.TorchIndex
+
+# ==========================================================================
+Write-Host "`n== PyTorch GPU verification ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$torchDir = Join-Path $tmpRoot 'torch-probe'
+New-Item -ItemType Directory -Path $torchDir -Force | Out-Null
+$realPython = (Get-Command 'python3' -CommandType Application -ErrorAction SilentlyContinue |
+               Select-Object -First 1)
+if (-not $realPython) {
+    $realPython = (Get-Command 'python' -CommandType Application -ErrorAction SilentlyContinue |
+                   Select-Object -First 1)
+}
+
+if ($realPython) {
+    # torch 2.6.0+cu124 on a dual RTX 5090: imports, says CUDA is available,
+    # then refuses the first allocation. This is the case that used to pass.
+    @'
+__version__ = "2.6.0+cu124"
+_ARCH = ["sm_50", "sm_70", "sm_80", "sm_86", "sm_90"]
+class _Cuda:
+    @staticmethod
+    def get_arch_list(): return list(_ARCH)
+    @staticmethod
+    def is_available(): return True
+    @staticmethod
+    def device_count(): return 2
+    @staticmethod
+    def get_device_name(i): return "NVIDIA GeForce RTX 5090"
+    @staticmethod
+    def get_device_capability(i): return (12, 0)
+cuda = _Cuda()
+def zeros(*a, **k):
+    raise RuntimeError("CUDA error: no kernel image is available for execution on the device")
+'@ | Set-Content -LiteralPath (Join-Path $torchDir 'torch.py') -Encoding ascii
+
+    $savedPyPath = $env:PYTHONPATH
+    $env:PYTHONPATH = $torchDir
+    try {
+        $mismatch = Test-RsTorchCuda -VenvPython $realPython.Source -ProjectRoot $torchDir
+    } finally {
+        if ($null -ne $savedPyPath) { $env:PYTHONPATH = $savedPyPath } else { Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue }
+    }
+    Assert-True  -Name 'the check runs and reports' -Condition $mismatch.Ok
+    Assert-True  -Name 'a wheel without kernels for the GPU is called unusable' -Condition (-not $mismatch.Usable)
+    Assert-Equal -Name 'the installed version is reported' -Expected '2.6.0+cu124' -Actual $mismatch.Version
+    Assert-True  -Name 'the architectures the wheel does carry are reported' -Condition ($mismatch.ArchList -match 'sm_90')
+    Assert-True  -Name 'each device is named with its capability' -Condition ($mismatch.Devices -match 'sm_120')
+    Assert-True  -Name 'the real error is surfaced, not swallowed' -Condition ($mismatch.Devices -match 'no kernel image')
+    Assert-True  -Name 'torch.cuda.is_available() alone is not treated as success' `
+                 -Condition (-not $mismatch.Usable)
+
+    # The matching build: same GPUs, kernels present.
+    @'
+__version__ = "2.7.1+cu128"
+_ARCH = ["sm_80", "sm_90", "sm_100", "sm_120"]
+class _T:
+    def sum(self): return self
+    def item(self): return 0.0
+class _Cuda:
+    @staticmethod
+    def get_arch_list(): return list(_ARCH)
+    @staticmethod
+    def is_available(): return True
+    @staticmethod
+    def device_count(): return 2
+    @staticmethod
+    def get_device_name(i): return "NVIDIA GeForce RTX 5090"
+    @staticmethod
+    def get_device_capability(i): return (12, 0)
+cuda = _Cuda()
+def zeros(*a, **k): return _T()
+'@ | Set-Content -LiteralPath (Join-Path $torchDir 'torch.py') -Encoding ascii
+
+    $env:PYTHONPATH = $torchDir
+    try {
+        $matched = Test-RsTorchCuda -VenvPython $realPython.Source -ProjectRoot $torchDir
+    } finally {
+        if ($null -ne $savedPyPath) { $env:PYTHONPATH = $savedPyPath } else { Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue }
+    }
+    Assert-True -Name 'the matching build is called usable' -Condition $matched.Usable
+    Assert-True -Name 'every device is reported working' -Condition ($matched.Devices -notmatch 'FAILS')
+    Assert-True -Name 'the detail names the GPU count' -Condition ($matched.Detail -match '2 GPU')
+
+    # No CUDA device at all is the normal state on the API profile.
+    @'
+__version__ = "2.7.1+cpu"
+class _Cuda:
+    @staticmethod
+    def get_arch_list(): return []
+    @staticmethod
+    def is_available(): return False
+    @staticmethod
+    def device_count(): return 0
+cuda = _Cuda()
+'@ | Set-Content -LiteralPath (Join-Path $torchDir 'torch.py') -Encoding ascii
+
+    $env:PYTHONPATH = $torchDir
+    try {
+        $cpuOnly = Test-RsTorchCuda -VenvPython $realPython.Source -ProjectRoot $torchDir
+    } finally {
+        if ($null -ne $savedPyPath) { $env:PYTHONPATH = $savedPyPath } else { Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue }
+    }
+    Assert-True -Name 'a CPU build is reported without alarm' -Condition ($cpuOnly.Ok -and -not $cpuOnly.Usable)
+    Assert-True -Name 'a CPU build says so plainly' -Condition ($cpuOnly.Detail -match 'no CUDA device')
+} else {
+    Write-Host '  SKIP  no python interpreter available for the torch checks' -ForegroundColor Yellow
+}
+
+$noTorch = Test-RsTorchCuda -VenvPython (Join-Path $tmpRoot 'no-such-python.exe') -ProjectRoot $tmpRoot
+Assert-True -Name 'a missing interpreter is reported, not thrown' -Condition (-not $noTorch.Ok)
+
+# ==========================================================================
+Write-Host "`n== Install-path rewriting ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# The rewriter used to match "any drive path ending in \RedSight". The working
+# directory defaults to <UserProfile>\RedSight, so it rewrote the user's own
+# workspace to the install root - which is what left an installation pointing
+# half at one tree and half at another.
+$rwRoot = Join-Path $tmpRoot 'rewrite'
+New-Item -ItemType Directory -Path $rwRoot -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $rwRoot 'redsight-payload.json') `
+            -Value '{ "version": "1", "sourceRoot": "C:\\Users\\builder\\RedSight" }' -Encoding ascii
+
+Assert-Equal -Name 'the recorded build root is read back' -Expected 'C:\Users\builder\RedSight' `
+             -Actual (Get-RsPayloadSourceRoot -ProjectRoot $rwRoot)
+Assert-Equal -Name 'a payload with no manifest reports no build root' -Expected '' `
+             -Actual (Get-RsPayloadSourceRoot -ProjectRoot $tmpRoot)
+
+@'
+ROOT = r"C:\Users\builder\RedSight"
+LOGS = r"C:/Users/builder/RedSight/logs"
+UNRELATED = r"C:\Users\builder\Documents"
+OTHER_APP = r"D:\Tools\RedSight"
+'@ | Set-Content -LiteralPath (Join-Path $rwRoot 'launcher.py') -Encoding ascii
+
+@'
+REDSIGHT_WORKSPACE=C:\Users\walim\RedSight
+REDSIGHT_WORKING_DIR=C:\Users\walim\RedSight\workspace
+REDSIGHT_OUTPUT_DIR=C:\Users\walim\RedSight\outputs
+REDSIGHT_MCP_DIR=C:\Users\walim\RedSight\mcp
+RED_SIGHT_DATA_ROOT=C:\Users\walim\RedSight\data
+STALE_REFERENCE=C:\Users\builder\RedSight\thing
+'@ | Set-Content -LiteralPath (Join-Path $rwRoot 'settings.env') -Encoding ascii
+
+Set-Content -LiteralPath (Join-Path $rwRoot 'escaped.json') `
+            -Value '{ "root": "C:\\Users\\builder\\RedSight", "keep": "C:\\Users\\builder\\Music" }' -Encoding ascii
+
+$rw = Repair-RsHardcodedPaths -ProjectRoot $rwRoot
+Assert-True -Name 'the rewrite reports the root it used' -Condition ($rw.SourceRoot -eq 'C:\Users\builder\RedSight')
+
+$launcherText = Get-Content -LiteralPath (Join-Path $rwRoot 'launcher.py') -Raw
+Assert-True -Name 'the plain form is rewritten' -Condition ($launcherText -match [regex]::Escape("r`"$rwRoot`""))
+Assert-True -Name 'the forward-slash form is rewritten' `
+            -Condition ($launcherText -match [regex]::Escape(($rwRoot -replace '\\', '/')))
+Assert-True -Name 'an unrelated path under the same profile is left alone' `
+            -Condition ($launcherText -match 'builder\\Documents')
+Assert-True -Name "another application's RedSight folder is left alone" `
+            -Condition ($launcherText -match 'D:\\Tools\\RedSight')
+
+$escapedText = Get-Content -LiteralPath (Join-Path $rwRoot 'escaped.json') -Raw
+Assert-True -Name 'the JSON-escaped form is rewritten' -Condition ($escapedText -notmatch 'builder\\\\RedSight')
+Assert-True -Name 'an unrelated escaped path is left alone' -Condition ($escapedText -match 'builder\\\\Music')
+
+$envText = Get-Content -LiteralPath (Join-Path $rwRoot 'settings.env') -Raw
+foreach ($key in @('REDSIGHT_WORKSPACE', 'REDSIGHT_WORKING_DIR', 'REDSIGHT_OUTPUT_DIR',
+                   'REDSIGHT_MCP_DIR', 'RED_SIGHT_DATA_ROOT')) {
+    Assert-True -Name "$key keeps the directory the user chose" `
+                -Condition ($envText -match ("(?m)^" + $key + "=C:\\Users\\walim\\RedSight"))
+}
+Assert-True -Name 'an unprotected key in the same file is still rewritten' `
+            -Condition ($envText -match '(?m)^STALE_REFERENCE=' -and $envText -notmatch 'STALE_REFERENCE=C:')
+
+$manifestText = Get-Content -LiteralPath (Join-Path $rwRoot 'redsight-payload.json') -Raw
+Assert-True -Name 'the manifest is never rewritten' -Condition ($manifestText -match 'builder\\\\RedSight')
+
+# Re-running must be a no-op: a rewrite that keeps finding work is the symptom
+# the health check reports as "a file still points at another installation".
+$again = Repair-RsHardcodedPaths -ProjectRoot $rwRoot -WhatIf
+Assert-Equal -Name 'a second pass finds nothing left to do' -Expected 0 -Actual $again.Rewritten
+
+# A payload built from the directory it is installed into needs no rewrite.
+$selfRoot = Join-Path $tmpRoot 'self'
+New-Item -ItemType Directory -Path $selfRoot -Force | Out-Null
+$selfJson = '{ "sourceRoot": "' + ($selfRoot -replace '\\', '\\\\') + '" }'
+Set-Content -LiteralPath (Join-Path $selfRoot 'redsight-payload.json') -Value $selfJson -Encoding ascii
+Assert-Equal -Name 'a payload built in place rewrites nothing' -Expected 0 `
+             -Actual (Repair-RsHardcodedPaths -ProjectRoot $selfRoot).Rewritten
+
+# A literal install path in one of our own scripts made the health check report
+# a stale reference on every fresh install. The invariant that prevents it: a
+# setup script either contains no such literal, or is excluded from the rewrite
+# by name. Every one of them must satisfy one of the two.
+$scriptNames = @('RedSight-Common.ps1', 'RedSight-Hardware.ps1', 'RedSight-LmStudio.ps1',
+                 'RedSight-Provision.ps1', 'RedSight-Preflight.ps1', 'Bootstrap-RedSight.ps1',
+                 'Verify-RedSightSetup.ps1', 'Start-RedSight.ps1', 'Repair-RedSight.ps1',
+                 'Uninstall-RedSightDocker.ps1')
+$preflightText = Get-Content -LiteralPath (Join-Path $scripts 'RedSight-Preflight.ps1') -Raw
+$unguarded = New-Object System.Collections.Generic.List[string]
+foreach ($name in $scriptNames) {
+    $path = Join-Path $scripts $name
+    if (-not (Test-Path -LiteralPath $path)) { continue }
+    $excludedByName = $preflightText -match ("'" + [regex]::Escape($name) + "'")
+    if ($excludedByName) { continue }
+    $text = Get-Content -LiteralPath $path -Raw
+    if ($text -match '[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*?RedSight[\\"'']') { $unguarded.Add($name) }
+}
+Assert-True -Name 'every setup script is either excluded from the rewrite or free of install-path literals' `
+            -Condition ($unguarded.Count -eq 0)
+foreach ($name in $scriptNames) {
+    if (-not (Test-Path -LiteralPath (Join-Path $scripts $name))) { continue }
+    Assert-True -Name "$name is excluded from the path rewrite" `
+                -Condition ($preflightText -match ("'" + [regex]::Escape($name) + "'"))
+}
+
+# ==========================================================================
+Write-Host "`n== Working directory placement ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# The default is <UserProfile>\RedSight, which is also where a hand-installed
+# RedSight usually lives; putting a workspace inside one mixes the two trees.
+$wsBase = Join-Path $tmpRoot 'wsbase'
+$wsInstall = Join-Path $wsBase 'install'
+New-Item -ItemType Directory -Path $wsInstall -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $wsInstall 'docker-compose.yml') -Value 'services: {}' -Encoding ascii
+
+Assert-True  -Name 'an installation tree is recognised' -Condition (Test-RsIsAppTree -Path $wsInstall)
+Assert-True  -Name 'an ordinary folder is not' -Condition (-not (Test-RsIsAppTree -Path $wsBase))
+Assert-True  -Name 'a missing folder is not' -Condition (-not (Test-RsIsAppTree -Path (Join-Path $wsBase 'nope')))
+
+$savedProfile = $env:USERPROFILE
+$env:USERPROFILE = $wsBase
+try {
+    $collide = Join-Path $wsBase 'RedSight'
+    New-Item -ItemType Directory -Path $collide -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $collide 'launch_redsight_command_center.py') -Value '' -Encoding ascii
+
+    $chosen = Initialize-RsWorkspace -ProjectRoot $wsInstall
+    Assert-True -Name 'a default that holds an installation is declined' `
+                -Condition ((Split-Path -Leaf $chosen) -ne 'RedSight')
+    Assert-True -Name 'the fallback is a separate folder' -Condition ((Split-Path -Leaf $chosen) -eq 'RedSight-Data')
+    Assert-True -Name "the existing installation's files are untouched" `
+                -Condition (Test-Path -LiteralPath (Join-Path $collide 'launch_redsight_command_center.py'))
+    Assert-True -Name 'no workspace subdirectory lands in the installation' `
+                -Condition (-not (Test-Path -LiteralPath (Join-Path $collide 'outputs')))
+
+    $insideInstall = Initialize-RsWorkspace -ProjectRoot $wsInstall -WorkspaceDir $wsInstall
+    Assert-True -Name 'the installation directory itself is declined' `
+                -Condition ($insideInstall.TrimEnd('\') -ne $wsInstall.TrimEnd('\'))
+
+    $nested = Join-Path $wsInstall 'data-here'
+    $nestedChosen = Initialize-RsWorkspace -ProjectRoot $wsInstall -WorkspaceDir $nested
+    Assert-True -Name 'a folder inside the installation is declined' `
+                -Condition ($nestedChosen.TrimEnd('\') -ne $nested.TrimEnd('\'))
+
+    $clean = Join-Path $tmpRoot 'clean-workspace'
+    Assert-Equal -Name 'a clean directory is honoured' -Expected $clean `
+                 -Actual (Initialize-RsWorkspace -ProjectRoot $wsInstall -WorkspaceDir $clean)
+    Assert-True -Name 'the workspace subdirectories are created' `
+                -Condition (Test-Path -LiteralPath (Join-Path $clean 'outputs'))
+} finally {
+    if ($null -ne $savedProfile) { $env:USERPROFILE = $savedProfile }
+}
+
+# ==========================================================================
+Write-Host "`n== -ProjectRoot survives dot-sourcing ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# A dot-sourced script's param() block runs in the caller's scope, so
+# RedSight-Preflight.ps1's own [string]$ProjectRoot silently reset the value
+# every one of these scripts had bound - and they then inspected, and repaired,
+# the wrong directory.
+$dotTarget = Join-Path $tmpRoot 'dot-target'
+New-Item -ItemType Directory -Path $dotTarget -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $dotTarget 'docker-compose.yml') -Value 'services: {}' -Encoding ascii
+
+foreach ($name in @('Repair-RedSight.ps1', 'Verify-RedSightSetup.ps1', 'Bootstrap-RedSight.ps1')) {
+    $path = Join-Path $scripts $name
+    if (-not (Test-Path -LiteralPath $path)) { continue }
+    $text = Get-Content -LiteralPath $path -Raw
+    # Single-quoted: these regexes contain PowerShell variable names that must
+    # not be interpolated.
+    $captureRx = '(?s)\$requestedRoot\s*=.*?ContainsKey\(''ProjectRoot''\).*?\.\s*\(Join-Path\s+\$scriptDir\s+''RedSight-Preflight\.ps1''\)'
+    $restoreRx = '(?s)RedSight-Preflight\.ps1''\).*?\$ProjectRoot\s*=\s*\$requestedRoot'
+    Assert-True -Name "$name captures -ProjectRoot before dot-sourcing" -Condition ($text -match $captureRx)
+    Assert-True -Name "$name restores it afterwards" -Condition ($text -match $restoreRx)
+}
+
+# ==========================================================================
+Write-Host "`n== A source checkout is not an installation ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Running the repair against a git clone rewrote 88 files inside it and
+# repointed the Desktop shortcut into a tree that was never installed.
+$repairScript = Join-Path $scripts 'Repair-RedSight.ps1'
+if (Test-Path -LiteralPath $repairScript) {
+    $checkout = Join-Path $tmpRoot 'checkout'
+    New-Item -ItemType Directory -Path (Join-Path $checkout 'installer\build') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $checkout 'docker-compose.yml') -Value 'services: {}' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $checkout 'installer\build\Build-Installer.ps1') -Value '# build' -Encoding ascii
+
+    $pwsh = (Get-Process -Id $PID).Path
+    $refusal = & $pwsh -NoLogo -NoProfile -File $repairScript -ProjectRoot $checkout 2>&1 | Out-String
+    Assert-True -Name 'a checkout is refused' -Condition ($refusal -match 'source checkout, not an installation')
+    Assert-True -Name 'the refusal says nothing was changed' -Condition ($refusal -match 'nothing was changed')
+    Assert-True -Name 'the refusal is readable, not a PowerShell error dump' `
+                -Condition ($refusal -notmatch 'ParserError|Exception|at line:')
+    Assert-True -Name 'the checkout is left untouched' `
+                -Condition (-not (Test-Path -LiteralPath (Join-Path $checkout '.env')))
+
+    # An installed payload carries the manifest, so it is accepted even if the
+    # app source happened to include the installer directory.
+    $installed = Join-Path $tmpRoot 'installed-with-installer-dir'
+    New-Item -ItemType Directory -Path (Join-Path $installed 'installer\build') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $installed 'docker-compose.yml') -Value 'services: {}' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $installed 'installer\build\Build-Installer.ps1') -Value '# build' -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $installed 'redsight-payload.json') -Value '{"sourceRoot":"C:\\x"}' -Encoding ascii
+    $accepted = & $pwsh -NoLogo -NoProfile -File $repairScript -ProjectRoot $installed 2>&1 | Out-String
+    Assert-True -Name 'an installed payload is accepted' -Condition ($accepted -notmatch 'source checkout')
+    Assert-True -Name 'and it reports against the directory it was given' `
+                -Condition ($accepted -match [regex]::Escape($installed))
+
+    $missing = & $pwsh -NoLogo -NoProfile -File $repairScript -ProjectRoot (Join-Path $tmpRoot 'nope') 2>&1 | Out-String
+    Assert-True -Name 'a missing directory is refused readably' -Condition ($missing -match 'does not exist')
+}
+
+# ==========================================================================
+Write-Host "`n== The repair tool trusts the registry over its argument ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# Pointed at the wrong tree, the tool once advised keeping that tree and
+# retiring the real installation, and repointed a correct shortcut at it. The
+# recorded installation has to win every piece of advice.
+$repairText = ''
+$repairPath = Join-Path $scripts 'Repair-RedSight.ps1'
+if (Test-Path -LiteralPath $repairPath) { $repairText = Get-Content -LiteralPath $repairPath -Raw }
+
+if ($repairText) {
+    Assert-True -Name 'the recorded installation is captured from the registry' `
+                -Condition ($repairText -match '\$recordedInstall\s*=')
+    Assert-True -Name 'a mismatch between argument and registry is reported as a problem' `
+                -Condition ($repairText -match "Add-Finding -Area 'target' -Status 'problem'")
+    Assert-True -Name 'the mismatch is shouted, not buried in a list' `
+                -Condition ($repairText -match "\('!' \* 72\)")
+    Assert-True -Name 'the keep-this-one advice prefers the recorded installation' `
+                -Condition ($repairText -match '\$keep\s*=\s*if\s*\(\$recordedInstall\)\s*\{\s*\$recordedInstall\s*\}')
+    Assert-True -Name 'a shortcut targeting the recorded installation is not called wrong' `
+                -Condition ($repairText -match '\$pointsAtRecorded')
+    Assert-True -Name 'and such a shortcut is not offered for repointing' `
+                -Condition ($repairText -match "(?s)\`$pointsAtRecorded\s*\)\s*\{.*?Status 'info'")
+}
+
+# ==========================================================================
+Write-Host "`n== A container port proxy is not a foreign service ==" -ForegroundColor Cyan
+# ==========================================================================
+
+# In container mode the backend runs inside the container and Docker publishes
+# the port through wslrelay.exe, so the host listener is never a RedSight
+# process. Calling that a foreign holder told the user to kill Docker's proxy.
+if ($repairText) {
+    Assert-True -Name 'the Docker/WSL port proxies are recognised' `
+                -Condition ($repairText -match "wslrelay\.exe" -and $repairText -match 'com\.docker\.backend\.exe')
+    Assert-True -Name 'vpnkit and dockerd are recognised too' `
+                -Condition ($repairText -match 'vpnkit\.exe' -and $repairText -match 'dockerd\.exe')
+    Assert-True -Name 'a proxy-published port is reported as healthy, not as a fault' `
+                -Condition ($repairText -match "(?s)\`$proxyNames -contains.*?Status 'ok'")
+    Assert-True -Name 'the proxy case is checked before the foreign-holder case' `
+                -Condition ($repairText -match "(?s)\`$proxyNames -contains.*?continue.*?Status 'problem'")
+    Assert-True -Name 'GPU acceleration is reported by the repair tool as well' `
+                -Condition ($repairText -match 'Test-RsTorchCuda')
+    Assert-True -Name 'an unusable GPU build says a reinstall is needed, not a local repair' `
+                -Condition ($repairText -match '11\.5\.1 or later')
+}
+
+# ==========================================================================
+Write-Host "`n== Logging and summary ==" -ForegroundColor Cyan
+# ==========================================================================
+
+$logDir = Join-Path $tmpRoot 'logs'
+$log = Initialize-RsLog -Name 'unittest' -LogDir $logDir
+Assert-True -Name 'log file is created' -Condition (Test-Path -LiteralPath $log)
+Write-RsLog 'a test log line' -Level OK
+Assert-True -Name 'log line is persisted' `
+            -Condition ((Get-Content -LiteralPath $log -Raw) -like '*a test log line*')
+
+Set-RsSummary -Key 'answer' -Value 42
+$summaryPath = Join-Path $tmpRoot 'summary.json'
+Save-RsSummary -Path $summaryPath
+Assert-True -Name 'summary json is written' -Condition (Test-Path -LiteralPath $summaryPath)
+$parsed = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+Assert-Equal -Name 'summary round-trips values' -Expected 42 -Actual $parsed.answer
+
+} finally {
+    Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ==========================================================================
+Write-Host ("`n" + ('=' * 60)) -ForegroundColor Cyan
+Write-Host ("  {0} passed, {1} failed" -f $script:Pass, $script:Fail) -ForegroundColor $(if ($script:Fail) { 'Red' } else { 'Green' })
+Write-Host ('=' * 60) -ForegroundColor Cyan
+if ($script:Fail) {
+    Write-Host "`nFailures:" -ForegroundColor Red
+    foreach ($f in $script:Failures) { Write-Host "  - $f" -ForegroundColor Red }
+    exit 1
+}
+exit 0

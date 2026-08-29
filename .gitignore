@@ -97,6 +97,8 @@ yarn-error.log*
 # Build output
 # ------------------------------------------------------------
 build/
+# ...but the installer build tooling is source, not build output.
+!installer/build/
 dist/
 *.egg-info/
 
