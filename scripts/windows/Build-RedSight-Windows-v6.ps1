@@ -9,9 +9,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
 function Fail([string]$m) { throw $m }
+
 if (-not (Test-Path (Join-Path $SourceRoot 'pyproject.toml'))) { Fail "SourceRoot does not look like RedSight: $SourceRoot" }
 if (-not [Environment]::Is64BitOperatingSystem) { Fail 'Build host must be 64-bit Windows.' }
+
 function Find-InnoCompiler {
   $pf86 = ${env:ProgramFiles(x86)}
   $candidates = @(
@@ -28,6 +31,39 @@ function Find-InnoCompiler {
   foreach ($root in $roots) { $found = Get-ChildItem -LiteralPath $root -Filter ISCC.exe -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if ($found) { return $found.FullName } }
   return $null
 }
+
+function Download-FileReliable([string]$Uri,[string]$OutFile,[int]$Retries=4) {
+  $parent = Split-Path -Parent $OutFile
+  if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+  $tmp = "$OutFile.part"
+  Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+  # Windows PowerShell 5.1 uses .NET Framework TLS defaults; force TLS 1.2 before HTTPS downloads.
+  try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+  for ($i=1; $i -le $Retries; $i++) {
+    try {
+      Write-Host "Downloading $Uri (attempt $i/$Retries)..."
+      $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+      if ($curl) {
+        & $curl.Source '-fL' '--retry' '3' '--retry-delay' '2' '--connect-timeout' '20' '--max-time' '900' '-o' $tmp $Uri | Out-Host
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $tmp) -and (Get-Item $tmp).Length -gt 0) {
+          Move-Item -Force $tmp $OutFile
+          return
+        }
+      } else {
+        Invoke-WebRequest -Uri $Uri -OutFile $tmp -UseBasicParsing -TimeoutSec 900
+        if ((Test-Path $tmp) -and (Get-Item $tmp).Length -gt 0) {
+          Move-Item -Force $tmp $OutFile
+          return
+        }
+      }
+    } catch {
+      if ($i -eq $Retries) { throw "Download failed after $Retries attempts: $Uri :: $($_.Exception.Message)" }
+      Start-Sleep -Seconds ([int](2 * $i))
+    }
+  }
+  throw "Download failed: $Uri"
+}
+
 $inno = Find-InnoCompiler
 if (-not $inno) {
   $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
@@ -38,6 +74,7 @@ if (-not $inno) {
 }
 if (-not $inno) { Fail 'Inno Setup installation completed but ISCC.exe could not be located.' }
 Write-Host "Using Inno Setup compiler: $inno"
+
 Remove-Item $OutputRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 $buildId = [guid]::NewGuid().ToString('N')
@@ -51,48 +88,61 @@ try {
   $excludeFiles = @('*.pyc','*.pyo','*.log','*.sqlite','*.db')
   $robocopyArgs = @($SourceRoot,$stage,'/E','/R:2','/W:1','/NFL','/NDL','/NJH','/NJS','/NP')
   foreach ($d in $excludeDirs) { $robocopyArgs += '/XD'; $robocopyArgs += (Join-Path $SourceRoot $d) }
-  # /XF consumes file-name patterns. Do not append source-qualified paths or robocopy treats them as stray parameters.
-  $robocopyArgs += '/XF'
-  $robocopyArgs += $excludeFiles
+  $robocopyArgs += '/XF'; $robocopyArgs += $excludeFiles
   & robocopy.exe @robocopyArgs | Out-Host
   $rc = $LASTEXITCODE
   if ($rc -gt 7) { Fail "robocopy failed with exit code $rc. Source=$SourceRoot Stage=$stage" }
+
   $required = @('pyproject.toml','app\server.py','ui\command_center.py','redsight_actions\gateway.py','scripts\windows\RedSight-Setup-Resume.ps1','scripts\windows\RedSight-PostInstall-Health.ps1','scripts\windows\Start-RedSight.ps1','assets\redsight.ico')
   foreach ($r in $required) { if (-not (Test-Path (Join-Path $stage $r))) { Fail "Required runtime file missing: $r" } }
+
   $tools = Join-Path $stage 'tools'; $site = Join-Path $tools 'Lib\site-packages'
   New-Item -ItemType Directory -Force -Path $tools, $site | Out-Null
-  $pyPkg = Join-Path $env:TEMP 'redsight-python-3.12.10.nupkg'; $pyExtract = Join-Path $env:TEMP "redsight-python-extract-$buildId"
+  $pyPkg = Join-Path $env:TEMP 'redsight-python-3.12.10.nupkg'
+  $pyExtract = Join-Path $env:TEMP "redsight-python-extract-$buildId"
+  Download-FileReliable 'https://api.nuget.org/v3-flatcontainer/python/3.12.10/python.3.12.10.nupkg' $pyPkg
   Remove-Item $pyExtract -Recurse -Force -ErrorAction SilentlyContinue
-  Invoke-WebRequest 'https://api.nuget.org/v3-flatcontainer/python/3.12.10/python.3.12.10.nupkg' -OutFile $pyPkg -UseBasicParsing
   Expand-Archive -LiteralPath $pyPkg -DestinationPath $pyExtract -Force
   Copy-Item (Join-Path $pyExtract 'tools\*') $tools -Recurse -Force
   Remove-Item $pyPkg, $pyExtract -Recurse -Force -ErrorAction SilentlyContinue
+
   $pyExe = Join-Path $tools 'python.exe'; if (-not (Test-Path $pyExe)) { Fail 'Bundled Python runtime was not produced.' }
   $pv = & $pyExe --version 2>&1 | Out-String; if ($pv -notmatch 'Python 3\.12') { Fail "Unexpected bundled Python version: $pv" }
+  Write-Host "Bundled runtime: $pv"
+
   $buildPython = Get-Command py.exe -ErrorAction SilentlyContinue
   if ($buildPython) { $pyHost = (& py.exe -3.12 --version 2>&1 | Out-String).Trim(); if ($pyHost -notmatch '^Python 3\.12') { $buildPython = $null } }
   if ($buildPython) { $hostPython = 'py.exe'; $hostPythonArgs = @('-3.12') } else {
     $pythonCmd = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($pythonCmd) { $pyHost = (& $pythonCmd.Source --version 2>&1 | Out-String).Trim(); if ($pyHost -notmatch '^Python 3\.12') { $pythonCmd = $null } }
-    if (-not $pythonCmd) { $winget = Get-Command winget.exe -ErrorAction SilentlyContinue; if (-not $winget) { Fail 'Python 3.12 is required on the build host to populate bundled dependencies.' }; & winget install --id Python.Python.3.12 -e --silent --accept-source-agreements --accept-package-agreements | Out-Host; $pythonCmd = Get-Command python.exe -ErrorAction SilentlyContinue }
+    if (-not $pythonCmd) {
+      $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+      if (-not $winget) { Fail 'Python 3.12 is required on the build host to populate bundled dependencies.' }
+      & winget install --id Python.Python.3.12 -e --silent --accept-source-agreements --accept-package-agreements | Out-Host
+      $pythonCmd = Get-Command python.exe -ErrorAction SilentlyContinue
+    }
     if (-not $pythonCmd) { Fail 'Python 3.12 installation completed but python.exe is not available in this PowerShell session. Restart PowerShell and rerun the build.' }
     $hostPython = $pythonCmd.Source; $hostPythonArgs = @()
   }
+
   Write-Host 'Installing RedSight runtime dependencies into the bundled Python payload...'
   & $hostPython @hostPythonArgs -m pip install --upgrade pip --disable-pip-version-check | Out-Host
   if ($LASTEXITCODE -ne 0) { Fail "pip upgrade failed with exit code $LASTEXITCODE" }
   & $hostPython @hostPythonArgs -m pip install --disable-pip-version-check --no-user --upgrade --target $site $stage | Out-Host
   if ($LASTEXITCODE -ne 0) { Fail "Python dependency installation failed with exit code $LASTEXITCODE" }
+
   $env:PLAYWRIGHT_BROWSERS_PATH = '0'
   try { & $hostPython @hostPythonArgs -m playwright install chromium | Out-Host; if ($LASTEXITCODE -ne 0) { Fail "Playwright Chromium installation failed with exit code $LASTEXITCODE" } } finally { Remove-Item Env:PLAYWRIGHT_BROWSERS_PATH -ErrorAction SilentlyContinue }
+
   if ($BundleOfflineDependencies) {
     New-Item -ItemType Directory -Force -Path $offline | Out-Null
     $rel = Invoke-RestMethod 'https://api.github.com/repos/microsoft/WSL/releases/latest' -Headers @{Accept='application/vnd.github+json';'User-Agent'='RedSight-Build'}
     $a = $rel.assets | Where-Object { $_.name -match '\.x64\.msi$' } | Sort-Object name -Descending | Select-Object -First 1
     if (-not $a) { Fail 'Could not locate latest Microsoft WSL x64 MSI.' }
-    Invoke-WebRequest $a.browser_download_url -OutFile (Join-Path $offline 'wsl-latest-x64.msi') -UseBasicParsing
-    if (-not $SkipDockerPayload) { Invoke-WebRequest 'https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe' -OutFile (Join-Path $offline 'Docker-Desktop-Installer-x64.exe') -UseBasicParsing }
+    Download-FileReliable $a.browser_download_url (Join-Path $offline 'wsl-latest-x64.msi')
+    if (-not $SkipDockerPayload) { Download-FileReliable 'https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe' (Join-Path $offline 'Docker-Desktop-Installer-x64.exe') }
   }
+
   $iss = Join-Path $setupDir 'RedSight-v6.iss'
   $issText = @"
 #define AppName "RedSight"
@@ -143,6 +193,7 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
   & $inno /Qp /O+ $iss | Out-Host
   $isccExit = $LASTEXITCODE
   if ($isccExit -ne 0) { Fail "Inno Setup compilation failed with exit code $isccExit. Script: $iss" }
+
   $exe = Join-Path $artifacts 'RedSight-Setup-v6.exe'; if (-not (Test-Path $exe)) { Fail 'Installer EXE was not produced.' }
   $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant(); $size = (Get-Item $exe).Length
   if ($size -lt 100KB) { Fail "Installer EXE is unexpectedly small: $size bytes" }
