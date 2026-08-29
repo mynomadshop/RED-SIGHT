@@ -1,0 +1,68 @@
+name: RedSight Windows v6 Build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/windows/**'
+      - 'pyproject.toml'
+      - 'app/**'
+      - 'ui/**'
+      - 'redsight_actions/**'
+      - 'assets/**'
+      - '.github/workflows/windows-v6-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-2025
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Inno Setup 7
+        shell: pwsh
+        run: |
+          winget install --id JRSoftware.InnoSetup.7 -e -s winget --silent --accept-source-agreements --accept-package-agreements
+
+      - name: Verify build prerequisites
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = Get-ChildItem "$env:ProgramFiles","${env:ProgramFiles(x86)}" -Filter ISCC.exe -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) { throw 'ISCC.exe not found after Inno Setup installation.' }
+          & $iscc.FullName /?
+          py -3.12 --version
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\scripts\windows\Build-RedSight-Windows-v6.ps1
+
+      - name: Validate generated artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'dist\windows-v6'
+          $exe = Join-Path $root 'artifacts\RedSight-Setup-v6.exe'
+          $zip = Join-Path $root 'RedSight-Windows-v6.zip'
+          if (-not (Test-Path $exe)) { throw 'Installer EXE missing.' }
+          if (-not (Test-Path $zip)) { throw 'Distribution ZIP missing.' }
+          $h = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest = Get-Content (Join-Path $root 'artifacts\manifest-v6.json') -Raw | ConvertFrom-Json
+          if ($manifest.sha256 -ne $h) { throw 'Manifest SHA256 does not match installer.' }
+          if ($manifest.architecture -ne 'x64') { throw 'Installer manifest architecture is not x64.' }
+          Write-Host "Installer SHA256: $h"
+
+      - name: Upload Windows distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: RedSight-Windows-v6
+          path: dist/windows-v6/artifacts/*
+          if-no-files-found: error
+          retention-days: 14
