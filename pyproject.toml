@@ -25,36 +25,44 @@ dependencies = [
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
     "python-multipart>=0.0.20",
-    
+
     # AI/ML
     "openai>=1.58.0",
     "sentence-transformers>=3.3.0",
     "transformers>=4.46.0",
     "torch>=2.5.0",
     "onnxruntime>=1.20.0",
-    
+
     # Vector DB
     "qdrant-client>=1.12.0",
-    
-    # Database
+
+    # Database / scheduling
     "sqlalchemy>=2.0.36",
     "aiosqlite>=0.20.0",
-    
+    "apscheduler>=3.10.4",
+
     # GPU
     "pynvml>=11.5.0",
-    
+
     # UI
     "PySide6>=6.8.0",
-    
+
     # Ingestion
     "pymupdf>=1.24.0",
     "pymupdf4llm>=0.0.0",
     "python-docx>=1.1.0",
     "markdown>=3.7.0",
     "chardet>=5.2.0",
-    
-    # Tools
+
+    # Web / browser automation
     "httpx>=0.28.0",
+    "playwright>=1.49.0",
+
+    # Reporting / timezone support used by the action gateway
+    "reportlab>=4.2.5",
+    "tzlocal>=5.2",
+
+    # Tools / runtime
     "structlog>=24.4.0",
     "rich>=13.9.0",
     "typer>=0.15.0",
@@ -62,8 +70,9 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "cryptography>=44.0.0",
     "pywin32>=308; sys_platform == 'win32'",
-    
-    # Testing
+
+    # Testing / diagnostics are intentionally installed with the base
+    # distribution so the installed build can self-test and self-repair.
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
@@ -86,12 +95,12 @@ tensorrt = [
 [project.scripts]
 redsight = "redsight.cli:main"
 redsight-server = "redsight.server:main"
-redsight-ui = "redsight.ui.main:main"
-redsight-index = "redsight.scripts.index:main"
-redsight-benchmark = "redsight.scripts.benchmark:main"
+redsight-ui = "redsight.ui:main"
+redsight-index = "scripts.index:main"
+redsight-benchmark = "scripts.benchmark:main"
 
 [tool.setuptools.packages.find]
-include = ["redsight*"]
+include = ["app*", "redsight*", "redsight_actions*", "ui*"]
 exclude = ["tests*", "docs*"]
 
 [tool.ruff]
@@ -101,7 +110,7 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
 ignore = ["E501", "F401"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["redsight"]
+known-first-party = ["app", "redsight", "redsight_actions", "ui"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -115,6 +124,6 @@ asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.pyright]
-include = ["redsight"]
+include = ["app", "redsight", "redsight_actions", "ui"]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
