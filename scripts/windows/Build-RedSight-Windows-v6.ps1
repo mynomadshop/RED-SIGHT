@@ -51,7 +51,9 @@ try {
   $excludeFiles = @('*.pyc','*.pyo','*.log','*.sqlite','*.db')
   $robocopyArgs = @($SourceRoot,$stage,'/E','/R:2','/W:1','/NFL','/NDL','/NJH','/NJS','/NP')
   foreach ($d in $excludeDirs) { $robocopyArgs += '/XD'; $robocopyArgs += (Join-Path $SourceRoot $d) }
-  foreach ($f in $excludeFiles) { $robocopyArgs += '/XF'; $robocopyArgs += (Join-Path $SourceRoot $f) }
+  # /XF consumes file-name patterns. Do not append source-qualified paths or robocopy treats them as stray parameters.
+  $robocopyArgs += '/XF'
+  $robocopyArgs += $excludeFiles
   & robocopy.exe @robocopyArgs | Out-Host
   $rc = $LASTEXITCODE
   if ($rc -gt 7) { Fail "robocopy failed with exit code $rc. Source=$SourceRoot Stage=$stage" }
@@ -78,6 +80,7 @@ try {
   }
   Write-Host 'Installing RedSight runtime dependencies into the bundled Python payload...'
   & $hostPython @hostPythonArgs -m pip install --upgrade pip --disable-pip-version-check | Out-Host
+  if ($LASTEXITCODE -ne 0) { Fail "pip upgrade failed with exit code $LASTEXITCODE" }
   & $hostPython @hostPythonArgs -m pip install --disable-pip-version-check --no-user --upgrade --target $site $stage | Out-Host
   if ($LASTEXITCODE -ne 0) { Fail "Python dependency installation failed with exit code $LASTEXITCODE" }
   $env:PLAYWRIGHT_BROWSERS_PATH = '0'
