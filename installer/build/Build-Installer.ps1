@@ -286,7 +286,7 @@ foreach ($expected in @('Install-RedSightDesktopShortcut.ps1', 'Uninstall-RedSig
     }
 }
 
-Set-Content -LiteralPath (Join-Path $StagingDir 'VERSION') -Value $Version -Encoding utf8 -NoNewline
+Write-RsUtf8File -Path (Join-Path $StagingDir 'VERSION') -Content $Version
 
 # Record where this payload was built from. Setup rewrites that exact root to
 # the install directory; without it the rewriter has to guess from a pattern
@@ -604,8 +604,8 @@ $manifest = [ordered]@{
         bytes = $payloadBytes
     }
 }
-($manifest | ConvertTo-Json -Depth 8) |
-    Set-Content -LiteralPath (Join-Path $stage "manifest-v$Version.json") -Encoding utf8
+Write-RsUtf8File -Path (Join-Path $stage "manifest-v$Version.json") `
+                 -Content ($manifest | ConvertTo-Json -Depth 8)
 
 $zipPath = Join-Path $OutputDir "RedSightDesktopWindows$Version.zip"
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
