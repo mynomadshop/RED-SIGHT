@@ -79,11 +79,21 @@ $junkDirNames = @('.git', '.github', '.venv', '.venv-ui', '.venv-actions', '.ven
 $prunePaths = @(
     'backups', 'release', 'dist', 'build', 'qdrant_storage', 'storage',
     'outputs',                          # local filesystem scan results
+    'runtime',                          # the private Python setup expands per install
     'data\runtime',                     # runtime state
     'data\memory_exports',              # exported chat sessions
     'data\skills',                      # downloaded third-party skill sources
     'redsight_remote\state'             # private WhatsApp session auth
 )
+
+# `runtime` is pruned by path, not by name, so an application package that
+# happens to be called runtime survives. It matters because -AppSource is often
+# an installed RedSight rather than a clean checkout: setup expands the bundled
+# CPython into <root>\runtime\python, and copying that into a new payload would
+# add hundreds of megabytes of the *build* machine's interpreter to the
+# installer, which setup would then expand over. This prune runs before the
+# offline bundle is fetched into <staging>\runtime\bundle, so the fresh bundle
+# is unaffected.
 
 if (Test-Path -LiteralPath $StagingDir) {
     Write-RsLog 'clearing the previous staging tree' -Level STEP
@@ -180,9 +190,13 @@ Get-ChildItem -LiteralPath $StagingDir -Recurse -Directory -Force -ErrorAction S
         $prunedDirs++
     }
 
+# unins*.exe/.dat are the Inno uninstaller of the installation -AppSource points
+# at; shipping them would give the new install an uninstaller that removes the
+# old one. redsight-payload.json is regenerated below from this build's inputs.
 $pruneFilePatterns = @('*.bak', '*.backup-*', 'Dockerfile.backup-*', '*.pyc', '*.pyo',
                        'get-pip.py', '*.log', 'provider-secrets.json', 'secrets.json',
-                       '*.sqlite', '*.sqlite3', '*.db', '*.lnk', '.env')
+                       '*.sqlite', '*.sqlite3', '*.db', '*.lnk', '.env',
+                       'unins*.exe', 'unins*.dat', 'redsight-payload.json')
 $prunedFiles = 0
 foreach ($pattern in $pruneFilePatterns) {
     Get-ChildItem -LiteralPath $StagingDir -Recurse -File -Force -Filter $pattern -ErrorAction SilentlyContinue |

@@ -411,7 +411,7 @@ snapshot; that class of leftover is now removed by pattern rather than by hand.
 ## Testing
 
 ```bash
-pwsh -File installer/tests/Test-RedSightSetup.ps1   # 375 assertions
+pwsh -File installer/tests/Test-RedSightSetup.ps1   # 380 assertions
 pwsh -File installer/tests/Test-IssScript.ps1       #  76 static checks
 python3 installer/tests/test_app_overlay.py         #  96 assertions
 ```

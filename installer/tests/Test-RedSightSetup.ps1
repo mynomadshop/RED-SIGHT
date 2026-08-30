@@ -1489,6 +1489,16 @@ foreach ($required in @('launch_redsight_command_center.py', 'app\server.py',
                 -Condition ($buildScript -match [regex]::Escape($required))
 }
 
+# -AppSource is often an installed RedSight rather than a clean checkout, and an
+# install carries things a payload must not: the expanded private interpreter,
+# its own Inno uninstaller, and the manifest of the build it came from.
+foreach ($installArtifact in @("'runtime'", "'unins*.exe'", "'unins*.dat'", "'redsight-payload.json'")) {
+    Assert-True -Name "the build prunes $installArtifact from an installed-tree source" `
+                -Condition ($buildScript -match [regex]::Escape($installArtifact))
+}
+Assert-True -Name 'runtime is pruned by path, so an app package named runtime survives' `
+            -Condition ($buildScript -match "(?s)\`$prunePaths = @\(.*?'runtime',")
+
 $gitignore = Get-Content -LiteralPath (Join-Path $repoRoot '.gitignore')
 Assert-True -Name 'the models ignore rule is anchored so app/models is committable' `
             -Condition (-not ($gitignore | Where-Object { $_.Trim() -eq 'models/' }))
