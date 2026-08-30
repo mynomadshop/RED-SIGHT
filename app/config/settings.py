@@ -264,6 +264,11 @@ class Settings(BaseSettings):
         env_prefix="RED_SIGHT_",
         env_file=".env",
         env_file_encoding="utf-8",
+        # Without this, the nested sections below are reachable only by passing
+        # whole JSON objects (RED_SIGHT_LMSTUDIO='{"base_url": ...}'), and the
+        # per-field names the installer exports - RED_SIGHT_LMSTUDIO__BASE_URL,
+        # RED_SIGHT_PLATFORM__DATA_ROOT - are silently ignored.
+        env_nested_delimiter="__",
         extra="ignore",
     )
     

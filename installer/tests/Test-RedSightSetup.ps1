@@ -1387,6 +1387,122 @@ Assert-True -Name 'log line is persisted' `
             -Condition ((Get-Content -LiteralPath $log -Raw) -like '*a test log line*')
 
 Set-RsSummary -Key 'answer' -Value 42
+# ==========================================================================
+Write-Host "`n== Reading values out of .env ==" -ForegroundColor Cyan
+
+$envPath = Join-Path $tmpRoot 'dotenv-test.env'
+@(
+    'REDSIGHT_RUNTIME_MODE=native  # chosen by setup'
+    'REDSIGHT_WORKSPACE="C:\Users\Someone\RedSight Workspace"'
+    "LM_STUDIO_MODEL='qwen3-coder-30b'"
+    'export REDSIGHT_UI_EFFECTS=reduced'
+    'PLAIN=value'
+    'HASHY=#not-a-comment'
+    '# REDSIGHT_RUNTIME_MODE=container'
+    'EMPTY='
+) | Set-Content -LiteralPath $envPath
+
+Assert-Equal -Name 'an inline comment is not part of the value' `
+             -Expected 'native' -Actual (Get-RsEnvValue -Path $envPath -Key 'REDSIGHT_RUNTIME_MODE')
+Assert-Equal -Name 'a double-quoted value loses its quotes, keeps its spaces' `
+             -Expected 'C:\Users\Someone\RedSight Workspace' `
+             -Actual (Get-RsEnvValue -Path $envPath -Key 'REDSIGHT_WORKSPACE')
+Assert-Equal -Name 'a single-quoted value loses its quotes' `
+             -Expected 'qwen3-coder-30b' -Actual (Get-RsEnvValue -Path $envPath -Key 'LM_STUDIO_MODEL')
+Assert-Equal -Name 'an export- prefixed line is read' `
+             -Expected 'reduced' -Actual (Get-RsEnvValue -Path $envPath -Key 'REDSIGHT_UI_EFFECTS')
+Assert-Equal -Name 'a plain value is unchanged' `
+             -Expected 'value' -Actual (Get-RsEnvValue -Path $envPath -Key 'PLAIN')
+Assert-Equal -Name 'a # with no leading space stays in the value' `
+             -Expected '#not-a-comment' -Actual (Get-RsEnvValue -Path $envPath -Key 'HASHY')
+Assert-Equal -Name 'an empty value reads as empty, not as the next line' `
+             -Expected '' -Actual (Get-RsEnvValue -Path $envPath -Key 'EMPTY')
+Assert-Equal -Name 'a key that is not present reads as null' `
+             -Expected $null -Actual (Get-RsEnvValue -Path $envPath -Key 'NOT_THERE')
+
+# ==========================================================================
+Write-Host "`n== Files setup writes are BOM-free ==" -ForegroundColor Cyan
+
+# Windows PowerShell 5.1's -Encoding utf8 emits a BOM, and every consumer of
+# these files (Python's json and dotenv, Inno's LoadStringFromFile) mis-reads
+# one. The helper must never produce it, on any PowerShell.
+$bomPath = Join-Path $tmpRoot 'bom-test.json'
+Write-RsUtf8File -Path $bomPath -Content '{"a":1}'
+$bomBytes = [System.IO.File]::ReadAllBytes($bomPath)
+Assert-True -Name 'Write-RsUtf8File emits no byte-order mark' `
+            -Condition (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq 0xBF))
+Assert-Equal -Name 'and the content round-trips' `
+             -Expected 1 -Actual ((Get-Content -LiteralPath $bomPath -Raw | ConvertFrom-Json).a)
+
+$deepPath = Join-Path $tmpRoot 'made\up\tree\file.json'
+Write-RsUtf8File -Path $deepPath -Content '{}'
+Assert-True -Name 'it creates the directory it is asked to write into' `
+            -Condition (Test-Path -LiteralPath $deepPath)
+
+$summaryBomPath = Join-Path $tmpRoot 'summary-bom.json'
+Set-RsSummary -Key 'probe' -Value 'x'
+Save-RsSummary -Path $summaryBomPath
+$sBytes = [System.IO.File]::ReadAllBytes($summaryBomPath)
+Assert-True -Name 'the setup summary is BOM-free too' `
+            -Condition (-not ($sBytes[0] -eq 0xEF -and $sBytes[1] -eq 0xBB -and $sBytes[2] -eq 0xBF))
+
+# ==========================================================================
+Write-Host "`n== Compute capability is parsed the same in every locale ==" -ForegroundColor Cyan
+
+# nvidia-smi always reports a dot. Parsed in a comma-decimal culture, "8.9"
+# becomes 89 - silently, and successfully - so every card would clear the
+# highest MinCap and be handed the newest CUDA wheel.
+$savedCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+try {
+    foreach ($cultureName in @('en-US', 'de-DE', 'fr-FR')) {
+        [System.Threading.Thread]::CurrentThread.CurrentCulture =
+            [System.Globalization.CultureInfo]::new($cultureName)
+        Assert-True -Name "$cultureName : compute 12.0 selects a cu128 build" `
+                    -Condition ((Get-RsTorchPlan -ComputeCapability '12.0').Index -match 'cu128')
+        Assert-True -Name "$cultureName : compute 8.9 does not select cu128" `
+                    -Condition ((Get-RsTorchPlan -ComputeCapability '8.9').Index -notmatch 'cu128')
+        Assert-True -Name "$cultureName : an unknown capability still yields a plan" `
+                    -Condition ([bool](Get-RsTorchPlan -ComputeCapability '').Index)
+    }
+} finally {
+    [System.Threading.Thread]::CurrentThread.CurrentCulture = $savedCulture
+}
+
+# ==========================================================================
+Write-Host "`n== One installer pipeline, one launcher ==" -ForegroundColor Cyan
+
+$repoRoot = Split-Path -Parent (Split-Path -Parent $scriptDir)
+$buildScript = Get-Content -LiteralPath (Join-Path $repoRoot 'installer\build\Build-Installer.ps1') -Raw
+
+foreach ($retired in @('RedSight-PostInstall-Health.ps1', 'RedSight-Setup-Resume.ps1',
+                       'Build-RedSight-Windows-v6.ps1')) {
+    Assert-True -Name "the build strips $retired from the payload" `
+                -Condition ($buildScript -match [regex]::Escape("'$retired'"))
+}
+
+# app\models is the package the backend imports first and the one an unanchored
+# .gitignore pattern historically swallowed. A payload without it installs fine
+# and then cannot start, so the build has to refuse it.
+foreach ($required in @('launch_redsight_command_center.py', 'app\server.py',
+                        'app\models\lmstudio.py', 'redsight_actions\gateway_stage10.py')) {
+    Assert-True -Name "the build refuses a payload missing $required" `
+                -Condition ($buildScript -match [regex]::Escape($required))
+}
+
+$gitignore = Get-Content -LiteralPath (Join-Path $repoRoot '.gitignore')
+Assert-True -Name 'the models ignore rule is anchored so app/models is committable' `
+            -Condition (-not ($gitignore | Where-Object { $_.Trim() -eq 'models/' }))
+
+$rootLauncher = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts\windows\Start-RedSight.ps1') -Raw
+Assert-True -Name 'the source tree has no second launcher, only a forwarder' `
+            -Condition ($rootLauncher -match 'installer\\scripts\\Start-RedSight\.ps1')
+Assert-True -Name 'and it does not start the gateway-less module itself' `
+            -Condition ($rootLauncher -notmatch 'redsight_actions\.gateway:app')
+
+$shippedLauncher = Get-Content -LiteralPath (Join-Path $repoRoot 'installer\scripts\Start-RedSight.ps1') -Raw
+Assert-True -Name 'the shipped launcher does not resolve powershell.exe from $PSHOME alone' `
+            -Condition ($shippedLauncher -match 'WindowsPowerShell')
+
 $summaryPath = Join-Path $tmpRoot 'summary.json'
 Save-RsSummary -Path $summaryPath
 Assert-True -Name 'summary json is written' -Condition (Test-Path -LiteralPath $summaryPath)

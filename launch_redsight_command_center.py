@@ -43,6 +43,14 @@ from app.ui.command_center import CommandCenterMainWindow
 from app.ui.action_palette_stage103 import install_action_hooks, attach_action_palette
 install_action_hooks(CommandCenterMainWindow)
 from app.ui.heritage_panel import attach_heritage_ui
+
+# REDSIGHT_STAGE112_UI_EXTENSION
+# Additive UI extensions are injected above this line by the installer's app
+# overlay (installer/app-overlay/Apply-AppOverlay.ps1). Keep the marker: without
+# it the overlay has nowhere to attach, and appending at the end of this file
+# would put the hooks after the blocking Qt event loop, where they never run.
+
+
 def get_lm_model():
     try:
         with urllib.request.urlopen(

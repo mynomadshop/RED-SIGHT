@@ -358,12 +358,35 @@ on the `windows-latest` runner via `.github/workflows/build-windows-installer.ym
 
 ```powershell
 # from a source tree
-pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.5
+pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.6.0
 
 # reusing the payload of the previously shipped installer
 pwsh -File installer/build/Build-Installer.ps1 `
-     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.5
+     -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.6.0
 ```
+
+`scripts\windows\Build-RedSight-Windows-v6.ps1` is a front end for the same
+build, with the repository as its default `-AppSource`:
+
+```powershell
+pwsh -NoLogo -NoProfile -File scripts\windows\Build-RedSight-Windows-v6.ps1
+```
+
+### One pipeline
+
+This repository used to hold two Windows installer pipelines. The second one
+compiled its own `.iss` under a different `AppId`, which meant Windows treated
+the two builds as unrelated products: both could be installed at once, into
+different directories, each with its own uninstall entry, and they then
+competed for ports 8000/8765 and for `%LOCALAPPDATA%\RedSight`. It installed
+under a different layout too (`tools\python.exe`, and the action gateway at
+`redsight_actions.gateway`, which serves no `/memory` routes), so a UI launched
+from it reported memory as missing and its chat could not answer.
+
+There is now one pipeline, one `AppId` and one launcher. The retired scripts
+that remain in `scripts\windows` are forwarders and shims kept so existing
+shortcuts keep working; `Build-Installer.ps1` strips them from the payload so
+they cannot be run against an install they do not describe.
 
 Useful switches:
 
@@ -388,7 +411,7 @@ snapshot; that class of leftover is now removed by pattern rather than by hand.
 ## Testing
 
 ```bash
-pwsh -File installer/tests/Test-RedSightSetup.ps1   # 343 assertions
+pwsh -File installer/tests/Test-RedSightSetup.ps1   # 375 assertions
 pwsh -File installer/tests/Test-IssScript.ps1       #  76 static checks
 python3 installer/tests/test_app_overlay.py         #  96 assertions
 ```

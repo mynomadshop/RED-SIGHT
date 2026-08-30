@@ -819,15 +819,31 @@ function Get-RsWslState {
     }
 
     foreach ($feature in @('Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform')) {
+        $enabled = $false
         try {
-            # Get-WindowsOptionalFeature needs elevation; dism output is parsed as a fallback.
+            # Needs elevation. Setup is elevated, so this is the normal path.
             $f = Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction Stop
             $enabled = ($f.State -eq 'Enabled')
         } catch {
-            $r = Invoke-RsProcess -FilePath (Get-RsSystem32 'dism.exe') `
-                                  -Arguments @('/online', '/get-featureinfo', "/featurename:$feature") `
-                                  -TimeoutSeconds 180 -Quiet
-            $enabled = ($r.StdOut -match 'State\s*:\s*Enabled')
+            # The health check is run from the Start Menu, unelevated. dism is
+            # not a fallback there - /online /get-featureinfo returns error 740
+            # (elevated permissions required) and its output contains no
+            # "State : Enabled", so parsing it reports every feature as disabled
+            # on a machine where both are on.
+            #
+            # Win32_OptionalFeature answers the same question over WMI and does
+            # not require elevation. InstallState 1 = enabled.
+            try {
+                $q = "Name='$feature'"
+                $wmi = Get-CimInstance -ClassName Win32_OptionalFeature -Filter $q -ErrorAction Stop |
+                       Select-Object -First 1
+                if ($wmi) { $enabled = ($wmi.InstallState -eq 1) }
+            } catch {
+                $r = Invoke-RsProcess -FilePath (Get-RsSystem32 'dism.exe') `
+                                      -Arguments @('/online', '/get-featureinfo', "/featurename:$feature") `
+                                      -TimeoutSeconds 180 -Quiet
+                $enabled = ($r.StdOut -match 'State\s*:\s*Enabled')
+            }
         }
         if ($feature -eq 'Microsoft-Windows-Subsystem-Linux') { $state.SubsystemEnabled = $enabled }
         else { $state.VirtualMachinePlatform = $enabled }
@@ -842,6 +858,10 @@ function Get-RsWslState {
             $state.KernelInstalled = $true
             $m = [regex]::Match($text, 'Default Version:\s*(\d)')
             if ($m.Success) { $state.DefaultVersion = [int]$m.Groups[1].Value }
+            # wsl --status cannot succeed with the subsystem feature off, so
+            # this settles it even if every feature probe above was blocked.
+            $state.SubsystemEnabled = $true
+            if ($state.DefaultVersion -eq 2) { $state.VirtualMachinePlatform = $true }
         }
     }
     return [pscustomobject]$state
@@ -1353,8 +1373,13 @@ function Repair-RsHardcodedPaths {
             }
             try {
                 $updated = ($lines -join $newline)
-                # -NoNewline keeps file bytes identical apart from the paths.
-                Set-Content -LiteralPath $file -Value $updated -NoNewline -Encoding UTF8 -ErrorAction Stop
+                # BOM-free, and written whole rather than through Set-Content.
+                # Windows PowerShell 5.1's -Encoding UTF8 means UTF-8 WITH a byte
+                # order mark, and $Extensions includes *.bat and *.cmd: cmd.exe
+                # reads the BOM as part of the first command and the launcher
+                # dies with an unrecognised-command error.
+                [System.IO.File]::WriteAllText($file, $updated,
+                    (New-Object System.Text.UTF8Encoding($false)))
                 $filesTouched.Add($file)
                 $rewritten++
             } catch {

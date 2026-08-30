@@ -8,6 +8,36 @@ param(
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
+
+# --------------------------------------------------------------------------
+# Retired pipeline guard
+# --------------------------------------------------------------------------
+# This resumable bootstrapper belongs to a Windows pipeline RedSight no longer
+# ships. Setup is now installer\scripts\Bootstrap-RedSight.ps1, which the
+# installer overlays onto scripts\windows and which handles the WSL2 feature
+# enable, the reboot and Docker Desktop itself.
+#
+# Running this against a current install would register a logon scheduled task
+# that re-runs the retired bootstrapper indefinitely, reinstalling Docker over
+# an installation that already provisioned it. So: detect a current install,
+# clean up any task an earlier run of this script left behind, and stop.
+$currentSetup = Join-Path $InstallRoot 'scripts\windows\Bootstrap-RedSight.ps1'
+if (Test-Path -LiteralPath $currentSetup) {
+    $stale = Get-ScheduledTask -TaskName 'RedSight Setup Resume' -ErrorAction SilentlyContinue
+    if ($stale) {
+        Unregister-ScheduledTask -TaskName 'RedSight Setup Resume' -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Host 'Removed the leftover "RedSight Setup Resume" logon task from the retired pipeline.'
+    }
+    Write-Host ''
+    Write-Host 'This script has been retired. RedSight setup is now:' -ForegroundColor Yellow
+    Write-Host "  powershell -ExecutionPolicy Bypass -File `"$currentSetup`" -ProjectRoot `"$InstallRoot`""
+    Write-Host ''
+    Write-Host 'To diagnose or repair an existing installation:'
+    Write-Host "  powershell -ExecutionPolicy Bypass -File `"$(Join-Path $InstallRoot 'scripts\windows\Repair-RedSight.ps1')`" -Fix"
+    Write-Host ''
+    exit 0
+}
+
 $StateRoot=Join-Path $env:ProgramData 'RedSight\Setup'
 $StateFile=Join-Path $StateRoot 'install-state.json'
 $TaskName='RedSight Setup Resume'

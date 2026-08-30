@@ -76,7 +76,15 @@ foreach ($required in @('tools/python.exe', 'tools/Lib/venv/__init__.py', 'tools
         throw "the downloaded CPython package is missing $required - refusing to ship it"
     }
 }
+# ensurepip without its bundled wheel cannot create a working venv offline, and
+# Split-Path on the $null it leaves behind would report a parameter-binding
+# error instead of the actual problem.
 $pipWheel = @($names | Where-Object { $_ -like 'tools/Lib/ensurepip/_bundled/pip-*.whl' }) | Select-Object -First 1
+if (-not $pipWheel) {
+    throw ("the downloaded CPython package carries no bundled pip wheel under " +
+           "tools/Lib/ensurepip/_bundled - an offline install could not create a " +
+           "virtual environment from it, so it is not shipped")
+}
 Write-RsLog "    verified: python.exe, venv, ensurepip ($(Split-Path -Leaf $pipWheel))" -Level OK
 
 $manifest.python.version = $PythonVersion

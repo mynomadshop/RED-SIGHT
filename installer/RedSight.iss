@@ -6,7 +6,7 @@
 ;  offline wheelhouse into a staging tree and then invokes ISCC on this script.
 ;
 ;  Required preprocessor defines (all supplied by Build-Installer.ps1):
-;    AppVersion   product version, e.g. 11.5.5
+;    AppVersion   product version, e.g. 11.6.0
 ;    PayloadDir   staged application tree that becomes {app}
 ;    OutputDir    where the compiled setup exe is written
 ;    OutputBase   base name of the setup exe
@@ -16,7 +16,7 @@
 ; ===========================================================================
 
 #ifndef AppVersion
-  #define AppVersion "11.5.5"
+  #define AppVersion "11.6.0"
 #endif
 #ifndef PayloadDir
   #error PayloadDir must be defined (pass /DPayloadDir=... to ISCC)
@@ -866,6 +866,40 @@ end;
   file. Read it back so setup can ask for the reboot rather than leaving Docker
   half-configured.
   -------------------------------------------------------------------------- }
+{ ------------------------------------------------------------------------
+  Did the bootstrap report that a restart is required?
+
+  Reads the flag out of setup-summary.json without depending on how the writing
+  PowerShell formatted it: find the key, then accept the next 'true' that
+  appears before the following comma or brace.
+  ------------------------------------------------------------------------ }
+function RebootRequested(const Summary: AnsiString): Boolean;
+var
+  KeyPos, ValuePos, StopPos, I: Integer;
+  Tail: AnsiString;
+begin
+  Result := False;
+  KeyPos := Pos('"rebootRequired"', Summary);
+  if KeyPos = 0 then
+    Exit;
+
+  Tail := Copy(Summary, KeyPos + Length('"rebootRequired"'), 64);
+
+  { Stop at the end of this member so a later "true" cannot be mistaken for it. }
+  StopPos := Length(Tail) + 1;
+  for I := 1 to Length(Tail) do
+  begin
+    if (Tail[I] = ',') or (Tail[I] = '}') then
+    begin
+      StopPos := I;
+      Break;
+    end;
+  end;
+
+  ValuePos := Pos('true', Tail);
+  Result := (ValuePos > 0) and (ValuePos < StopPos);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   SummaryPath: string;
@@ -887,7 +921,12 @@ begin
       Log('RedSight setup summary: ' + SummaryPath);
       if LoadStringFromFile(SummaryPath, Summary) then
       begin
-        if Pos('"rebootRequired": true', Summary) > 0 then
+        { Whitespace-insensitive on purpose. Windows PowerShell 5.1's
+          ConvertTo-Json writes "key":  value with TWO spaces after the colon
+          (PowerShell 6+ writes one), and setup runs under 5.1 - so matching a
+          single space here meant the restart requirement never travelled from
+          the bootstrap to Inno, and WSL2 was left half-enabled with no prompt. }
+        if RebootRequested(Summary) then
         begin
           RebootNeeded := True;
           Log('RedSight setup reported that a restart is required.');

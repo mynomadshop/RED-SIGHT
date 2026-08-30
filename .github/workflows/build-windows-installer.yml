@@ -13,9 +13,10 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to build (e.g. 11.5.5)'
+        description: 'Version to build (e.g. 11.6.0)'
+        type: string
         required: false
-        default: '11.5.5'
+        default: '11.6.0'
       include_all_wheels:
         description: 'Bundle every Python wheel for a fully offline installer (adds ~1 GB)'
         type: boolean
@@ -26,18 +27,38 @@ on:
         type: boolean
         required: false
         default: false
+  # Callable so there is exactly one Windows build definition. windows-v6-build
+  # is a thin caller of this workflow rather than a second pipeline.
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: false
+        default: '11.6.0'
+      include_all_wheels:
+        type: boolean
+        required: false
+        default: false
+      create_release:
+        type: boolean
+        required: false
+        default: false
   push:
     branches:
+      - main
       - 'claude/redsight-windows-installer-**'
     paths:
       - 'installer/**'
+      - 'scripts/windows/**'
       - '.github/workflows/build-windows-installer.yml'
 
 permissions:
   contents: write
 
 env:
-  RS_VERSION: ${{ github.event.inputs.version || '11.5.5' }}
+  # The `inputs` context covers workflow_dispatch and workflow_call alike, and
+  # is empty on push, where the default applies.
+  RS_VERSION: ${{ inputs.version || '11.6.0' }}
 
 jobs:
   # --------------------------------------------------------------------------
@@ -107,14 +128,30 @@ jobs:
       - name: Build installer and release zip
         shell: pwsh
         run: |
+          # Build from the repository itself - the same -AppSource path a
+          # maintainer runs - as soon as the repository is complete enough to
+          # produce a working payload. app/models is the file historically lost
+          # to an unanchored .gitignore pattern and the one the backend imports
+          # first, so it is the marker. Until it is committed, fall back to the
+          # payload of the last shipped installer so CI still exercises the
+          # compile, install and uninstall path.
+          $source = @()
+          if (Test-Path 'app/models/lmstudio.py') {
+            Write-Host 'building from the repository source tree (-AppSource .)'
+            $source = @('-AppSource', '.')
+          } else {
+            Write-Host '::warning::app/models is not in the repository; building from the legacy payload instead. An installer built from this tree with -AppSource would ship a backend that cannot import app.models.lmstudio.'
+            $source = @('-LegacyInstaller', 'installer/legacy/RedSight-Setup-11.2.0.exe')
+          }
           $buildArgs = @(
-            '-NoLogo', '-NoProfile', '-File', 'installer/build/Build-Installer.ps1',
-            '-LegacyInstaller', 'installer/legacy/RedSight-Setup-11.2.0.exe',
+            '-NoLogo', '-NoProfile', '-File', 'installer/build/Build-Installer.ps1'
+          ) + $source + @(
             '-Version', '${{ env.RS_VERSION }}',
             '-OutputDir', 'dist',
+            '-StagingDir', 'C:\rs-stage',
             '-IsccPath', "$env:ISCC"
           )
-          if ('${{ github.event.inputs.include_all_wheels }}' -eq 'true') { $buildArgs += '-IncludeAllWheels' }
+          if ('${{ inputs.include_all_wheels }}' -eq 'true') { $buildArgs += '-IncludeAllWheels' }
           & pwsh @buildArgs
           if ($LASTEXITCODE -ne 0) { throw "build failed with exit code $LASTEXITCODE" }
 
@@ -266,7 +303,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Publish GitHub Release
-        if: github.event.inputs.create_release == 'true'
+        if: inputs.create_release == true
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

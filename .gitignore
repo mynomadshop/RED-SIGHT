@@ -76,8 +76,12 @@ data/qdrant/
 *.pth
 *.bin
 
-models/
-checkpoints/
+# Anchored to the repository root on purpose: an unanchored "models/" also
+# matches app/models/, which is application source. That rule kept the whole
+# LmStudioProvider package out of git, so app/server.py could not import on any
+# clean checkout and the backend never started.
+/models/
+/checkpoints/
 
 # ------------------------------------------------------------
 # Node

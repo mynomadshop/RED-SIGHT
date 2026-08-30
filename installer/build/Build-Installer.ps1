@@ -14,18 +14,18 @@
 
     Examples
       # from an application source tree
-      pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.5.5
+      pwsh -File installer/build/Build-Installer.ps1 -AppSource C:\src\RedSight -Version 11.6.0
 
       # reusing the payload of the previously shipped installer (Windows only)
       pwsh -File installer/build/Build-Installer.ps1 `
-           -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.5.5
+           -LegacyInstaller installer/legacy/RedSight-Setup-11.2.0.exe -Version 11.6.0
 #>
 
 [CmdletBinding()]
 param(
     [string]$AppSource,
     [string]$LegacyInstaller,
-    [string]$Version = '11.5.5',
+    [string]$Version = '11.6.0',
     [string]$OutputDir = 'dist',
     [string]$StagingDir,
     [string]$IsccPath,
@@ -200,6 +200,40 @@ if (-not (Test-Path -LiteralPath (Join-Path $StagingDir '.env.example'))) {
     Write-RsLog '    .env.example is missing from the payload; setup will not be able to seed .env' -Level WARN
 }
 
+# --------------------------------------------------------------------------
+# 2b. Payload completeness gate
+# --------------------------------------------------------------------------
+# Everything below is imported at module scope by something the installer runs,
+# so a payload missing any of it produces an installer that installs cleanly and
+# then fails at launch. app\server.py's very first imports include
+# `from app.models.lmstudio import LmStudioProvider`, and the app overlay only
+# warns when that file is absent - which is how a payload can reach a user with
+# a backend that cannot start.
+#
+# The usual cause is .gitignore: an unanchored `models/` pattern matches
+# app/models/ as well as the top-level model cache, so the package is never
+# committed and a build from a fresh clone silently omits it.
+$requiredPayload = @(
+    'launch_redsight_command_center.py',
+    'app\server.py',
+    'app\models\lmstudio.py',
+    'app\ui\command_center.py',
+    'redsight_actions\gateway_stage10.py',
+    'docker-compose.yml',
+    '.env.example'
+)
+$missingPayload = @($requiredPayload | Where-Object {
+    -not (Test-Path -LiteralPath (Join-Path $StagingDir $_))
+})
+if ($missingPayload.Count -gt 0) {
+    foreach ($m in $missingPayload) { Write-RsLog "    missing from the payload: $m" -Level FAIL }
+    throw ("the application payload is incomplete - $($missingPayload.Count) required file(s) are absent. " +
+           'RedSight would install but fail to start. If these files exist in your working tree but not ' +
+           'in the repository, .gitignore is excluding them: check with ' +
+           '"git check-ignore -v <path>" and commit them with "git add -f <path>".')
+}
+Write-RsLog "payload completeness: all $($requiredPayload.Count) required file(s) present" -Level OK
+
 # ==========================================================================
 # 3. Overlay the updated setup scripts
 # ==========================================================================
@@ -217,6 +251,31 @@ foreach ($name in $overlay) {
     if (-not (Test-Path -LiteralPath $src)) { throw "setup script missing from the repository: $src" }
     Copy-Item -LiteralPath $src -Destination (Join-Path $targetScripts $name) -Force
     Write-RsLog "    + scripts\windows\$name" -Level DEBUG
+}
+
+# Retired setup scripts must not travel in the payload.
+#
+# An earlier, separate Windows pipeline installed RedSight under a different
+# layout: a private interpreter at tools\python.exe and the action gateway at
+# redsight_actions.gateway (which has no /memory routes). Its scripts are still
+# in the source tree's scripts\windows, so a payload staged from that tree - or
+# extracted from an installer built by it - carries them alongside the ones
+# overlaid above.
+#
+# They are not merely dead weight. RedSight-PostInstall-Health.ps1 probes the
+# old layout, so running the "full health check" against a current install
+# reports missing files that are present under their real names, which reads as
+# the install pointing at an older one. RedSight-Setup-Resume.ps1 goes further
+# and registers a scheduled task that re-runs the retired bootstrapper at logon.
+$retired = @('Build-RedSight-Windows-v6.ps1',
+             'RedSight-PostInstall-Health.ps1',
+             'RedSight-Setup-Resume.ps1')
+foreach ($name in $retired) {
+    $stale = Join-Path $targetScripts $name
+    if (Test-Path -LiteralPath $stale) {
+        Remove-Item -LiteralPath $stale -Force
+        Write-RsLog "    - scripts\windows\$name (retired pipeline)" -Level DEBUG
+    }
 }
 
 # The payload's own shortcut and Docker-cleanup helpers are kept as shipped;
@@ -254,7 +313,8 @@ if (Test-Path -LiteralPath $overlayScript) {
     $shell = (Get-RsCommand -Name 'pwsh')
     $shellPath = if ($shell) { $shell.Source } else { Get-RsPowerShellExe }
     $r = Invoke-RsProcess -FilePath $shellPath `
-                          -Arguments @('-NoLogo', '-NoProfile', '-File', $overlayScript, '-PayloadDir', $StagingDir) `
+                          -Arguments @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                                       '-File', $overlayScript, '-PayloadDir', $StagingDir) `
                           -TimeoutSeconds 600
     if ($r.ExitCode -ne 0) { throw "Apply-AppOverlay.ps1 failed with exit code $($r.ExitCode)" }
 } else {
@@ -271,7 +331,8 @@ if ($SkipBundle) {
     $bundleDir = Join-Path $StagingDir 'runtime\bundle'
     $fetch = Join-Path $scriptDir 'Fetch-Bundles.ps1'
     Write-RsLog 'fetching the offline bundle (CPython 3.12 + wheelhouse)' -Level STEP
-    $fetchArgs = @('-NoLogo', '-NoProfile', '-File', $fetch, '-Destination', $bundleDir, '-ProjectRoot', $StagingDir)
+    $fetchArgs = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+               '-File', $fetch, '-Destination', $bundleDir, '-ProjectRoot', $StagingDir)
     if ($IncludeAllWheels) { $fetchArgs += '-IncludeAllWheels' }
 
     # Prefer pwsh when present; fall back to Windows PowerShell.

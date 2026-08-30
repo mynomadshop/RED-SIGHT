@@ -87,5 +87,22 @@ New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue 
 $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $target)
 if ($NoUi -and (Split-Path -Leaf $target) -eq 'START-REDSIGHT-NATIVE.ps1') { $arguments += '-NoUi' }
 
-& (Join-Path $PSHOME 'powershell.exe') @arguments
+# The shipped launchers are Windows PowerShell 5.1 scripts, so they are run
+# with 5.1 explicitly. $PSHOME is not that: under PowerShell 7 it is
+# C:\Program Files\PowerShell\7, which holds pwsh.exe and no powershell.exe at
+# all - so a repair or a shortcut that happens to start pwsh would fail here
+# with "the term is not recognized" rather than launching RedSight.
+$systemRoot = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+$powershell = Join-Path $systemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (-not (Test-Path -LiteralPath $powershell)) {
+    $powershell = Join-Path $PSHOME 'powershell.exe'
+}
+if (-not (Test-Path -LiteralPath $powershell)) {
+    $powershell = (Get-Command powershell.exe -CommandType Application -ErrorAction SilentlyContinue |
+                   Select-Object -First 1).Source
+}
+if (-not $powershell) { throw 'Windows PowerShell (powershell.exe) was not found on this system.' }
+
+$global:LASTEXITCODE = 0
+& $powershell @arguments
 exit $LASTEXITCODE

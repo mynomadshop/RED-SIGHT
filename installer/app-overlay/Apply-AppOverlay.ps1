@@ -165,8 +165,13 @@ foreach ($hook in $hooks) {
     }
 
     if ($anchorIndex -lt 0) {
-        Write-RsLog "no anchor found in the launcher; appending the $($hook.Module) hook at the end" -Level WARN
-        $anchorIndex = $lines.Count
+        # Appending at the end of the launcher is worse than failing: its last
+        # statement runs the Qt event loop, so anything after it executes only
+        # once the user has closed the window. The hooks would look installed
+        # and do nothing.
+        throw ("no injection point found in $(Split-Path -Leaf $launcher) for $($hook.Module). " +
+               "Add a '# REDSIGHT_STAGE112_UI_EXTENSION' line after the app.ui imports, " +
+               'or the Settings tabs and the responsiveness fixes will not be installed.')
     }
 
     $out = New-Object System.Collections.Generic.List[string]
@@ -176,10 +181,6 @@ foreach ($hook in $hooks) {
         }
         $out.Add($lines[$i])
     }
-    if ($anchorIndex -ge $lines.Count) {
-        foreach ($h in $block) { $out.Add($h) }
-    }
-
     $lines = @($out.ToArray())
     Write-RsLog "wired $($hook.Module) into $(Split-Path -Leaf $launcher) at line $($anchorIndex + 1)" -Level OK
 }

@@ -67,6 +67,30 @@ function Write-RsLog {
     Write-Host $line -ForegroundColor $color
 }
 
+function Write-RsUtf8File {
+    <#
+        Writes text as UTF-8 with no byte-order mark, creating the directory if
+        needed.
+
+        Windows PowerShell 5.1's `-Encoding utf8` always emits a BOM. Every
+        consumer of the files setup writes is intolerant of one: Python's
+        json.loads raises on a leading U+FEFF, python-dotenv treats it as part of
+        the first key's name, and Inno Setup's LoadStringFromFile hands the BOM
+        straight to the Pascal string. So none of them may be written with
+        Set-Content.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Content
+    )
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    [System.IO.File]::WriteAllText($Path, $Content, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 function Set-RsSummary {
     <# Records a key/value pair for the machine-readable setup summary. #>
     [CmdletBinding()]
@@ -84,7 +108,7 @@ function Save-RsSummary {
     param([Parameter(Mandatory)][string]$Path)
     try {
         New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force -ErrorAction SilentlyContinue | Out-Null
-        ($script:RsSummary | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $Path -Encoding utf8
+        Write-RsUtf8File -Path $Path -Content ($script:RsSummary | ConvertTo-Json -Depth 6)
         Write-RsLog "Setup summary written to $Path" -Level DEBUG
     } catch {
         Write-RsLog "Could not write setup summary: $($_.Exception.Message)" -Level WARN

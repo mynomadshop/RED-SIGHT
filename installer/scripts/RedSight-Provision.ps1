@@ -63,13 +63,31 @@ function Set-RsEnvValue {
 }
 
 function Get-RsEnvValue {
+    <#
+        Reads one key out of a .env file the way python-dotenv does.
+
+        The raw right-hand side is not the value: `MODE=native  # set by setup`
+        would otherwise yield "native  # set by setup", and a quoted path would
+        keep its quotes. Callers compare these against literals ('native',
+        'container') and join them into paths, so both would silently fail.
+
+        Commented-out and `export `-prefixed lines are handled the same way
+        python-dotenv handles them: skipped, and stripped, respectively.
+    #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Key)
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     foreach ($line in @(Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue)) {
-        if ($line -match ('^\s*' + [regex]::Escape($Key) + '\s*=\s*(.*)$')) {
-            return $Matches[1].Trim()
-        }
+        if ($line -notmatch ('^\s*(?:export\s+)?' + [regex]::Escape($Key) + '\s*=\s*(.*)$')) { continue }
+        $value = $Matches[1].Trim()
+
+        if ($value -match '^"([^"]*)"') { return $Matches[1] }      # "quoted value"  # comment
+        if ($value -match "^'([^']*)'") { return $Matches[1] }      # 'quoted value'  # comment
+
+        # Unquoted: a # ends the value only when whitespace precedes it, so a
+        # value that is itself a fragment or colour (#free-form) survives.
+        if ($value -match '^(.*?)\s+#') { $value = $Matches[1] }
+        return $value.Trim()
     }
     return $null
 }
@@ -234,8 +252,17 @@ function Get-RsTorchPlan {
     [CmdletBinding()]
     param([string]$ComputeCapability = '')
 
+    # The single-argument TryParse overload parses in the current culture. On a
+    # machine set to a comma-decimal locale (de-DE, fr-FR, pt-BR) the dot is a
+    # thousands separator, so nvidia-smi's "8.9" parses as 89 - successfully,
+    # and silently. Every GPU then clears the highest MinCap and is handed the
+    # newest CUDA wheel, which for an Ada or Ampere card is the wrong build.
+    # nvidia-smi always reports a dot, so parse invariantly.
     $cap = 0.0
-    [void][double]::TryParse("$ComputeCapability", [ref]$cap)
+    [void][double]::TryParse("$ComputeCapability",
+                             [System.Globalization.NumberStyles]::Float,
+                             [System.Globalization.CultureInfo]::InvariantCulture,
+                             [ref]$cap)
 
     foreach ($entry in $script:RsTorchIndexes) {
         if ($cap -ge [double]$entry.MinCap) { return [pscustomobject]$entry }
@@ -419,7 +446,10 @@ function Set-RsProviderConfig {
         models          = $models
         custom_base_url = $customBase
     }
-    ($config | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $configFile -Encoding utf8
+    # Written without a BOM: the application reads these with Python's json,
+    # and json.loads chokes on a leading U+FEFF. Windows PowerShell 5.1's
+    # -Encoding utf8 always emits one.
+    Write-RsUtf8File -Path $configFile -Content ($config | ConvertTo-Json -Depth 5)
     Write-RsLog "provider set to $Provider (config: $configFile)" -Level OK
 
     if (-not $ApiKey -or $Provider -eq 'lmstudio') { return $false }
@@ -433,7 +463,7 @@ function Set-RsProviderConfig {
             } catch { }
         }
         $store[$Provider] = Protect-RsSecret -Value $ApiKey
-        ($store | ConvertTo-Json -Depth 3) | Set-Content -LiteralPath $secretFile -Encoding utf8
+        Write-RsUtf8File -Path $secretFile -Content ($store | ConvertTo-Json -Depth 3)
         Write-RsLog "API key for $Provider stored encrypted (DPAPI, current user)" -Level OK
         return $true
     } catch {
@@ -742,11 +772,16 @@ if (-not $NoUi) {
         Write-Line 'opening the Command Center'
         $Pythonw = Join-Path $Root '.venv-ui\Scripts\pythonw.exe'
         if (-not (Test-Path -LiteralPath $Pythonw)) { $Pythonw = $Python }
-        # Run through python.exe, not pythonw.exe, when it fails: pythonw
-        # discards the traceback and the shortcut appears to do nothing.
-        & $Pythonw $Launcher
-        if ($LASTEXITCODE -ne 0) {
-            Write-Line "Command Center exited with code $LASTEXITCODE - re-running with output captured"
+        # Start-Process -Wait, not the call operator: pythonw.exe is a GUI
+        # subsystem binary, and PowerShell does not wait for those. `& $Pythonw`
+        # returns the moment the process is created, leaving $LASTEXITCODE at 0
+        # however the UI ends - so the diagnostic re-run below would never fire
+        # and a UI that dies on an import error would just silently not appear.
+        $ui = Start-Process -FilePath $Pythonw -ArgumentList @($Launcher) `
+                            -WorkingDirectory $Root -Wait -PassThru
+        $UiExit = $ui.ExitCode
+        if ($UiExit -ne 0) {
+            Write-Line "Command Center exited with code $UiExit - re-running with output captured"
             $err = Join-Path $LogDir 'ui-error.log'
             & $Python $Launcher *>> $err
             Add-Type -AssemblyName PresentationFramework

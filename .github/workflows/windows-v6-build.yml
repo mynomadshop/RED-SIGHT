@@ -1,68 +1,43 @@
 name: RedSight Windows v6 Build
 
+# The v6 bundle is built by the one Windows pipeline this repository has:
+# build-windows-installer.yml. This workflow is a named entry point for it, kept
+# so "RedSight Windows v6 Build" stays runnable from the Actions tab.
+#
+# It used to be a second, self-contained pipeline that compiled its own .iss
+# under a different AppId. Two AppIds meant Windows treated the two builds as
+# unrelated products: both could be installed at once, each with its own
+# uninstall entry, and they then fought over ports 8000/8765 and over
+# %LOCALAPPDATA%\RedSight. It also had no install test, so nothing it produced
+# was ever run before being published.
+
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'scripts/windows/**'
-      - 'pyproject.toml'
-      - 'app/**'
-      - 'ui/**'
-      - 'redsight_actions/**'
-      - 'assets/**'
-      - '.github/workflows/windows-v6-build.yml'
+    inputs:
+      version:
+        description: 'Version to build (e.g. 11.6.0)'
+        type: string
+        required: false
+        default: '11.6.0'
+      include_all_wheels:
+        description: 'Bundle every Python wheel for a fully offline installer (adds ~1 GB)'
+        type: boolean
+        required: false
+        default: false
+      create_release:
+        description: 'Publish the zip as a GitHub Release'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build-windows-installer:
-    runs-on: windows-2025
-    timeout-minutes: 45
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Inno Setup 7
-        shell: pwsh
-        run: |
-          winget install --id JRSoftware.InnoSetup.7 -e -s winget --silent --accept-source-agreements --accept-package-agreements
-
-      - name: Verify build prerequisites
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $iscc = Get-ChildItem "$env:ProgramFiles","${env:ProgramFiles(x86)}" -Filter ISCC.exe -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $iscc) { throw 'ISCC.exe not found after Inno Setup installation.' }
-          & $iscc.FullName /?
-          py -3.12 --version
-
-      - name: Build installer
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          .\scripts\windows\Build-RedSight-Windows-v6.ps1
-
-      - name: Validate generated artifacts
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $env:GITHUB_WORKSPACE 'dist\windows-v6'
-          $exe = Join-Path $root 'artifacts\RedSight-Setup-v6.exe'
-          $zip = Join-Path $root 'RedSight-Windows-v6.zip'
-          if (-not (Test-Path $exe)) { throw 'Installer EXE missing.' }
-          if (-not (Test-Path $zip)) { throw 'Distribution ZIP missing.' }
-          $h = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          $manifest = Get-Content (Join-Path $root 'artifacts\manifest-v6.json') -Raw | ConvertFrom-Json
-          if ($manifest.sha256 -ne $h) { throw 'Manifest SHA256 does not match installer.' }
-          if ($manifest.architecture -ne 'x64') { throw 'Installer manifest architecture is not x64.' }
-          Write-Host "Installer SHA256: $h"
-
-      - name: Upload Windows distribution
-        uses: actions/upload-artifact@v4
-        with:
-          name: RedSight-Windows-v6
-          path: dist/windows-v6/artifacts/*
-          if-no-files-found: error
-          retention-days: 14
+  build:
+    uses: ./.github/workflows/build-windows-installer.yml
+    with:
+      version: ${{ inputs.version }}
+      include_all_wheels: ${{ inputs.include_all_wheels }}
+      create_release: ${{ inputs.create_release }}
+    secrets: inherit

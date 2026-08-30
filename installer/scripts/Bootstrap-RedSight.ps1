@@ -173,6 +173,10 @@ if ($AnswerFile) {
 
 $failures = New-Object System.Collections.Generic.List[string]
 $warnings = New-Object System.Collections.Generic.List[string]
+
+# Set once the action gateway venv exists; later steps need its interpreter.
+# Declared here because StrictMode makes reading an unset variable an error.
+$script:RsActionsPython = $null
 $rebootRequired = $false
 
 function Invoke-RsStep {
@@ -488,7 +492,41 @@ if (-not $python) {
                                -RequirementFiles @((Join-Path $ProjectRoot 'requirements-stage111-actions.txt')) `
                                -Wheelhouse $wheelhouse -OfflineOnly:$OfflineOnly -Recreate:$RecreateVenvs
         Set-RsSummary -Key 'venvActions' -Value $p
+        $script:RsActionsPython = $p
         Install-RsRuntimeBootstrap -VenvPython $p -ProjectRoot $ProjectRoot | Out-Null
+    } | Out-Null
+
+    # ------------------------------------------------------------------
+    # 6b. Playwright's Chromium build
+    # ------------------------------------------------------------------
+    # The gateway's browser-automation tools call playwright.chromium.launch().
+    # The pip package alone does not carry a browser, so without this step the
+    # first web-automation request fails with "Executable doesn't exist".
+    # Playwright's default location (%LOCALAPPDATA%\ms-playwright) is exactly
+    # where the gateway looks, so no PLAYWRIGHT_BROWSERS_PATH is needed.
+    #
+    # Non-fatal: it is a large download, and RedSight is fully usable without
+    # browser automation. A warning beats failing the whole installation.
+    Invoke-RsStep -Name 'Downloading the Playwright browser (Chromium)' -Action {
+        $actionsPython = $script:RsActionsPython
+        if (-not $actionsPython -or -not (Test-Path -LiteralPath $actionsPython)) {
+            Write-RsLog '    the action gateway environment is unavailable - skipping' -Level WARN
+            return
+        }
+        if ($OfflineOnly) {
+            Write-RsLog '    offline install - browser automation stays unavailable until you run' -Level INFO
+            Write-RsLog "    \"$actionsPython\" -m playwright install chromium" -Level INFO
+            Set-RsSummary -Key 'playwrightChromium' -Value 'skipped-offline'
+            return
+        }
+        $r = Invoke-RsProcess -FilePath $actionsPython `
+                              -Arguments @('-m', 'playwright', 'install', 'chromium') `
+                              -TimeoutSeconds 1800 -HeartbeatSeconds 30
+        if ($r.ExitCode -ne 0) {
+            Set-RsSummary -Key 'playwrightChromium' -Value 'failed'
+            throw "playwright install chromium failed with exit code $($r.ExitCode)"
+        }
+        Set-RsSummary -Key 'playwrightChromium' -Value 'installed'
     } | Out-Null
 
     # ----------------------------------------------------------------------
