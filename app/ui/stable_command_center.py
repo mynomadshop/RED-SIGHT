@@ -9,8 +9,8 @@ thread and preventing overlapping health polls.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
 import logging
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 import httpx
