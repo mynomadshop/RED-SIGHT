@@ -7,8 +7,8 @@ used by the Windows shortcuts. This removes the historical split where the
 
 from __future__ import annotations
 
-from pathlib import Path
 import runpy
+from pathlib import Path
 
 
 def main() -> None:
