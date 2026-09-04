@@ -36,6 +36,9 @@ from PySide6.QtWidgets import (
 )
 from qasync import QEventLoop
 
+# Keep this exact legacy import anchor: historical RedSight repair/heritage tools
+# intentionally locate it when applying additive UI integrations.
+from app.ui.command_center import CommandCenterMainWindow
 from app.ui.action_palette_stage103 import attach_action_palette, install_action_hooks
 from app.ui.heritage_panel import attach_heritage_ui
 from app.ui.runtime_services import get_lm_model, query_nvidia
@@ -102,15 +105,16 @@ class LiveGpuDock(QDockWidget):
         QTimer.singleShot(0, self.refresh_lm)
 
     @staticmethod
-    def _task(coro):
+    def _task(factory):
         try:
-            return asyncio.get_running_loop().create_task(coro)
+            loop = asyncio.get_running_loop()
         except RuntimeError:
             return None
+        return loop.create_task(factory())
 
     def refresh(self):
         if self._gpu_task is None or self._gpu_task.done():
-            self._gpu_task = self._task(self._refresh_gpu())
+            self._gpu_task = self._task(self._refresh_gpu)
 
     async def _refresh_gpu(self):
         try:
@@ -140,7 +144,7 @@ class LiveGpuDock(QDockWidget):
 
     def refresh_lm(self):
         if self._lm_task is None or self._lm_task.done():
-            self._lm_task = self._task(self._refresh_lm())
+            self._lm_task = self._task(self._refresh_lm)
 
     async def _refresh_lm(self):
         self.connection.setText("LM Studio: " + await asyncio.to_thread(get_lm_model))
