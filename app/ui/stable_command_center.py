@@ -9,6 +9,7 @@ thread and preventing overlapping health polls.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Coroutine
 import logging
 from typing import Any
 
@@ -34,7 +35,12 @@ class StableCommandCenterMainWindow(CommandCenterMainWindow):
         self._chat_tasks: set[asyncio.Task[Any]] = set()
         super().__init__(api_base_url=api_base_url)
 
-    def _spawn(self, coro: Any, *, track_chat: bool = False) -> asyncio.Task[Any] | None:
+    def _spawn(
+        self,
+        factory: Callable[[], Coroutine[Any, Any, Any]],
+        *,
+        track_chat: bool = False,
+    ) -> asyncio.Task[Any] | None:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -42,7 +48,7 @@ class StableCommandCenterMainWindow(CommandCenterMainWindow):
             logger.error("Command Center operation requested without a running asyncio loop")
             return None
 
-        task = loop.create_task(coro)
+        task = loop.create_task(factory())
         if track_chat:
             self._chat_tasks.add(task)
             task.add_done_callback(self._chat_tasks.discard)
@@ -51,7 +57,7 @@ class StableCommandCenterMainWindow(CommandCenterMainWindow):
     def _on_chat_message(self, message: str):
         """Queue a chat request without blocking the Qt event loop."""
         self.statusBar().showMessage(f"Sending: {message[:50]}...")
-        self._spawn(self._send_to_api(message), track_chat=True)
+        self._spawn(lambda: self._send_to_api(message), track_chat=True)
 
     async def _send_to_api(self, message: str):
         """Send chat to RedSight while offloading legacy memory-gateway calls."""
@@ -83,7 +89,7 @@ class StableCommandCenterMainWindow(CommandCenterMainWindow):
         """Start one health refresh at a time; skip timer ticks while one is active."""
         if self._dashboard_task is not None and not self._dashboard_task.done():
             return
-        task = self._spawn(self._update_dashboard_async())
+        task = self._spawn(self._update_dashboard_async)
         if task is not None:
             self._dashboard_task = task
 
