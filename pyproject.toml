@@ -71,7 +71,7 @@ tensorrt = [
 [project.scripts]
 redsight = "redsight.cli:main"
 redsight-server = "redsight.server:main"
-redsight-ui = "ui.command_center:main"
+redsight-ui = "redsight.ui:main"
 redsight-index = "scripts.index:main"
 redsight-benchmark = "scripts.benchmark:main"
 
