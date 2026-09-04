@@ -1,0 +1,72 @@
+name: RedSight quality gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install lightweight quality tools
+        run: python -m pip install --upgrade pip pytest ruff
+
+      - name: Validate package metadata without heavy runtime dependencies
+        run: python -m pip install -e . --no-deps
+
+      - name: Compile critical desktop modules
+        run: |
+          python -m py_compile \
+            app/ui/runtime_services.py \
+            app/ui/stable_command_center.py \
+            launch_redsight_command_center.py \
+            redsight/ui.py
+
+      - name: Run focused runtime unit tests
+        run: pytest -q tests/unit/test_ui_runtime_services.py
+
+      - name: Lint new stability surface
+        run: |
+          ruff check \
+            app/ui/runtime_services.py \
+            app/ui/stable_command_center.py \
+            redsight/ui.py \
+            tests/unit/test_ui_runtime_services.py
+
+      - name: Validate dependency and launcher contracts
+        run: |
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          data = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))
+          runtime = data['project']['dependencies']
+          dev = data['project']['optional-dependencies']['dev']
+          scripts = data['project']['scripts']
+
+          assert scripts['redsight-ui'] == 'redsight.ui:main'
+          assert any(item.startswith('qasync') for item in runtime), 'qasync must be a runtime dependency'
+          assert any(item.startswith('nvidia-ml-py') for item in runtime), 'maintained NVML binding missing'
+          assert not any(item.startswith('pynvml') for item in runtime), 'deprecated pynvml distribution still present'
+          for tool in ('pytest', 'pytest-asyncio', 'pytest-cov', 'ruff', 'mypy'):
+              assert not any(item.startswith(tool) for item in runtime), f'{tool} leaked into runtime dependencies'
+          assert any(item.startswith('pytest') for item in dev)
+
+          launcher = Path('launch_redsight_command_center.py').read_text(encoding='utf-8')
+          assert 'from app.ui.command_center import CommandCenterMainWindow' in launcher
+          assert '# REDSIGHT_STAGE112_UI_EXTENSION' in launcher
+          assert '# REDSIGHT_BRANDING_STAGE104_BEGIN' in launcher
+          assert 'StableCommandCenterMainWindow' in launcher
+          PY

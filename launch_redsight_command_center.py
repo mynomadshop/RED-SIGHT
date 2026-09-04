@@ -1,29 +1,27 @@
+from __future__ import annotations
+
 # REDSIGHT_STAGE102_HIDPI_BEGIN
 import os as _redsight_os
-_redsight_os.environ.setdefault('QT_AUTO_SCREEN_SCALE_FACTOR', '1')
-_redsight_os.environ.setdefault('QT_SCALE_FACTOR_ROUNDING_POLICY', 'PassThrough')
+_redsight_os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+_redsight_os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
 # REDSIGHT_STAGE102_HIDPI_END
-from pathlib import Path
+
 import asyncio
-import csv
-import io
-import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
-import subprocess
+from pathlib import Path
 import sys
-import urllib.request
 
-ROOT = r"C:\Users\walim\RedSight"
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
-
-# ------------------------------------------------------------
-# Explicit local-service wiring
-# ------------------------------------------------------------
-os.environ["REDSIGHT_API_URL"] = "http://127.0.0.1:8000"
-os.environ["REDSIGHT_API_BASE_URL"] = "http://127.0.0.1:8000"
-os.environ["API_BASE_URL"] = "http://127.0.0.1:8000"
+os.environ.setdefault("REDSIGHT_API_URL", "http://127.0.0.1:8000")
+os.environ.setdefault("REDSIGHT_API_BASE_URL", "http://127.0.0.1:8000")
+os.environ.setdefault("API_BASE_URL", "http://127.0.0.1:8000")
+os.environ.setdefault("LM_STUDIO_URL", "http://127.0.0.1:1234")
+os.environ.setdefault("LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -33,408 +31,202 @@ from PySide6.QtWidgets import (
     QLabel,
     QTableWidget,
     QTableWidgetItem,
-    QWidget,
     QVBoxLayout,
+    QWidget,
 )
-
 from qasync import QEventLoop
 
+# Keep this exact legacy import anchor: historical RedSight repair/heritage tools
+# intentionally locate it when applying additive UI integrations.
 from app.ui.command_center import CommandCenterMainWindow
-from app.ui.action_palette_stage103 import install_action_hooks, attach_action_palette
-install_action_hooks(CommandCenterMainWindow)
+from app.ui.action_palette_stage103 import attach_action_palette, install_action_hooks
 from app.ui.heritage_panel import attach_heritage_ui
+from app.ui.runtime_services import get_lm_model, query_nvidia
+from app.ui.stable_command_center import StableCommandCenterMainWindow
+
+CommandCenterMainWindow = StableCommandCenterMainWindow
+install_action_hooks(CommandCenterMainWindow)
 
 # REDSIGHT_STAGE112_UI_EXTENSION
-# Additive UI extensions are injected above this line by the installer's app
-# overlay (installer/app-overlay/Apply-AppOverlay.ps1). Keep the marker: without
-# it the overlay has nowhere to attach, and appending at the end of this file
-# would put the hooks after the blocking Qt event loop, where they never run.
+# Installer overlays attach above this compatibility marker.
 
 
-def get_lm_model():
-    try:
-        with urllib.request.urlopen(
-            "http://127.0.0.1:1234/v1/models",
-            timeout=3.0,
-        ) as response:
-            data = json.load(response)
-
-        models = data.get("data", [])
-
-        if models:
-            return models[0].get("id", "available")
-
-        return "server online / no model listed"
-    except Exception as exc:
-        return "OFFLINE: " + str(exc)
-
-
-def query_nvidia():
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-    command = [
-        "nvidia-smi",
-        "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
-        "--format=csv,noheader,nounits",
-    ]
-
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=4,
-        creationflags=creationflags,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "nvidia-smi failed")
-
-    rows = []
-
-    reader = csv.reader(io.StringIO(result.stdout))
-
-    for raw in reader:
-        if len(raw) < 7:
-            continue
-
-        values = [value.strip() for value in raw]
-
-        def number(value, default=0.0):
-            try:
-                return float(value)
-            except Exception:
-                return default
-
-        used = number(values[3])
-        total = number(values[4])
-        vram_percent = (used / total * 100.0) if total else 0.0
-
-        rows.append({
-            "index": values[0],
-            "name": values[1],
-            "util": number(values[2]),
-            "used": used,
-            "total": total,
-            "vram_percent": vram_percent,
-            "temp": number(values[5]),
-            "power": number(values[6]),
-        })
-
-    return rows
+def configure_runtime_logging() -> None:
+    local_appdata = Path(os.environ.get("LOCALAPPDATA", str(ROOT)))
+    log_dir = local_appdata / "RedSight" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "desktop-runtime.log"
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    if not any(
+        isinstance(handler, RotatingFileHandler)
+        and Path(getattr(handler, "baseFilename", "")) == log_path
+        for handler in root_logger.handlers
+    ):
+        handler = RotatingFileHandler(
+            log_path,
+            maxBytes=2 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        root_logger.addHandler(handler)
 
 
 class LiveGpuDock(QDockWidget):
+    """Dual-GPU telemetry that never waits for subprocess/network I/O on Qt."""
+
     def __init__(self, parent=None):
         super().__init__("LIVE DUAL-GPU TELEMETRY", parent)
+        self._gpu_task: asyncio.Task | None = None
+        self._lm_task: asyncio.Task | None = None
 
         container = QWidget()
         layout = QVBoxLayout(container)
-
-        self.connection = QLabel()
-        self.connection.setText(
-            "LM Studio: " + get_lm_model()
-        )
-
+        self.connection = QLabel("LM Studio: checking...")
         layout.addWidget(self.connection)
 
         self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels([
-            "GPU",
-            "Name",
-            "GPU Util",
-            "VRAM",
-            "Temp",
-            "Power",
-        ])
-
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-
+        self.table.setHorizontalHeaderLabels(["GPU", "Name", "GPU Util", "VRAM", "Temp", "Power"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
 
         self.summary = QLabel("Waiting for NVIDIA telemetry...")
         layout.addWidget(self.summary)
-
         self.setWidget(container)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
-        self.timer.start(1000)
-
+        self.timer.start(1500)
         self.lm_timer = QTimer(self)
         self.lm_timer.timeout.connect(self.refresh_lm)
         self.lm_timer.start(10000)
+        QTimer.singleShot(0, self.refresh)
+        QTimer.singleShot(0, self.refresh_lm)
 
-        self.refresh()
-
-    def refresh_lm(self):
-        self.connection.setText(
-            "LM Studio: " + get_lm_model()
-        )
+    @staticmethod
+    def _task(factory):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        return loop.create_task(factory())
 
     def refresh(self):
+        if self._gpu_task is None or self._gpu_task.done():
+            self._gpu_task = self._task(self._refresh_gpu)
+
+    async def _refresh_gpu(self):
         try:
-            rows = query_nvidia()
+            rows = await asyncio.to_thread(query_nvidia)
         except Exception as exc:
+            logging.getLogger(__name__).debug("GPU telemetry unavailable: %s", exc)
             self.summary.setText("GPU telemetry error: " + str(exc))
             return
 
         self.table.setRowCount(len(rows))
-
-        summary_parts = []
-
+        summary = []
         for row_index, gpu in enumerate(rows):
             values = [
-                "GPU " + str(gpu["index"]),
-                gpu["name"],
-                "{:.0f}%".format(gpu["util"]),
-                "{:.0f}/{:.0f} MiB ({:.1f}%)".format(
-                    gpu["used"],
-                    gpu["total"],
-                    gpu["vram_percent"],
-                ),
-                "{:.0f} C".format(gpu["temp"]),
-                "{:.1f} W".format(gpu["power"]),
+                f"GPU {gpu['index']}",
+                str(gpu["name"]),
+                f"{float(gpu['util']):.0f}%",
+                f"{float(gpu['used']):.0f}/{float(gpu['total']):.0f} MiB ({float(gpu['vram_percent']):.1f}%)",
+                f"{float(gpu['temp']):.0f} C",
+                f"{float(gpu['power']):.1f} W",
             ]
-
             for column, value in enumerate(values):
-                self.table.setItem(
-                    row_index,
-                    column,
-                    QTableWidgetItem(value),
-                )
-
-            summary_parts.append(
-                "GPU{} {:.0f}% | VRAM {:.1f}%".format(
-                    gpu["index"],
-                    gpu["util"],
-                    gpu["vram_percent"],
-                )
+                self.table.setItem(row_index, column, QTableWidgetItem(value))
+            summary.append(
+                f"GPU{gpu['index']} {float(gpu['util']):.0f}% | VRAM {float(gpu['vram_percent']):.1f}%"
             )
+        self.summary.setText("   ||   ".join(summary) or "No NVIDIA GPUs reported")
 
-        self.summary.setText("   ||   ".join(summary_parts))
+    def refresh_lm(self):
+        if self._lm_task is None or self._lm_task.done():
+            self._lm_task = self._task(self._refresh_lm)
+
+    async def _refresh_lm(self):
+        self.connection.setText("LM Studio: " + await asyncio.to_thread(get_lm_model))
+
+    def closeEvent(self, event):  # noqa: N802
+        self.timer.stop()
+        self.lm_timer.stop()
+        for task in (self._gpu_task, self._lm_task):
+            if task is not None and not task.done():
+                task.cancel()
+        super().closeEvent(event)
 
 
-app = QApplication.instance()
-
-if app is None:
-    app = QApplication(sys.argv)
-
-# ------------------------------------------------------------
-# qasync provides the asyncio loop used by asyncio.create_task.
-# This deliberately replaces PySide6.QtAsyncio/QAsyncioTask.
-# ------------------------------------------------------------
-
-# REDSIGHT_CONTRAST_V2
+configure_runtime_logging()
+app = QApplication.instance() or QApplication(sys.argv)
 app.setStyle("Fusion")
-
-app.setStyleSheet(r"""
-QWidget {
-    background-color: #080D13;
-    color: #F5F8FA;
-    font-size: 13px;
+app.setStyleSheet(
+    """
+QWidget { background-color: #080D13; color: #F5F8FA; font-size: 13px; }
+QMainWindow { background-color: #060A0F; }
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {
+    background-color: #101A24; color: #FFFFFF; border: 1px solid #6688A5;
+    border-radius: 6px; padding: 7px;
 }
-
-QMainWindow {
-    background-color: #060A0F;
-}
-
-QLabel {
-    color: #F7FAFC;
-    background: transparent;
-}
-
-QLineEdit,
-QTextEdit,
-QPlainTextEdit,
-QComboBox {
-    background-color: #101A24;
-    color: #FFFFFF;
-    border: 1px solid #6688A5;
-    border-radius: 6px;
-    padding: 7px;
-    selection-background-color: #1976D2;
-    selection-color: white;
-}
-
-QLineEdit:focus,
-QTextEdit:focus,
-QPlainTextEdit:focus {
-    border: 2px solid #64B5F6;
-}
-
 QPushButton {
-    background-color: #1565C0;
-    color: white;
-    border: 1px solid #64B5F6;
-    border-radius: 6px;
-    padding: 8px 13px;
-    font-weight: bold;
+    background-color: #1565C0; color: white; border: 1px solid #64B5F6;
+    border-radius: 6px; padding: 8px 13px; font-weight: bold;
 }
-
-QPushButton:hover {
-    background-color: #1976D2;
-}
-
-QPushButton:pressed {
-    background-color: #0D47A1;
-}
-
-QGroupBox {
-    background-color: #101923;
-    color: white;
-    border: 1px solid #526D82;
-    border-radius: 7px;
-    margin-top: 10px;
-    padding-top: 8px;
-    font-weight: bold;
-}
-
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 5px;
-}
-
-QTableWidget,
-QTableView,
-QTreeWidget,
-QListWidget {
-    background-color: #0D151D;
-    alternate-background-color: #15212C;
-    color: white;
-    gridline-color: #496276;
-    border: 1px solid #526D82;
-    selection-background-color: #1565C0;
-    selection-color: white;
-}
-
-QHeaderView::section {
-    background-color: #1A2A38;
-    color: white;
-    border: 1px solid #526D82;
-    padding: 7px;
-    font-weight: bold;
-}
-
-QTabWidget::pane {
-    background-color: #0D151D;
+QPushButton:hover { background-color: #1976D2; }
+QTableWidget, QTableView, QTreeWidget, QListWidget {
+    background-color: #0D151D; color: white; gridline-color: #496276;
     border: 1px solid #526D82;
 }
-
-QTabBar::tab {
-    background-color: #172431;
-    color: #DCE7F0;
-    padding: 8px 13px;
-    border: 1px solid #455E73;
-}
-
-QTabBar::tab:selected {
-    background-color: #1565C0;
-    color: white;
-}
-
-QProgressBar {
-    background-color: #101820;
-    color: white;
-    border: 1px solid #607D8B;
-    border-radius: 5px;
-    text-align: center;
-}
-
-QProgressBar::chunk {
-    background-color: #1976D2;
-}
-
-QStatusBar {
-    background-color: #070C11;
-    color: #E8F1F8;
-    border-top: 1px solid #455E73;
-}
-
-QDockWidget::title {
-    background-color: #172838;
-    color: white;
-    padding: 7px;
-    font-weight: bold;
-}
-
-QToolTip {
-    background-color: #182A38;
-    color: white;
-    border: 1px solid #90CAF9;
-}
-""")
+QHeaderView::section { background-color: #1A2A38; color: white; padding: 7px; font-weight: bold; }
+QTabBar::tab { background-color: #172431; color: #DCE7F0; padding: 8px 13px; }
+QTabBar::tab:selected { background-color: #1565C0; color: white; }
+QStatusBar { background-color: #070C11; color: #E8F1F8; }
+QDockWidget::title { background-color: #172838; color: white; padding: 7px; font-weight: bold; }
+"""
+)
 
 loop = QEventLoop(app)
 asyncio.set_event_loop(loop)
-
 window = CommandCenterMainWindow()
+
 # REDSIGHT_BRANDING_STAGE104_BEGIN
 try:
     import ctypes as _redsight_ctypes
     from PySide6.QtGui import QIcon as _RedSightQIcon
-    from PySide6.QtWidgets import QApplication as _RedSightQApplication
-    _redsight_ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("RedSight.CommandCenter")
-    _redsight_icon_path = Path(r"C:\Users\walim\RedSight\assets\redsight.ico")
-    _redsight_icon = _RedSightQIcon(str(_redsight_icon_path))
-    _redsight_app = _RedSightQApplication.instance()
-    if _redsight_app is not None:
-        _redsight_app.setApplicationName("REDSIGHT")
-        _redsight_app.setApplicationDisplayName("REDSIGHT")
-        _redsight_app.setOrganizationName("REDSIGHT")
-        if not _redsight_icon.isNull():
-            _redsight_app.setWindowIcon(_redsight_icon)
+
+    if sys.platform == "win32":
+        _redsight_ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("RedSight.CommandCenter")
+    icon = _RedSightQIcon(str(ROOT / "assets" / "redsight.ico"))
+    app.setApplicationName("REDSIGHT")
+    app.setApplicationDisplayName("REDSIGHT")
+    app.setOrganizationName("REDSIGHT")
     window.setWindowTitle("REDSIGHT — Local Intelligence Command Center")
-    if not _redsight_icon.isNull():
-        window.setWindowIcon(_redsight_icon)
-except Exception as _redsight_brand_error:
-    print(f'REDSIGHT_BRANDING_WARNING={_redsight_brand_error}')
+    if not icon.isNull():
+        app.setWindowIcon(icon)
+        window.setWindowIcon(icon)
+except Exception as exc:
+    logging.getLogger(__name__).warning("REDSIGHT branding warning: %s", exc)
 # REDSIGHT_BRANDING_STAGE104_END
-attach_action_palette(window, Path(__file__).resolve().parent)
-attach_heritage_ui(window, Path(__file__).resolve().parent)
-# Force RedSight localhost backend where supported by the class.
-for attr in (
-    "_api_base_url",
-    "api_base_url",
-    "_base_url",
-):
+
+attach_action_palette(window, ROOT)
+attach_heritage_ui(window, ROOT)
+for attr in ("_api_base_url", "api_base_url", "_base_url"):
     if hasattr(window, attr):
-        try:
-            setattr(window, attr, "http://127.0.0.1:8000")
-        except Exception:
-            pass
+        setattr(window, attr, os.environ["REDSIGHT_API_BASE_URL"])
 
-# ------------------------------------------------------------
-# Accurate host telemetry dock.
-# ------------------------------------------------------------
 gpu_dock = LiveGpuDock(window)
-window.addDockWidget(
-    Qt.DockWidgetArea.RightDockWidgetArea,
-    gpu_dock,
-)
-
-# Keep references alive.
+window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, gpu_dock)
 window._redsight_live_gpu_dock = gpu_dock
 window._redsight_qasync_loop = loop
-
-try:
-    status = window.statusBar()
-    status.showMessage(
-        "RedSight API: 127.0.0.1:8000  |  "
-        "LM Studio: 127.0.0.1:1234  |  "
-        "qasync event loop active"
-    )
-except Exception:
-    pass
-
+window.statusBar().showMessage(
+    "RedSight API: 127.0.0.1:8000  |  LM Studio: 127.0.0.1:1234  |  qasync event loop active"
+)
 window.show()
-
 print("COMMAND_CENTER_WINDOW_SHOWN=YES", flush=True)
 print("EVENT_LOOP=QASYNC", flush=True)
-print("LM_STUDIO_MODEL=" + get_lm_model(), flush=True)
+print("PROJECT_ROOT=" + str(ROOT), flush=True)
 
 app.aboutToQuit.connect(loop.stop)
-
 with loop:
     loop.run_forever()
