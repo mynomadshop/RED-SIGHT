@@ -280,7 +280,7 @@ jobs:
           Write-Host 'uninstall removed the virtual environments'
 
       - name: Upload release zip
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: RedSightDesktopWindows-${{ env.RS_VERSION }}
           path: |
@@ -293,7 +293,7 @@ jobs:
 
       - name: Upload setup logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: setup-logs-${{ env.RS_VERSION }}
           path: |
