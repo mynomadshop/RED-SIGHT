@@ -20,8 +20,14 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("REDSIGHT_API_URL", "http://127.0.0.1:8000")
 os.environ.setdefault("REDSIGHT_API_BASE_URL", "http://127.0.0.1:8000")
 os.environ.setdefault("API_BASE_URL", "http://127.0.0.1:8000")
-os.environ.setdefault("LM_STUDIO_URL", "http://127.0.0.1:1234")
-os.environ.setdefault("LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
+_lm_studio_base_url = (
+    os.environ.get("RED_SIGHT_LMSTUDIO__BASE_URL")
+    or os.environ.get("LM_STUDIO_BASE_URL")
+    or f"{os.environ.get('LM_STUDIO_URL', 'http://127.0.0.1:1234').rstrip('/')}/v1"
+)
+os.environ["LM_STUDIO_BASE_URL"] = _lm_studio_base_url
+os.environ["RED_SIGHT_LMSTUDIO__BASE_URL"] = _lm_studio_base_url
+os.environ.setdefault("LM_STUDIO_URL", _lm_studio_base_url.removesuffix("/v1"))
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -44,7 +50,7 @@ from app.ui.heritage_panel import attach_heritage_ui
 from app.ui.runtime_services import get_lm_model, query_nvidia
 from app.ui.stable_command_center import StableCommandCenterMainWindow
 
-CommandCenterMainWindow = StableCommandCenterMainWindow
+CommandCenterMainWindow = StableCommandCenterMainWindow  # noqa: F811 - compatibility alias
 install_action_hooks(CommandCenterMainWindow)
 
 # REDSIGHT_STAGE112_UI_EXTENSION

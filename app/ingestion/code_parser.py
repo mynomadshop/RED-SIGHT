@@ -96,7 +96,7 @@ class CodeParser:
         try:
             tree = ast.parse(source)
         except SyntaxError:
-            logger.warning(f"Syntax error in source, falling back to regex")
+            logger.warning("Syntax error in source, falling back to regex")
             return self._extract_symbols_regex(source)
 
         # Module-level docstring

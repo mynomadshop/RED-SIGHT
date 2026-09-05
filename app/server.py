@@ -9,8 +9,9 @@ Initializes the full knowledge pipeline (Qdrant + SQLite + Embeddings).
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
@@ -24,6 +25,27 @@ from app.retrieval.embedding_loader import EmbeddingModelLoader
 from app.retrieval.hybrid_search import HybridSearchEngine
 from app.retrieval.source_viewer import SourceViewer
 from app.api.routes.search import set_search_engine
+
+if TYPE_CHECKING:
+    from app.ingestion.indexer import Indexer
+    from app.intelligence import ProjectIntelligence
+    from app.learning import ControlledLearning
+    from app.memory import MemoryStore
+    from app.models.cloud_providers import CloudProviderRegistry
+    from app.monitoring.system_monitor import SystemMonitor
+    from app.orchestration.agent import AgentOrchestrator
+    from app.orchestration.multi_agent import MultiAgentOrchestrator
+    from app.plugins import PluginEventBus, PluginManager
+    from app.retrieval.context_budgeter import ContextBudgeter
+    from app.retrieval.reranker import CrossEncoderReranker
+    from app.retrieval.sparse_retrieval import BM25Index
+    from app.security.audit import AuditLogger
+    from app.security.permissions import PermissionChecker
+    from app.skills.discovery import SemanticSkillDiscovery
+    from app.skills.registry import SkillRegistry
+    from app.skills.sandbox import SkillSandbox
+    from app.tools.builtin import ToolRegistry
+    from app.websocket import WebSocketHub
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +94,9 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler — startup and shutdown."""
     global gpu_telemetry, lmstudio_provider, job_scheduler
     global qdrant, metadata_db, search_engine, source_viewer
-    global learning_engine
+    global learning_engine, project_intelligence
+    global cloud_providers, multi_agent_orchestrator, system_monitor
+    global ws_hub, memory_store, plugin_manager
 
     # Startup
     logger.info("RedSight starting up...")
@@ -90,6 +114,10 @@ async def lifespan(app: FastAPI):
 
     # Initialize job scheduler
     job_scheduler = JobSchedulerImpl(gpu_telemetry=gpu_telemetry)
+    from app.api.routes.gpu_scheduler import set_gpu_telemetry, set_job_scheduler
+
+    set_gpu_telemetry(gpu_telemetry)
+    set_job_scheduler(job_scheduler)
     
     # Phase 6: Controlled Learning
     from app.learning import ControlledLearning, SafetyBoundary
@@ -100,6 +128,9 @@ async def lifespan(app: FastAPI):
         procedural_memory=None,
     )
     globals()["learning_engine"] = learning_engine
+    from app.api.routes.controlled_learning import set_learning_engine
+
+    set_learning_engine(learning_engine)
     logger.info("Controlled learning engine initialized")
 
     # ── Phase 1: Knowledge Pipeline ─────────────────────────────
@@ -107,11 +138,16 @@ async def lifespan(app: FastAPI):
 
     # 1. Qdrant
     logger.info("Initializing Qdrant...")
+    embedded_path = (
+        settings.retrieval.vector_backend_path
+        or str(settings.data_root_path / "qdrant_db")
+    )
     qdrant = QdrantClientWrapper(
-        url=__import__("os").environ.get("VECTOR_BACKEND_URL") or getattr(settings.retrieval, "vector_backend_url", None),
-        host=__import__("os").environ.get("VECTOR_BACKEND_HOST") or getattr(settings.retrieval, "vector_backend_host", None) or "qdrant",
-        port=int(__import__("os").environ.get("VECTOR_BACKEND_PORT") or getattr(settings.retrieval, "vector_backend_port", 6333) or 6333),
-        embedded=((__import__("os").environ.get("VECTOR_BACKEND_EMBEDDED") or str(getattr(settings.retrieval, "vector_backend_embedded", "false"))).strip().lower() in ("1", "true", "yes", "on")),
+        url=settings.retrieval.vector_backend_url,
+        host=settings.retrieval.vector_backend_host,
+        port=settings.retrieval.vector_backend_port,
+        embedded=settings.retrieval.vector_backend_embedded,
+        embedded_path=embedded_path,
     )
     if await qdrant.connect():
         await qdrant.ensure_collections()
@@ -121,7 +157,7 @@ async def lifespan(app: FastAPI):
 
     # 2. SQLite metadata DB
     logger.info("Initializing metadata database...")
-    metadata_db = MetadataDB(db_path=settings.platform.data_root + "/metadata.db")
+    metadata_db = MetadataDB(db_path=str(settings.data_root_path / "metadata.db"))
     if await metadata_db.init_db():
         logger.info("Metadata DB ready")
     else:
@@ -129,11 +165,11 @@ async def lifespan(app: FastAPI):
 
     # 3. Embedding model
     embedding_model = None
-    if getattr(settings.retrieval, "enable_embeddings", False):
+    if settings.retrieval.enable_embeddings:
         logger.info("Loading embedding model...")
         loader = EmbeddingModelLoader(
             model_name=settings.retrieval.embedding_model or "sentence-transformers/all-MiniLM-L6-v2",
-            lmstudio_url=settings.lmstudio.base_url.replace("/v1", "/v1") if settings.lmstudio.base_url else None,
+            lmstudio_url=settings.lmstudio.base_url or None,
         )
         if await loader.load():
             embedding_model = loader.model
@@ -204,7 +240,7 @@ async def lifespan(app: FastAPI):
 
     # 11. Audit logger
     from app.security.audit import AuditLogger
-    audit_logger = AuditLogger(log_path=settings.platform.data_root + "/audit.log")
+    audit_logger = AuditLogger(log_path=str(settings.data_root_path / "audit.log"))
     globals()["audit_logger"] = audit_logger
     logger.info("Audit logger initialized")
 
@@ -318,7 +354,7 @@ async def lifespan(app: FastAPI):
                 },
                 "required": ["command"],
             },
-            "permissions": ["read_only"],
+            "permissions": ["read_write"],
             "timeout_seconds": 60,
             "handler": _handle_run_command,
         },
@@ -566,6 +602,9 @@ async def lifespan(app: FastAPI):
     pi = ProjectIntelligence()
     project_intelligence = pi
     globals()["project_intelligence"] = pi
+    from app.api.routes.intelligence import set_project_intelligence
+
+    set_project_intelligence(pi)
     logger.info("Project intelligence initialized")
 
     # ── Phase 8: Cloud Providers, Multi-Agent, Monitoring ────────────
@@ -575,21 +614,26 @@ async def lifespan(app: FastAPI):
         CloudProviderRegistry, OpenAIProvider, AnthropicProvider, GoogleGeminiProvider,
     )
     cloud_registry = CloudProviderRegistry()
-    try:
-        oai = OpenAIProvider(api_key="test-key")
-        cloud_registry.register(oai)
-    except Exception as e:
-        logger.warning(f"Failed to register OpenAI provider: {e}")
-    try:
-        anth = AnthropicProvider(api_key="test-key")
-        cloud_registry.register(anth)
-    except Exception as e:
-        logger.warning(f"Failed to register Anthropic provider: {e}")
-    try:
-        gemini = GoogleGeminiProvider(api_key="test-key")
-        cloud_registry.register(gemini)
-    except Exception as e:
-        logger.warning(f"Failed to register Google provider: {e}")
+    if settings.is_cloud_allowed:
+        configured_providers = (
+            ("OpenAI", OpenAIProvider, os.getenv("OPENAI_API_KEY", "")),
+            ("Anthropic", AnthropicProvider, os.getenv("ANTHROPIC_API_KEY", "")),
+            (
+                "Google",
+                GoogleGeminiProvider,
+                os.getenv("GOOGLE_API_KEY", "") or os.getenv("GEMINI_API_KEY", ""),
+            ),
+        )
+        for name, provider_type, api_key in configured_providers:
+            if not api_key:
+                logger.info("%s cloud provider is not configured", name)
+                continue
+            try:
+                cloud_registry.register(provider_type(api_key=api_key))
+            except Exception as exc:
+                logger.warning("Failed to register %s provider: %s", name, exc)
+    else:
+        logger.info("Cloud providers disabled by local-first routing policy")
     cloud_providers = cloud_registry
     globals()["cloud_providers"] = cloud_providers
     logger.info(f"Cloud provider registry initialized with {len(cloud_registry.list_models())} models")
@@ -611,7 +655,7 @@ async def lifespan(app: FastAPI):
     from app.monitoring.system_monitor import SystemMonitor
     sys_monitor = SystemMonitor()
     def check_qdrant():
-        if qdrant:
+        if qdrant and qdrant.is_connected:
             return ("healthy", True, "Qdrant connected")
         return ("unhealthy", False, "Qdrant not connected")
     def check_embedding():
@@ -619,7 +663,7 @@ async def lifespan(app: FastAPI):
             return ("healthy", True, "Embedding model loaded")
         return ("degraded", True, "No embedding model")
     def check_lmstudio():
-        if lmstudio_provider:
+        if health:
             return ("healthy", True, "LM Studio reachable")
         return ("unhealthy", False, "LM Studio not reachable")
     sys_monitor.add_health_check("qdrant", check_qdrant)
@@ -632,7 +676,7 @@ async def lifespan(app: FastAPI):
     # ── Phase 9: WebSocket, Memory, Plugins ─────────────────────────
 
     # 21. WebSocket hub
-    from app.websocket import initialize_ws_hub, shutdown_ws_hub
+    from app.websocket import initialize_ws_hub
     ws_hub = await initialize_ws_hub()
     globals()["ws_hub"] = ws_hub
     logger.info("WebSocket hub initialized")
@@ -641,14 +685,14 @@ async def lifespan(app: FastAPI):
     from app.memory import MemoryStore
     mem_store = MemoryStore(
         metadata_db=metadata_db,
-        vector_client=qdrant if qdrant else None,
+        vector_client=qdrant if qdrant and qdrant.is_connected else None,
     )
     memory_store = mem_store
     globals()["memory_store"] = memory_store
     logger.info("Memory store initialized")
 
     # 23. Plugin system
-    from app.plugins import initialize_plugin_system, shutdown_plugin_system
+    from app.plugins import initialize_plugin_system
     plugin_mgr = await initialize_plugin_system(plugin_dir="plugins")
     plugin_manager = plugin_mgr
     globals()["plugin_manager"] = plugin_manager
@@ -670,19 +714,28 @@ async def lifespan(app: FastAPI):
 
     logger.info("RedSight started successfully with all 9 phases")
 
-    yield
+    try:
+        yield
+    finally:
+        # Always release threads, sockets, and provider clients, even when an
+        # application exception interrupts the lifespan context.
+        logger.info("RedSight shutting down...")
+        from app.plugins import shutdown_plugin_system
+        from app.websocket import shutdown_ws_hub
 
-    # Shutdown
-    logger.info("RedSight shutting down...")
-    if gpu_telemetry:
-        gpu_telemetry.shutdown()
-    if lmstudio_provider:
-        await lmstudio_provider.close()
-    if qdrant:
-        await qdrant.close()
-    if metadata_db:
-        await metadata_db.close()
-    logger.info("RedSight stopped")
+        await shutdown_plugin_system()
+        await shutdown_ws_hub()
+        if cloud_providers:
+            await cloud_providers.close()
+        if gpu_telemetry:
+            gpu_telemetry.shutdown()
+        if lmstudio_provider:
+            await lmstudio_provider.close()
+        if qdrant:
+            await qdrant.close()
+        if metadata_db:
+            await metadata_db.close()
+        logger.info("RedSight stopped")
 
 
 def create_app() -> FastAPI:
@@ -697,8 +750,10 @@ def create_app() -> FastAPI:
     )
 
     # Register routes
-    from app.api.routes import chat, health, gpu, jobs, models, search, sources
-    from app.api.routes import skills_tools, intelligence, gpu_scheduler, controlled_learning
+    from app.api.routes import chat, gpu, health, jobs, memory, models, search, sources
+    from app.api.routes import controlled_learning, gpu_scheduler, intelligence, skills_tools
+    from app.api.routes import websocket as websocket_routes
+
     app.include_router(health.router, prefix="/api/v1", tags=["health"])
     app.include_router(models.router, prefix="/api/v1", tags=["models"])
     app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
@@ -709,25 +764,9 @@ def create_app() -> FastAPI:
     app.include_router(skills_tools.router, prefix="/api/v1", tags=["skills-tools"])
     app.include_router(intelligence.router, prefix="/api/v1", tags=["intelligence"])
     app.include_router(gpu_scheduler.router, prefix="/api/v1", tags=["gpu-scheduler"])
-
-    # Wire Phase 4 project intelligence into routes
-    from app.api.routes.intelligence import set_project_intelligence
-    # Project intelligence is initialized in lifespan; wire it if available
-    pi = globals().get('project_intelligence')
-    if pi:
-        set_project_intelligence(pi)
-    
-    # Wire Phase 5 GPU scheduler into routes
-    from app.api.routes.gpu_scheduler import set_gpu_telemetry, set_job_scheduler
-    set_gpu_telemetry(gpu_telemetry)
-    set_job_scheduler(job_scheduler)
-    
-    # Wire Phase 6 Controlled Learning into routes
-    from app.api.routes.controlled_learning import set_learning_engine
-    # Learning engine is initialized in lifespan; wire it if available
-    le = globals().get('learning_engine')
-    if le:
-        set_learning_engine(le)
+    app.include_router(controlled_learning.router, prefix="/api/v1")
+    app.include_router(memory.router, prefix="/api/v1", tags=["memory"])
+    app.include_router(websocket_routes.router, prefix="/api/v1", tags=["websocket"])
 
     return app
 

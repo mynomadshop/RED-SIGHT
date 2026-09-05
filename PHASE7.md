@@ -150,7 +150,7 @@ RedSight Platform (Phase 7)
 
 3. **Pydantic models for POST bodies**: FastAPI POST endpoints must use Pydantic request models, not bare function parameters for body data.
 
-4. **Route ordering**: Static routes (e.g., `/jobs/queue-depth`) must precede parameterized routes (e.g., `/jobs/{job_id}`) to prevent routing conflicts.
+4. **Route namespaces**: GPU-scheduled jobs live below `/scheduler/jobs`, separate from indexing jobs below `/jobs`.
 
 ## Platform Status
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 import csv
 import io
 import json
-import os
 import subprocess
 import urllib.request
 from typing import Any
@@ -110,7 +109,9 @@ def query_nvidia(timeout: float = 4.0) -> list[dict[str, float | str]]:
 
 def get_lm_model(timeout: float = 3.0) -> str:
     """Return the first LM Studio model id, or a concise offline status."""
-    base_url = os.environ.get("LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1").rstrip("/")
+    from app.config.settings import get_settings
+
+    base_url = get_settings().lmstudio.base_url.rstrip("/")
     request = urllib.request.Request(
         f"{base_url}/models",
         headers={"Accept": "application/json"},

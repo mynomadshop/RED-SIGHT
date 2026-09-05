@@ -229,7 +229,7 @@ class Indexer:
                 logger.info(f"Indexed {len(embedded_chunks)} chunks into BM25")
 
             # ── Step 6: Quality gate ──────────────────────────────
-            logger.info(f"Step 6: Quality gate")
+            logger.info("Step 6: Quality gate")
             valid_chunks = []
             for ec in embedded_chunks:
                 # Reject empty content

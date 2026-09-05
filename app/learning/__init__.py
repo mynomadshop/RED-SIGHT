@@ -274,7 +274,7 @@ class ControlledLearning:
             return None
         
         if target_trust.value <= event.trust_level.value:
-            logger.warning(f"Cannot promote: target must be higher than current")
+            logger.warning("Cannot promote: target must be higher than current")
             return None
         
         # Safety check

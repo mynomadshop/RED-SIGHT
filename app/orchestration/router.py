@@ -92,7 +92,9 @@ class ModelToolRouter:
         
         # VRAM headroom bonus
         headroom_gb = self._settings.routing.vram_headroom_gb_per_gpu
-        if model.vram_usage_mb < (model.total_vram_mb - headroom_gb * 1024):
+        if model.total_vram_mb > 0 and model.vram_usage_mb < (
+            model.total_vram_mb - headroom_gb * 1024
+        ):
             score += 20.0
         
         # Context size bonus (larger is better for complex tasks)

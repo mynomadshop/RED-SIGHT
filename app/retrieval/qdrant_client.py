@@ -90,21 +90,16 @@ class QdrantClientWrapper:
 
             if self._embedded:
                 # Embedded mode — runs in-process, no server needed
-                from qdrant_client import models as qmodels
-
                 self._client = QdrantClient(
                     path=self._embedded_path,
-                    vector_size=self._vector_size,
-                    distance=models.Distance.COSINE,
                 )
                 logger.info("Qdrant connected in EMBEDDED mode (local DB)")
             else:
-                connect_kwargs: Dict[str, Any] = {
-                    "host": self._host,
-                    "port": self._port,
-                }
                 if self._url:
-                    connect_kwargs["url"] = self._url
+                    # qdrant-client rejects URL and host supplied together.
+                    connect_kwargs: Dict[str, Any] = {"url": self._url}
+                else:
+                    connect_kwargs = {"host": self._host, "port": self._port}
                 if self._api_key:
                     connect_kwargs["api_key"] = self._api_key
 
@@ -137,8 +132,6 @@ class QdrantClientWrapper:
 
             self._client = QdrantClient(
                 path=self._embedded_path,
-                vector_size=self._vector_size,
-                distance=models.Distance.COSINE,
             )
             collections = self._client.get_collections().collections
             self._collections = {c.name for c in collections}

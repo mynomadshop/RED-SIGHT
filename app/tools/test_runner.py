@@ -9,9 +9,11 @@ Runs unit tests, integration tests, and regression tests.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +44,8 @@ class TestResult:
 @dataclass
 class TestSuite:
     """Result of a test suite run."""
+    __test__ = False
+
     name: str
     total: int = 0
     passed: int = 0
@@ -50,6 +54,14 @@ class TestSuite:
     results: List[TestResult] = field(default_factory=list)
     duration_ms: float = 0.0
     success: bool = True
+
+    def summarize(self) -> "TestSuite":
+        """Synchronize aggregate counters with detailed validation results."""
+        self.total = len(self.results)
+        self.passed = sum(result.passed for result in self.results)
+        self.failed = self.total - self.passed
+        self.success = self.total > 0 and self.failed == 0
+        return self
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -75,6 +87,7 @@ class TestRunner:
     - Skill-specific validation
     - Regression testing
     """
+    __test__ = False
 
     def __init__(self, project_root: str = "."):
         self._project_root = Path(project_root)
@@ -89,25 +102,38 @@ class TestRunner:
     async def run_suite(self, name: str) -> TestSuite:
         """Run a registered test suite."""
         if name not in self._test_suites:
-            return TestSuite(name=name, success=False, error=f"Suite '{name}' not found")
+            return TestSuite(
+                name=name,
+                total=1,
+                failed=1,
+                results=[TestResult(
+                    name="suite_exists",
+                    passed=False,
+                    error=f"Suite '{name}' not found",
+                )],
+                success=False,
+            )
 
         start_time = time.time()
         suite = TestSuite(name=name)
 
         try:
-            # Run pytest
-            test_paths = " ".join(self._test_suites[name])
+            # Pass each node/path directly to pytest. Avoid a shell so suite
+            # registration cannot become command execution.
+            test_paths = self._test_suites[name]
+            if not test_paths or any(not path or path.startswith("-") for path in test_paths):
+                raise ValueError("Test suites require one or more non-option pytest paths")
             result = subprocess.run(
-                f"python -m pytest {test_paths} -v --tb=short --timeout=60",
-                shell=True,
+                [sys.executable, "-m", "pytest", *test_paths, "-v", "--tb=short"],
                 capture_output=True,
                 text=True,
                 timeout=300,
                 cwd=str(self._project_root),
+                check=False,
             )
 
             # Parse results
-            output = result.stdout
+            output = "\n".join(part for part in (result.stdout, result.stderr) if part)
             lines = output.split("\n")
 
             for line in lines:
@@ -137,10 +163,21 @@ class TestRunner:
                     suite.skipped += 1
                     suite.total += 1
 
-            suite.success = suite.failed == 0
+            if result.returncode != 0 and suite.failed == 0:
+                suite.failed = 1
+                suite.total += 1
+                suite.results.append(TestResult(
+                    name="pytest",
+                    passed=False,
+                    error=f"pytest exited with status {result.returncode}",
+                    output=output,
+                ))
+            suite.success = result.returncode == 0 and suite.failed == 0
 
         except subprocess.TimeoutExpired:
             suite.success = False
+            suite.failed += 1
+            suite.total += 1
             suite.results.append(TestResult(
                 name=name,
                 passed=False,
@@ -148,6 +185,8 @@ class TestRunner:
             ))
         except Exception as e:
             suite.success = False
+            suite.failed += 1
+            suite.total += 1
             suite.results.append(TestResult(
                 name=name,
                 passed=False,
@@ -170,18 +209,18 @@ class TestRunner:
                     passed=False,
                     error="Tool registry not initialized",
                 ))
-                suite.success = False
-                return suite
+                return suite.summarize()
 
-            contract = await tool_registry.get(tool_name)
+            contract = tool_registry.get(tool_name)
+            if inspect.isawaitable(contract):
+                contract = await contract
             if not contract:
                 suite.results.append(TestResult(
                     name="tool_exists",
                     passed=False,
                     error=f"Tool {tool_name} not found",
                 ))
-                suite.success = False
-                return suite
+                return suite.summarize()
 
             # Test 1: Contract validation
             suite.results.append(TestResult(
@@ -204,7 +243,12 @@ class TestRunner:
                 ))
 
             # Test 3: Execution
-            result = await tool_registry.execute(tool_name, params)
+            result = await tool_registry.execute(
+                tool_name,
+                params,
+                permissions=["read_only"],
+                actor="user",
+            )
             if result.get("success"):
                 suite.results.append(TestResult(
                     name="execution",
@@ -217,10 +261,7 @@ class TestRunner:
                     error=result.get("error"),
                 ))
 
-            suite.success = all(r.passed for r in suite.results)
-
         except Exception as e:
-            suite.success = False
             suite.results.append(TestResult(
                 name="validation",
                 passed=False,
@@ -228,7 +269,7 @@ class TestRunner:
             ))
 
         suite.duration_ms = (time.time() - start_time) * 1000
-        return suite
+        return suite.summarize()
 
     async def validate_skill(self, skill_id: str) -> TestSuite:
         """Validate a specific skill."""
@@ -243,8 +284,7 @@ class TestRunner:
                     passed=False,
                     error="Skill registry not initialized",
                 ))
-                suite.success = False
-                return suite
+                return suite.summarize()
 
             manifest = await skill_registry.get(skill_id)
             if not manifest:
@@ -253,8 +293,7 @@ class TestRunner:
                     passed=False,
                     error=f"Skill {skill_id} not found",
                 ))
-                suite.success = False
-                return suite
+                return suite.summarize()
 
             # Test 1: Manifest validation
             is_valid, errors = manifest.validate()
@@ -291,10 +330,7 @@ class TestRunner:
                         error=result.error,
                     ))
 
-            suite.success = all(r.passed for r in suite.results)
-
         except Exception as e:
-            suite.success = False
             suite.results.append(TestResult(
                 name="validation",
                 passed=False,
@@ -302,7 +338,7 @@ class TestRunner:
             ))
 
         suite.duration_ms = (time.time() - start_time) * 1000
-        return suite
+        return suite.summarize()
 
     async def run_all(self) -> Dict[str, TestSuite]:
         """Run all registered test suites."""

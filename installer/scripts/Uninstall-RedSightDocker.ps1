@@ -66,7 +66,12 @@ if (Test-Path -LiteralPath $compose) {
     }
 }
 
-foreach ($image in @('redsight-qdrant:v1.19.0', 'redsight:latest', 'red-sight-redsight:latest')) {
+foreach ($image in @(
+    'redsight-qdrant:v1.19.1',
+    'redsight-qdrant:v1.19.0',
+    'redsight:latest',
+    'red-sight-redsight:latest'
+)) {
     & $docker.Source 'image' 'inspect' $image *> $null
     if ($LASTEXITCODE -eq 0) {
         Write-Line "docker image rm $image"

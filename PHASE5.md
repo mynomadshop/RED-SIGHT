@@ -70,14 +70,14 @@ Phase 5 adds **GPU Scheduler** — intelligent GPU workload scheduling that bala
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/gpu/status` | Get real-time GPU status |
-| GET | `/gpu/summary` | GPU summary for UI |
+| GET | `/scheduler/gpu/status` | Get scheduler GPU status |
+| GET | `/scheduler/gpu/summary` | Scheduler GPU summary for UI |
 | GET | `/gpu/best-for-model` | Find best GPU for model |
-| POST | `/jobs/submit` | Submit a job |
-| POST | `/jobs/cancel` | Cancel a job |
-| GET | `/jobs/{job_id}` | Get job status |
-| GET | `/jobs` | List jobs |
-| GET | `/jobs/queue-depth` | Get queue depth |
+| POST | `/scheduler/jobs/submit` | Submit a job |
+| POST | `/scheduler/jobs/cancel` | Cancel a job |
+| GET | `/scheduler/jobs/{job_id}` | Get job status |
+| GET | `/scheduler/jobs` | List jobs |
+| GET | `/scheduler/jobs/queue-depth` | Get queue depth |
 | POST | `/benchmarks/run` | Run a benchmark |
 | GET | `/benchmarks/profiles` | Get benchmark profiles |
 | GET | `/benchmarks/history` | Get benchmark history |

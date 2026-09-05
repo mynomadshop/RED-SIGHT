@@ -11,39 +11,46 @@ permissions:
 jobs:
   python-quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.12'
           cache: pip
 
-      - name: Install lightweight quality tools
-        run: python -m pip install --upgrade pip pytest ruff
+      - name: Install lightweight quality and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            pytest pytest-asyncio pytest-cov ruff httpx2 \
+            fastapi httpx pydantic pydantic-settings python-multipart \
+            sqlalchemy aiosqlite qdrant-client numpy psutil cryptography
 
       - name: Validate package metadata without heavy runtime dependencies
         run: python -m pip install -e . --no-deps
 
-      - name: Compile critical desktop modules
+      - name: Compile all shipped Python modules
         run: |
-          python -m py_compile \
-            app/ui/runtime_services.py \
-            app/ui/stable_command_center.py \
-            launch_redsight_command_center.py \
-            redsight/ui.py
+          python -m compileall -q \
+            app redsight redsight_actions ui scripts \
+            launch_redsight_command_center.py launch_redsight_isolated.py
 
-      - name: Run focused runtime unit tests
-        run: pytest -q tests/unit/test_ui_runtime_services.py
+      - name: Run complete test suite
+        run: pytest -q
 
-      - name: Lint new stability surface
+      - name: Reject release-critical Python errors
         run: |
           ruff check \
-            app/ui/runtime_services.py \
-            app/ui/stable_command_center.py \
-            redsight/ui.py \
-            tests/unit/test_ui_runtime_services.py
+            app redsight redsight_actions ui scripts \
+            launch_redsight_command_center.py launch_redsight_isolated.py \
+            --select E9,F63,F7,F82,F811,F541
+
+      - name: Lint maintained provider and regression surfaces
+        run: |
+          ruff check app/models tests/unit/test_runtime_hardening.py \
+            --select E4,E7,E9,F,I,B --ignore E501,F401
 
       - name: Validate dependency and launcher contracts
         run: |
@@ -56,13 +63,21 @@ jobs:
           dev = data['project']['optional-dependencies']['dev']
           scripts = data['project']['scripts']
 
+          assert data['project']['version'] == '11.6.0'
           assert scripts['redsight-ui'] == 'redsight.ui:main'
           assert any(item.startswith('qasync') for item in runtime), 'qasync must be a runtime dependency'
           assert any(item.startswith('nvidia-ml-py') for item in runtime), 'maintained NVML binding missing'
           assert not any(item.startswith('pynvml') for item in runtime), 'deprecated pynvml distribution still present'
+          assert any(item.startswith('openpyxl') for item in runtime), 'Excel parser dependency missing'
+          assert any(item.startswith('python-pptx') for item in runtime), 'PowerPoint parser dependency missing'
           for tool in ('pytest', 'pytest-asyncio', 'pytest-cov', 'ruff', 'mypy'):
               assert not any(item.startswith(tool) for item in runtime), f'{tool} leaked into runtime dependencies'
           assert any(item.startswith('pytest') for item in dev)
+          assert any(item.startswith('httpx2') for item in dev), 'Starlette TestClient dependency missing'
+
+          dockerfile = Path('Dockerfile').read_text(encoding='utf-8')
+          assert 'pip install --no-cache-dir .' in dockerfile
+          assert '.[dev]' not in dockerfile
 
           launcher = Path('launch_redsight_command_center.py').read_text(encoding='utf-8')
           assert 'from app.ui.command_center import CommandCenterMainWindow' in launcher

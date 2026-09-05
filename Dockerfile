@@ -22,19 +22,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python dependencies
-COPY pyproject.toml .
-RUN pip install --no-cache-dir ".[dev]"
-
-# Copy application code
+# Copy the complete installable package before building it. Installing from a
+# metadata-only layer can silently create an empty wheel.
+COPY pyproject.toml README.md ./
 COPY app/ app/
 COPY redsight/ redsight/
+COPY redsight_actions/ redsight_actions/
+COPY ui/ ui/
 COPY scripts/ scripts/
+RUN pip install --no-cache-dir .
 
 # Create data directory
 RUN mkdir -p /data
 
-EXPOSE 8000 6333
+EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health || exit 1

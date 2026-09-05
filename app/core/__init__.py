@@ -1,13 +1,9 @@
-"""
-RedSight - High-Performance Local AI Intelligence Platform
-Core Package
+"""Core interfaces and compatibility exports for RedSight."""
 
-Provides core system components:
-- Interfaces and abstract base classes
-- Configuration and settings
-- Capability registry
-- Security and authentication
-"""
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
 
 from app.core.interfaces import (
     Capability,
@@ -16,17 +12,9 @@ from app.core.interfaces import (
     AuditAction,
 )
 
-# SecurityPolicy and AuthProvider are defined in app.security module
-from app.security.policy import SecurityPolicy
-# AuthProvider is a stub for now - defined inline if needed
-class AuthProvider:
-    """Placeholder authentication provider interface."""
-    pass
 
-# SecretManager, PermissionChecker, AuditLogger are in app.security
-from app.security.secrets import SecretManager
-from app.security.permissions import PermissionChecker
-from app.security.audit import AuditLogger
+class AuthProvider:
+    """Compatibility placeholder for the future authentication interface."""
 
 __all__ = [
     "Capability",
@@ -39,3 +27,21 @@ __all__ = [
     "PermissionChecker",
     "AuditLogger",
 ]
+
+_SECURITY_EXPORTS = {
+    "SecurityPolicy": ("app.security.policy", "SecurityPolicy"),
+    "SecretManager": ("app.security.secrets", "SecretManager"),
+    "PermissionChecker": ("app.security.permissions", "PermissionChecker"),
+    "AuditLogger": ("app.security.audit", "AuditLogger"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Load legacy security exports only when callers explicitly request them."""
+    try:
+        module_name, attribute = _SECURITY_EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    value = getattr(import_module(module_name), attribute)
+    globals()[name] = value
+    return value

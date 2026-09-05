@@ -42,7 +42,6 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QMessageBox,
-    QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
     QInputDialog,

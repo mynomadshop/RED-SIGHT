@@ -9,6 +9,7 @@ Uses semantic discovery, permission checks, and audit logging.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from dataclasses import dataclass, field
@@ -139,13 +140,20 @@ class AgentOrchestrator:
                 })
 
                 # Get the tool's required permissions
-                tool_contract = await self._tool_registry.get(result.selected_tool)
+                # RedSight ships two compatible registries: the built-in registry
+                # exposes a synchronous lookup while the generic registry exposes
+                # an async one. Accept both contracts so orchestration does not
+                # fail merely because a caller selected the lightweight registry.
+                tool_contract = self._tool_registry.get(result.selected_tool)
+                if inspect.isawaitable(tool_contract):
+                    tool_contract = await tool_contract
                 required_perms = tool_contract.permissions if tool_contract else ["read_only"]
 
                 exec_result = await self._tool_registry.execute(
                     tool_name=result.selected_tool,
-                    params={"query": query},
+                    params=self._build_tool_params(query, tool_contract),
                     permissions=required_perms,
+                    actor=role,
                 )
 
                 result.output = exec_result
@@ -176,6 +184,29 @@ class AgentOrchestrator:
             ))
 
         return result
+
+    @staticmethod
+    def _build_tool_params(query: str, contract: ToolContract | None) -> Dict[str, Any]:
+        """Map a free-form query onto the simplest compatible tool contract.
+
+        Rich argument extraction belongs to the planner. This fallback keeps
+        direct orchestration useful for tools that accept one text field while
+        still allowing contract validation to reject ambiguous schemas.
+        """
+        if contract is None:
+            return {"query": query}
+
+        properties = contract.schema.get("properties", {})
+        required = contract.schema.get("required", [])
+        if "query" in properties:
+            return {"query": query}
+        if "text" in properties:
+            return {"text": query}
+        if len(required) == 1:
+            name = required[0]
+            if properties.get(name, {}).get("type") == "string":
+                return {name: query}
+        return {"query": query}
 
     async def _select_tool(self, query: str) -> Optional[str]:
         """Select the best tool for a query."""

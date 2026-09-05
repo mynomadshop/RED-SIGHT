@@ -464,7 +464,7 @@ async def initialize_plugin_system(plugin_dir: Optional[str] = None):
 
 async def shutdown_plugin_system():
     """Shutdown the plugin system."""
-    global plugin_manager
+    global plugin_manager, event_bus
     if plugin_manager:
         for plugin in list(plugin_manager.get_all_plugins()):
             await plugin_manager.unload_plugin(plugin.manifest.name)

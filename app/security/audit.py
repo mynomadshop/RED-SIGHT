@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.core.interfaces import AuditAction, AuditEvent
@@ -35,12 +36,20 @@ class AuditLogger:
 
         if log_path:
             try:
-                with open(log_path, "r") as f:
-                    self._events = [
-                        AuditEvent(**json.loads(line))
-                        for line in f
-                        if line.strip()
-                    ]
+                with Path(log_path).open("r", encoding="utf-8") as stream:
+                    for line_number, line in enumerate(stream, 1):
+                        if not line.strip():
+                            continue
+                        try:
+                            payload = json.loads(line)
+                            payload["action"] = AuditAction(payload["action"])
+                            self._events.append(AuditEvent(**payload))
+                        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                            logger.warning(
+                                "Skipping invalid audit record at line %s: %s",
+                                line_number,
+                                exc,
+                            )
                 logger.info(f"Audit log loaded: {len(self._events)} events")
             except FileNotFoundError:
                 logger.info("Audit log file not found, starting fresh")
@@ -53,8 +62,10 @@ class AuditLogger:
 
         if self.log_path:
             try:
-                with open(self.log_path, "a") as f:
-                    f.write(json.dumps(event.to_dict()) + "\n")
+                path = Path(self.log_path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(event.to_dict(), default=str) + "\n")
             except Exception as e:
                 logger.error(f"Failed to write audit log: {e}")
 
@@ -126,8 +137,9 @@ class AuditLogger:
         """Clear all audit events (not recommended in production)."""
         self._events.clear()
         if self.log_path:
-            with open(self.log_path, "w") as f:
-                pass
+            path = Path(self.log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
         logger.warning("Audit log cleared")
 
     async def get_tool_stats(self) -> Dict[str, Any]:

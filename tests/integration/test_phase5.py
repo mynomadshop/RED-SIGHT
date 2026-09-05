@@ -579,7 +579,7 @@ class TestGpuSchedulerAPI:
 
         app = self._make_app(mock_telemetry, mock_scheduler)
         client = TestClient(app)
-        resp = client.get("/api/v1/gpu/status")
+        resp = client.get("/api/v1/scheduler/gpu/status")
         assert resp.status_code == 200
         data = resp.json()
         assert "gpus" in data
@@ -591,7 +591,7 @@ class TestGpuSchedulerAPI:
 
         app = self._make_app(mock_telemetry, mock_scheduler)
         client = TestClient(app)
-        resp = client.get("/api/v1/gpu/summary")
+        resp = client.get("/api/v1/scheduler/gpu/summary")
         assert resp.status_code == 200
 
     def test_best_gpu_for_model(self, mock_telemetry, mock_scheduler):
@@ -614,7 +614,7 @@ class TestGpuSchedulerAPI:
 
         app = self._make_app(mock_telemetry, mock_scheduler)
         client = TestClient(app)
-        resp = client.post("/api/v1/jobs/submit", json={
+        resp = client.post("/api/v1/scheduler/jobs/submit", json={
             "job_type": "inference",
             "payload": {"model": "test"},
             "priority": "high",
@@ -629,7 +629,7 @@ class TestGpuSchedulerAPI:
 
         app = self._make_app(mock_telemetry, mock_scheduler)
         client = TestClient(app)
-        resp = client.post("/api/v1/jobs/cancel", json={"job_id": "job_001"})
+        resp = client.post("/api/v1/scheduler/jobs/cancel", json={"job_id": "job_001"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["cancelled"] is True
@@ -640,7 +640,7 @@ class TestGpuSchedulerAPI:
 
         app = self._make_app(mock_telemetry, mock_scheduler)
         client = TestClient(app)
-        resp = client.get("/api/v1/jobs/job_001")
+        resp = client.get("/api/v1/scheduler/jobs/job_001")
         assert resp.status_code == 200
 
     def test_list_jobs_endpoint(self, mock_telemetry, mock_scheduler):
@@ -649,7 +649,7 @@ class TestGpuSchedulerAPI:
 
         app = self._make_app(mock_telemetry, mock_scheduler)
         client = TestClient(app)
-        resp = client.get("/api/v1/jobs")
+        resp = client.get("/api/v1/scheduler/jobs")
         assert resp.status_code == 200
         data = resp.json()
         assert "jobs" in data
@@ -661,7 +661,7 @@ class TestGpuSchedulerAPI:
 
         app = self._make_app(mock_telemetry, mock_scheduler)
         client = TestClient(app)
-        resp = client.get("/api/v1/jobs/queue-depth")
+        resp = client.get("/api/v1/scheduler/jobs/queue-depth")
         assert resp.status_code == 200
         data = resp.json()
         assert "queue_depth" in data
@@ -711,7 +711,7 @@ class TestGpuSchedulerAPI:
         app.include_router(gpu_scheduler.router, prefix="/api/v1", tags=["gpu-scheduler"])
 
         client = TestClient(app)
-        resp = client.get("/api/v1/gpu/status")
+        resp = client.get("/api/v1/scheduler/gpu/status")
         assert resp.status_code == 503
 
     def test_job_submit_uninitialized(self):
@@ -727,7 +727,7 @@ class TestGpuSchedulerAPI:
 
         client = TestClient(app)
         # When scheduler is None, should return 503
-        resp = client.post("/api/v1/jobs/submit", json={
+        resp = client.post("/api/v1/scheduler/jobs/submit", json={
             "job_type": "inference",
             "payload": {},
         })
@@ -848,7 +848,7 @@ class TestFullPipeline:
         assert resp.status_code == 200
 
         # 2. Submit job
-        resp = client.post("/api/v1/jobs/submit", json={
+        resp = client.post("/api/v1/scheduler/jobs/submit", json={
             "job_type": "inference",
             "payload": {"model": "test"},
         })
@@ -856,11 +856,11 @@ class TestFullPipeline:
         assert resp.json()["job_id"] == "job_001"
 
         # 3. Check status
-        resp = client.get("/api/v1/jobs/job_001")
+        resp = client.get("/api/v1/scheduler/jobs/job_001")
         assert resp.status_code == 200
 
         # 4. Cancel job
-        resp = client.post("/api/v1/jobs/cancel", json={"job_id": "job_001"})
+        resp = client.post("/api/v1/scheduler/jobs/cancel", json={"job_id": "job_001"})
         assert resp.status_code == 200
 
     @pytest.mark.asyncio

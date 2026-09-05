@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.qdrant
-    image: redsight-qdrant:v1.19.0
+    image: redsight-qdrant:v1.19.1
 
     healthcheck:
       test:
@@ -45,4 +45,3 @@ services:
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
-

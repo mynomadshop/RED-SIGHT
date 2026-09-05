@@ -50,8 +50,8 @@ RedSight is a local-first AI intelligence platform that turns your projects, doc
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/redsight.git
-cd redsight
+git clone https://github.com/mynomadshop/RED-SIGHT.git
+cd RED-SIGHT
 
 # Create virtual environment
 python -m venv .venv
@@ -72,19 +72,19 @@ Create a `.env` file in the project root:
 
 ```env
 # Platform
-RED_SIGHT_MODE=local_preferred
-RED_SIGHT_DATA_ROOT=./data
+RED_SIGHT_PLATFORM__MODE=local_preferred
+RED_SIGHT_PLATFORM__DATA_ROOT=./data
 
 # LM Studio
-LM_STUDIO_BASE_URL=http://127.0.0.1:1234/v1
-LM_STUDIO_TIMEOUT=180
+RED_SIGHT_LMSTUDIO__BASE_URL=http://127.0.0.1:1234/v1
+RED_SIGHT_LMSTUDIO__TIMEOUT_SECONDS=180
 
 # Qdrant
-QDRANT_URL=http://127.0.0.1:6333
-QDRANT_COLLECTION=knowledge_docs
+RED_SIGHT_RETRIEVAL__VECTOR_BACKEND_URL=http://127.0.0.1:6333
+RED_SIGHT_RETRIEVAL__VECTOR_BACKEND_EMBEDDED=false
 
 # GPU
-GPU_VRAM_HEADROOM_GB=3.0
+RED_SIGHT_ROUTING__VRAM_HEADROOM_GB_PER_GPU=3.0
 ```
 
 ### Running
@@ -172,6 +172,12 @@ POST   /api/v1/jobs/index/batch    # Batch index files
 POST   /api/v1/collections/{name}/reindex  # Re-index collection
 GET    /api/v1/jobs                # List indexing jobs
 GET    /api/v1/jobs/{job_id}       # Get job details
+
+POST   /api/v1/scheduler/jobs/submit         # Submit a GPU-scheduled workload
+POST   /api/v1/scheduler/jobs/cancel         # Cancel a GPU-scheduled workload
+GET    /api/v1/scheduler/jobs                # List GPU-scheduled workloads
+GET    /api/v1/scheduler/jobs/{id}           # Get GPU-scheduled workload status
+GET    /api/v1/scheduler/jobs/queue-depth    # Get scheduler queue depth
 
 GET    /api/v1/sources/chunk/{id}  # Chunk detail
 GET    /api/v1/sources/file/{path}/preview  # File content preview

@@ -69,7 +69,7 @@ def main(
     else:
         logging.basicConfig(level=logging.INFO)
 
-    typer.echo(f"📚 RedSight Indexer")
+    typer.echo("📚 RedSight Indexer")
     typer.echo(f"   Path: {path}")
     typer.echo(f"   Collection: {collection}")
     typer.echo(f"   Project: {project}")

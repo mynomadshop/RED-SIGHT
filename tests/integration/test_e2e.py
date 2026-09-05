@@ -174,7 +174,7 @@ class TestGpuSchedulerE2E:
         app = create_app()
         client = TestClient(app)
         
-        resp = client.post("/api/v1/jobs/submit", json={
+        resp = client.post("/api/v1/scheduler/jobs/submit", json={
             "job_type": "test",
             "payload": {},
         })
@@ -188,7 +188,7 @@ class TestGpuSchedulerE2E:
         app = create_app()
         client = TestClient(app)
         
-        resp = client.get("/api/v1/jobs/queue-depth")
+        resp = client.get("/api/v1/scheduler/jobs/queue-depth")
         assert resp.status_code in (200, 503)
 
 
@@ -245,7 +245,7 @@ class TestAgentToolsE2E:
         
         resp = client.post("/api/v1/orchestrate", json={
             "query": "test query",
-            "role": "agent",
+            "role": "user",
         })
         assert resp.status_code in (200, 503)
 
@@ -263,7 +263,7 @@ class TestConfiguration:
         
         settings = get_settings()
         assert settings.platform.mode in ("local_only", "local_preferred", "cloud_allowed")
-        assert settings.lmstudio.base_url == "http://host.docker.internal:1234/v1"
+        assert settings.lmstudio.base_url == "http://127.0.0.1:1234/v1"
 
     def test_settings_model_dump_safe(self):
         """Test safe settings dump (no secrets)."""
@@ -315,24 +315,21 @@ class TestProductionReadiness:
     def test_all_routes_registered(self):
         """Test that all expected routes are registered."""
         from app.server import create_app
-        
+
         app = create_app()
-        # Collect all route paths, handling mounted routers
-        routes = []
-        for route in app.routes:
-            if hasattr(route, 'path'):
-                routes.append(route.path)
-            elif hasattr(route, 'routes'):
-                for sub_route in route.routes:
-                    if hasattr(sub_route, 'path'):
-                        routes.append(sub_route.path)
+        # OpenAPI is FastAPI's stable, public route inventory. Inspecting
+        # ``app.routes`` broke when FastAPI introduced lazy included routers.
+        routes = set(app.openapi()["paths"])
         
         # Check key endpoints exist
         assert "/api/v1/health" in routes
+        assert "/api/v1/learn/ingest" in routes
+        assert "/api/v1/memory/working" in routes
+        assert str(app.url_path_for("websocket_chat")) == "/api/v1/ws/chat"
         assert "/api/v1/status" in routes
         assert "/api/v1/gpu/health" in routes
         assert "/api/v1/search" in routes
-        assert "/api/v1/jobs/submit" in routes
+        assert "/api/v1/scheduler/jobs/submit" in routes
         assert "/api/v1/tools" in routes
         assert "/api/v1/skills" in routes
         assert "/api/v1/models" in routes
@@ -412,7 +409,7 @@ class TestFullSystemIntegration:
         assert gpu_resp.status_code == 200
         
         # Submit job
-        job_resp = client.post("/api/v1/jobs/submit", json={
+        job_resp = client.post("/api/v1/scheduler/jobs/submit", json={
             "job_type": "test",
             "payload": {},
         })
@@ -451,7 +448,7 @@ class TestJobLifecycleE2E:
         client = TestClient(app)
         
         # Submit job
-        resp = client.post("/api/v1/jobs/submit", json={
+        resp = client.post("/api/v1/scheduler/jobs/submit", json={
             "job_type": "index",
             "payload": {"path": "/test"},
         })
@@ -470,7 +467,7 @@ class TestJobLifecycleE2E:
         client = TestClient(app)
         
         # Cancel job (should return 200 or 503)
-        resp = client.post("/api/v1/jobs/cancel", json={
+        resp = client.post("/api/v1/scheduler/jobs/cancel", json={
             "job_id": "nonexistent",
         })
         assert resp.status_code in (200, 503, 404)

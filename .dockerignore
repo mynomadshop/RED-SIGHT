@@ -13,3 +13,14 @@
 compose-validated.txt
 .venv/
 venv/
+.git/
+.github/
+.env
+.env.*
+!.env.example
+data/
+models/
+upload/
+installer/legacy/
+*.exe
+*.log

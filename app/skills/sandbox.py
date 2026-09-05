@@ -12,12 +12,16 @@ import asyncio
 import json
 import logging
 import os
-import signal
+import re
+import shlex
 import sys
 import time
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from app.core.interfaces import AuditAction, AuditEvent
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +78,29 @@ class SkillSandbox:
         self._permission_checker = permission_checker
         self._running_processes: Dict[str, Any] = {}
 
+    async def _record_audit(
+        self,
+        *,
+        actor: str,
+        details: Dict[str, Any],
+        result: str,
+        error: Optional[str] = None,
+    ) -> None:
+        """Record a typed skill event without exposing secret-shaped inputs."""
+        if not self._audit:
+            return
+        await self._audit.record(
+            AuditEvent(
+                event_id=f"skill_{time.time_ns()}_{uuid.uuid4().hex[:8]}",
+                action=AuditAction.SKILL_EXECUTION,
+                timestamp=time.time(),
+                actor=actor,
+                details=_redact_mapping(details),
+                result=result,
+                error=error,
+            )
+        )
+
     async def execute(
         self,
         entry_point: str,
@@ -99,13 +126,18 @@ class SkillSandbox:
         timeout = timeout or self.default_timeout
         start_time = time.time()
 
-        # Check permissions if checker is available
-        if self._permission_checker and permissions:
+        # Check permissions if a server-side checker is available. Even skills
+        # without an explicit declaration require the baseline read-only role.
+        if self._permission_checker:
+            required_permissions = list(permissions or ["read_only"])
+            permission_params = dict(inputs)
+            if entry_point.startswith("script:"):
+                permission_params.setdefault("path", entry_point.split(":", 1)[-1])
             check = await self._permission_checker.check_tool_permission(
                 role=actor,
                 tool_name=entry_point,
-                tool_permissions=permissions,
-                params=inputs,
+                tool_permissions=required_permissions,
+                params=permission_params,
             )
             if not check.get("allowed"):
                 return ExecutionResult(
@@ -113,20 +145,27 @@ class SkillSandbox:
                     error=check.get("reason", "Permission denied"),
                     execution_time_ms=(time.time() - start_time) * 1000,
                 )
+            if entry_point.startswith("cmd:"):
+                command = entry_point.split(":", 1)[-1]
+                check = await self._permission_checker.check_command_permission(actor, command)
+                if not check.get("allowed"):
+                    return ExecutionResult(
+                        success=False,
+                        error=check.get("reason", "Command denied"),
+                        execution_time_ms=(time.time() - start_time) * 1000,
+                    )
 
         # Audit: start
-        if self._audit:
-            await self._audit.record(
-                action="skill_execution",
-                actor=actor,
-                details={
-                    "entry_point": entry_point,
-                    "inputs": inputs,
-                    "timeout": timeout,
-                    "skill_id": skill_id,
-                },
-                result="started",
-            )
+        await self._record_audit(
+            actor=actor,
+            details={
+                "entry_point": entry_point,
+                "inputs": inputs,
+                "timeout": timeout,
+                "skill_id": skill_id,
+            },
+            result="started",
+        )
 
         try:
             # Execute the skill
@@ -134,32 +173,28 @@ class SkillSandbox:
             execution_time = (time.time() - start_time) * 1000
 
             # Audit: complete
-            if self._audit:
-                await self._audit.record(
-                    action="skill_execution",
-                    actor=actor,
-                    details={
-                        "entry_point": entry_point,
-                        "skill_id": skill_id,
-                        "execution_time_ms": round(execution_time, 2),
-                        "success": result.success,
-                    },
-                    result="success" if result.success else "error",
-                    error=result.error,
-                )
+            await self._record_audit(
+                actor=actor,
+                details={
+                    "entry_point": entry_point,
+                    "skill_id": skill_id,
+                    "execution_time_ms": round(execution_time, 2),
+                    "success": result.success,
+                },
+                result="success" if result.success else "error",
+                error=result.error,
+            )
 
             return result
 
         except Exception as e:
             execution_time = (time.time() - start_time) * 1000
-            if self._audit:
-                await self._audit.record(
-                    action="skill_execution",
-                    actor=actor,
-                    details={"entry_point": entry_point, "skill_id": skill_id},
-                    result="error",
-                    error=str(e),
-                )
+            await self._record_audit(
+                actor=actor,
+                details={"entry_point": entry_point, "skill_id": skill_id},
+                result="error",
+                error=str(e),
+            )
             return ExecutionResult(
                 success=False,
                 error=str(e),
@@ -194,27 +229,36 @@ class SkillSandbox:
         # Extract module path
         module_path = entry_point.split(":", 1)[-1]
 
-        # Create a wrapper script that calls the module
-        wrapper = f"""
-import sys
-import json
+        # Pass the module name and JSON input as data, never interpolated source.
+        wrapper = """
+import asyncio
 import importlib
+import inspect
+import json
+import sys
 
 try:
-    module = importlib.import_module("{module_path}")
+    module = importlib.import_module(sys.argv[1])
+    inputs = json.loads(sys.stdin.read() or "{}")
     if hasattr(module, "run"):
-        result = module.run(**{json.dumps(inputs)})
+        result = module.run(**inputs)
     elif hasattr(module, "execute"):
-        result = module.execute(**{json.dumps(inputs)})
+        result = module.execute(**inputs)
     else:
-        result = {{"error": "No run() or execute() function found", "success": False}}
+        result = {"error": "No run() or execute() function found", "success": False}
+    if inspect.isawaitable(result):
+        result = asyncio.run(result)
     print(json.dumps(result, default=str))
 except Exception as e:
-    print(json.dumps({{"error": str(e), "success": False}}))
+    print(json.dumps({"error": str(e), "success": False}))
     sys.exit(1)
 """
 
-        return await self._run_subprocess(wrapper, timeout, language="python")
+        return await self._run_subprocess(
+            [sys.executable, "-c", wrapper, module_path],
+            timeout,
+            input_data=json.dumps(inputs, default=str).encode("utf-8"),
+        )
 
     async def _run_command(
         self,
@@ -225,11 +269,17 @@ except Exception as e:
         """Run a shell command."""
         command = entry_point.split(":", 1)[-1]
         # Inject inputs as environment variables
-        env = os.environ.copy()
+        env = _sandbox_environment()
         for k, v in inputs.items():
-            env[f"INPUT_{k.upper()}"] = json.dumps(v)
+            safe_key = re.sub(r"[^A-Z0-9_]", "_", str(k).upper())
+            if safe_key:
+                env[f"INPUT_{safe_key}"] = json.dumps(v, default=str)
 
-        return await self._run_subprocess(command, timeout, shell=True, env=env)
+        try:
+            argv = _split_command(command)
+        except ValueError as exc:
+            return ExecutionResult(success=False, error=str(exc))
+        return await self._run_subprocess(argv, timeout, env=env)
 
     async def _run_script(
         self,
@@ -247,30 +297,33 @@ except Exception as e:
             )
 
         return await self._run_subprocess(
-            f'python "{script_path}"',
+            [sys.executable, str(p.resolve())],
             timeout,
         )
 
     async def _run_subprocess(
         self,
-        command: str,
+        command: List[str],
         timeout: int,
-        shell: bool = False,
-        env: Dict[str, str] = None,
+        env: Optional[Dict[str, str]] = None,
+        input_data: Optional[bytes] = None,
     ) -> ExecutionResult:
         """Run a command in a subprocess with timeout."""
         try:
-            process = await asyncio.create_subprocess_shell(
-                command,
+            if not command:
+                return ExecutionResult(success=False, error="Command is empty")
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.PIPE if input_data is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=env,
+                env=env or _sandbox_environment(),
                 limit=self.max_output_bytes,
             )
 
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
+                    process.communicate(input=input_data),
                     timeout=timeout,
                 )
             except asyncio.TimeoutError:
@@ -337,3 +390,65 @@ except Exception as e:
             except Exception:
                 pass
         return False
+
+
+def _split_command(command: str) -> List[str]:
+    """Convert a command string to argv without invoking a command shell."""
+    if not command.strip():
+        raise ValueError("Command is empty")
+    argv = shlex.split(command, posix=os.name != "nt")
+    if os.name == "nt":
+        argv = [
+            item[1:-1] if len(item) >= 2 and item[0] == item[-1] == '"' else item
+            for item in argv
+        ]
+    if not argv:
+        raise ValueError("Command is empty")
+    return argv
+
+
+def _sandbox_environment() -> Dict[str, str]:
+    """Provide child skills a minimal environment without credential material."""
+    exact = {
+        "APPDATA",
+        "CUDA_VISIBLE_DEVICES",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LOCALAPPDATA",
+        "PATH",
+        "PATHEXT",
+        "PROGRAMDATA",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "WINDIR",
+    }
+    prefixes = ("LM_STUDIO_", "NVIDIA_", "REDSIGHT_", "RED_SIGHT_", "VECTOR_BACKEND_")
+    secret_markers = ("AUTH", "COOKIE", "CREDENTIAL", "KEY", "PASSWORD", "SECRET", "TOKEN")
+    sanitized: Dict[str, str] = {}
+    for name, value in os.environ.items():
+        normalized = name.upper()
+        if any(marker in normalized for marker in secret_markers):
+            continue
+        if normalized in exact or normalized.startswith(prefixes):
+            sanitized[name] = value
+    return sanitized
+
+
+def _redact_mapping(value: Any) -> Any:
+    """Redact secret-shaped values before writing audit records."""
+    markers = ("auth", "cookie", "credential", "key", "password", "secret", "token")
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if any(marker in str(key).lower() for marker in markers)
+            else _redact_mapping(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_mapping(item) for item in value]
+    return value

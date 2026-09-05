@@ -32,7 +32,7 @@ def set_job_scheduler(scheduler):
 
 # ─── GPU Telemetry Endpoints ───────────────────────────────────────────
 
-@router.get("/gpu/status", summary="Get GPU status")
+@router.get("/scheduler/gpu/status", summary="Get scheduler GPU status")
 async def get_gpu_status():
     """Get real-time status of all GPUs."""
     if not _gpu_telemetry:
@@ -50,7 +50,7 @@ async def get_gpu_status():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/gpu/summary", summary="Get GPU summary for UI")
+@router.get("/scheduler/gpu/summary", summary="Get scheduler GPU summary")
 async def get_gpu_summary():
     """Get GPU summary optimized for UI display."""
     if not _gpu_telemetry:
@@ -82,7 +82,7 @@ async def get_best_gpu_for_model(required_vram_mb: float = 1024.0, prefer_loaded
 
 # ─── Job Scheduling Endpoints ──────────────────────────────────────────
 
-@router.post("/jobs/submit", summary="Submit a job")
+@router.post("/scheduler/jobs/submit", summary="Submit a scheduled job")
 async def submit_job(request_data: Dict[str, Any]):
     """Submit a job to the GPU scheduler."""
     if not _job_scheduler:
@@ -103,7 +103,7 @@ async def submit_job(request_data: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/jobs/cancel", summary="Cancel a job")
+@router.post("/scheduler/jobs/cancel", summary="Cancel a scheduled job")
 async def cancel_job(request_data: Dict[str, Any]):
     """Cancel a running or queued job."""
     if not _job_scheduler:
@@ -123,7 +123,7 @@ async def cancel_job(request_data: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/jobs/queue-depth", summary="Get queue depth")
+@router.get("/scheduler/jobs/queue-depth", summary="Get scheduler queue depth")
 async def get_queue_depth():
     """Get the current queue depth."""
     if not _job_scheduler:
@@ -137,7 +137,7 @@ async def get_queue_depth():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/jobs/{job_id}", summary="Get job status")
+@router.get("/scheduler/jobs/{job_id}", summary="Get scheduled job status")
 async def get_job_status(job_id: str):
     """Get the current status and details of a job."""
     if not _job_scheduler:
@@ -155,7 +155,7 @@ async def get_job_status(job_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/jobs", summary="List jobs")
+@router.get("/scheduler/jobs", summary="List scheduled jobs")
 async def list_jobs(status: Optional[str] = None, limit: int = 50):
     """List jobs with optional status filter."""
     if not _job_scheduler:

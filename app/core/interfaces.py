@@ -151,6 +151,7 @@ class ModelInfo:
     capabilities: List[Capability]
     context_size: int
     is_loaded: bool
+    total_vram_mb: float = 0.0
     gpu_affinity: Optional[int] = None
     vram_usage_mb: float = 0.0
     loaded_at: Optional[float] = None
@@ -163,6 +164,7 @@ class ModelInfo:
             "capabilities": [c.value for c in self.capabilities],
             "context_size": self.context_size,
             "is_loaded": self.is_loaded,
+            "total_vram_mb": round(self.total_vram_mb, 1),
             "gpu_affinity": self.gpu_affinity,
             "vram_usage_mb": self.vram_usage_mb,
             "loaded_at": self.loaded_at,
@@ -189,7 +191,7 @@ class GpuInfo:
             "name": self.name,
             "total_vram_mb": round(self.total_vram_mb, 1),
             "free_vram_mb": round(self.free_vram_mb, 1),
-            "used_vram_mb": round(self.free_vram_mb, 1),
+            "used_vram_mb": round(self.used_vram_mb, 1),
             "utilization_percent": round(self.utilization_percent, 1),
             "temperature_c": round(self.temperature_c, 1),
             "process_count": self.process_count,

@@ -8,7 +8,7 @@ audit trail, and agent orchestration.
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 router = APIRouter()
 
@@ -31,7 +31,10 @@ class SkillSearchResult(BaseModel):
 class ToolExecuteRequest(BaseModel):
     tool_name: str
     params: Dict[str, Any] = Field(default_factory=dict)
-    role: str = Field(default="user", description="Execution role")
+    role: Literal["user"] = Field(
+        default="user",
+        description="Public API execution is restricted to the non-privileged user role",
+    )
 
 
 class ToolExecuteResult(BaseModel):
@@ -43,7 +46,10 @@ class ToolExecuteResult(BaseModel):
 
 class OrchestrateRequest(BaseModel):
     query: str = Field(..., description="User query")
-    role: str = Field(default="agent", description="Execution role")
+    role: Literal["user"] = Field(
+        default="user",
+        description="Public API orchestration is restricted to the non-privileged user role",
+    )
 
 
 class AuditQueryRequest(BaseModel):
@@ -120,7 +126,7 @@ async def execute_tool(request: ToolExecuteRequest):
     result = await tool_registry.execute(
         tool_name=request.tool_name,
         params=request.params,
-        permissions=[request.role],
+        permissions=["read_only"],
         actor=request.role,
     )
     return result
@@ -220,7 +226,7 @@ async def audit_stats():
 
 class PermissionCheckRequest(BaseModel):
     tool_name: str
-    role: str = Field(default="user")
+    role: Literal["user"] = Field(default="user")
     params: Dict[str, Any] = Field(default_factory=dict)
 
 

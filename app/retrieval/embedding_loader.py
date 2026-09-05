@@ -121,7 +121,6 @@ class EmbeddingModelLoader:
                     return False
 
                 self._model = {
-                    "client": client,
                     "base_url": self._lmstudio_url,
                     "model_id": embed_model,
                 }
@@ -187,7 +186,6 @@ class EmbeddingModelLoader:
         """Embed texts using LM Studio / OpenAI API."""
         import httpx
 
-        client = self._model["client"]
         base_url = self._model["base_url"]
         model_id = self._model["model_id"]
 

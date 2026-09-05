@@ -7,16 +7,19 @@ Basic health and status endpoints.
 
 from fastapi import APIRouter
 
+from app.config.settings import get_settings
+
 router = APIRouter()
 
 
 @router.get("/health")
 async def health_check():
     """Health check endpoint."""
+    settings = get_settings()
     return {
         "status": "healthy",
         "service": "redsight",
-        "version": "0.1.0",
+        "version": settings.platform.version,
     }
 
 
@@ -24,11 +27,12 @@ async def health_check():
 async def system_status():
     """System status endpoint."""
     from app.server import gpu_telemetry, lmstudio_provider
-    
+
+    settings = get_settings()
     status = {
         "lmstudio_connected": False,
         "gpu_telemetry_active": gpu_telemetry is not None,
-        "mode": "local_preferred",
+        "mode": settings.platform.mode,
     }
     
     if lmstudio_provider:

@@ -12,14 +12,22 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.core.interfaces import AuditAction, AuditEvent
+from app.security.permissions import DEFAULT_FILE_DENY_PATTERNS, _path_is_allowed
 from app.tools.contract import ToolContract
 
 logger = logging.getLogger(__name__)
+
+
+def _is_discoverable_path(path: Path) -> bool:
+    """Keep default secret paths out of recursive tool results."""
+    return _path_is_allowed(str(path), [], list(DEFAULT_FILE_DENY_PATTERNS))
 
 
 class ToolRegistry:
@@ -78,24 +86,36 @@ class ToolRegistry:
         if not contract:
             return {"error": f"Tool {tool_name} not found", "success": False}
 
-        # Check permissions
-        if permissions:
-            required = contract.permissions
-            if not all(p in permissions for p in required):
-                if self._audit:
-                    from app.core.interfaces import AuditEvent, AuditAction
-                    await self._audit.record(AuditEvent(
-                        event_id=f"perm_{tool_name}_{int(time.time())}",
-                        action=AuditAction.PERMISSION_CHECK,
-                        timestamp=time.time(),
-                        actor=actor,
-                        details={"tool": tool_name, "required": required, "have": permissions},
-                        result="denied",
-                    ))
-                return {
-                    "error": f"Insufficient permissions for {tool_name}. Required: {required}",
-                    "success": False,
-                }
+        # Resolve permissions from the server-side role policy when one exists.
+        # Caller-supplied labels are never proof that an actor owns a role.
+        available_permissions = set(permissions or [])
+        if self._policy is not None:
+            available_permissions = self._policy.get_role_permissions(actor)
+
+        required = contract.permissions
+        if not all(permission in available_permissions for permission in required):
+            if self._audit:
+                await self._audit.record(AuditEvent(
+                    event_id=f"perm_{tool_name}_{int(time.time())}",
+                    action=AuditAction.PERMISSION_CHECK,
+                    timestamp=time.time(),
+                    actor=actor,
+                    details={
+                        "tool": tool_name,
+                        "required": required,
+                        "have": sorted(available_permissions),
+                    },
+                    result="denied",
+                ))
+            return {
+                "error": f"Insufficient permissions for {tool_name}. Required: {required}",
+                "success": False,
+            }
+
+        if self._policy is not None:
+            policy_error = self._check_resource_policy(tool_name, params, contract)
+            if policy_error:
+                return {"error": policy_error, "success": False}
 
         # Validate parameters
         is_valid, error = contract.validate_params(params)
@@ -131,7 +151,6 @@ class ToolRegistry:
 
             # Audit log
             if self._audit:
-                from app.core.interfaces import AuditEvent, AuditAction
                 await self._audit.record(AuditEvent(
                     event_id=f"tool_{tool_name}_{int(time.time())}",
                     action=AuditAction.TOOL_CALL,
@@ -153,7 +172,6 @@ class ToolRegistry:
         except asyncio.TimeoutError:
             execution_time = time.time() - start_time
             if self._audit:
-                from app.core.interfaces import AuditEvent, AuditAction
                 await self._audit.record(AuditEvent(
                     event_id=f"timeout_{tool_name}_{int(time.time())}",
                     action=AuditAction.TOOL_CALL,
@@ -168,10 +186,10 @@ class ToolRegistry:
                 "success": False,
                 "execution_time_ms": round(execution_time * 1000, 2),
             }
+
         except Exception as e:
             execution_time = time.time() - start_time
             if self._audit:
-                from app.core.interfaces import AuditEvent, AuditAction
                 await self._audit.record(AuditEvent(
                     event_id=f"err_{tool_name}_{int(time.time())}",
                     action=AuditAction.TOOL_CALL,
@@ -186,6 +204,39 @@ class ToolRegistry:
                 "success": False,
                 "execution_time_ms": round(execution_time * 1000, 2),
             }
+
+    def _check_resource_policy(
+        self,
+        tool_name: str,
+        params: Dict[str, Any],
+        contract: ToolContract,
+    ) -> Optional[str]:
+        """Apply filesystem and command scopes at the execution boundary."""
+        source = str(params.get("source") or "")
+        destination = str(params.get("destination") or "")
+        path = str(params.get("path") or "")
+        mutating = bool(
+            {"read_write", "write_only", "destructive"}.intersection(contract.permissions)
+        )
+
+        if source and not self._policy.is_file_read_allowed(source):
+            return f"Read not allowed for path: {source}"
+        if destination and not self._policy.is_file_write_allowed(destination):
+            return f"Write not allowed for path: {destination}"
+        if path:
+            allowed = (
+                self._policy.is_file_write_allowed(path)
+                if mutating
+                else self._policy.is_file_read_allowed(path)
+            )
+            if not allowed:
+                action = "Write" if mutating else "Read"
+                return f"{action} not allowed for path: {path}"
+
+        command = str(params.get("command") or "")
+        if command and not self._policy.is_command_allowed(command):
+            return "Command is not permitted by the execution allowlist"
+        return None
 
     def check_permission(self, tool_name: str, permissions: List[str]) -> bool:
         """Check if permissions are sufficient for a tool."""
@@ -258,6 +309,8 @@ def _handle_list_directory(params: Dict, contract: ToolContract) -> Dict:
 
         entries = []
         for item in sorted(p.iterdir()):
+            if not _is_discoverable_path(item):
+                continue
             entry = {
                 "name": item.name,
                 "type": "directory" if item.is_dir() else "file",
@@ -279,16 +332,21 @@ def _handle_search_files(params: Dict, contract: ToolContract) -> Dict:
     """Search for files by name pattern."""
     pattern = params.get("pattern", "*")
     path = params.get("path", ".")
+    if not isinstance(pattern, str) or "/" in pattern.replace("\\", "/"):
+        return {"error": "pattern must be a filename glob without path separators", "success": False}
     try:
         p = Path(path)
-        matches = list(p.glob(f"**/{pattern}"))
         results = []
-        for m in matches[:100]:  # Limit results
+        for m in p.glob(f"**/{pattern}"):
+            if not _is_discoverable_path(m):
+                continue
             results.append({
                 "path": str(m),
                 "type": "directory" if m.is_dir() else "file",
                 "size": m.stat().st_size if m.is_file() else None,
             })
+            if len(results) >= 100:
+                break
         return {
             "pattern": pattern,
             "path": str(path),
@@ -301,16 +359,19 @@ def _handle_search_files(params: Dict, contract: ToolContract) -> Dict:
 
 
 def _handle_run_command(params: Dict, contract: ToolContract) -> Dict:
-    """Run a shell command."""
+    """Run an allowlisted command without invoking a command shell."""
     command = params.get("command", "")
     if not command:
         return {"error": "command is required", "success": False}
 
     try:
         timeout = contract.timeout_seconds if contract else 30
+        argv = command if os.name == "nt" else shlex.split(command)
+        if not argv:
+            return {"error": "command is required", "success": False}
         result = subprocess.run(
-            command,
-            shell=True,
+            argv,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -338,7 +399,7 @@ def _handle_read_directory(params: Dict, contract: ToolContract) -> Dict:
 
         files = []
         for f in p.rglob("*"):
-            if f.is_file() and not f.name.startswith("."):
+            if f.is_file() and not f.name.startswith(".") and _is_discoverable_path(f):
                 files.append(str(f))
 
         return {
@@ -381,16 +442,16 @@ def _handle_list_processes(params: Dict, contract: ToolContract) -> Dict:
     try:
         if os.name == "nt":
             result = subprocess.run(
-                "tasklist /FO CSV",
-                shell=True,
+                ["tasklist", "/FO", "CSV"],
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
         else:
             result = subprocess.run(
-                "ps aux",
-                shell=True,
+                ["ps", "aux"],
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -422,16 +483,16 @@ def _handle_disk_usage(params: Dict, contract: ToolContract) -> Dict:
     try:
         if os.name == "nt":
             result = subprocess.run(
-                "wmic logicaldisk get size,freespace,caption",
-                shell=True,
+                ["wmic", "logicaldisk", "get", "size,freespace,caption"],
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
         else:
             result = subprocess.run(
-                "df -h",
-                shell=True,
+                ["df", "-h"],
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -453,6 +514,13 @@ def _handle_search_code(params: Dict, contract: ToolContract) -> Dict:
 
     if not pattern:
         return {"error": "pattern is required", "success": False}
+    if not isinstance(file_types, list) or any(
+        not isinstance(extension, str)
+        or not extension.startswith(".")
+        or not extension[1:].isalnum()
+        for extension in file_types
+    ):
+        return {"error": "file_types must contain simple extensions such as .py", "success": False}
 
     try:
         p = Path(path)
@@ -460,7 +528,7 @@ def _handle_search_code(params: Dict, contract: ToolContract) -> Dict:
 
         for ext in file_types:
             for f in p.rglob(f"*{ext}"):
-                if f.is_file():
+                if f.is_file() and _is_discoverable_path(f):
                     try:
                         content = f.read_text(encoding="utf-8", errors="ignore")
                         lines = content.split("\n")
@@ -471,8 +539,14 @@ def _handle_search_code(params: Dict, contract: ToolContract) -> Dict:
                                     "line": i,
                                     "content": line.strip()[:200],
                                 })
+                                if len(matches) >= 100:
+                                    break
                     except Exception:
                         pass
+                if len(matches) >= 100:
+                    break
+            if len(matches) >= 100:
+                break
 
         return {
             "pattern": pattern,
@@ -616,13 +690,14 @@ def _handle_search_text(params: Dict, contract: ToolContract) -> Dict:
             return {"error": f"Path not found: {path}", "success": False}
 
         matches = []
-        if p.is_file():
-            files = [p]
-        else:
-            files = list(p.glob("**/*"))[:500]
+        files = [p] if p.is_file() else p.glob("**/*")
 
+        inspected = 0
         for f in files:
-            if f.is_file() and not f.name.startswith("."):
+            if f.is_file() and not f.name.startswith(".") and _is_discoverable_path(f):
+                inspected += 1
+                if inspected > 500:
+                    break
                 try:
                     content = f.read_text(encoding="utf-8", errors="ignore")
                     lines = content.split("\n")
@@ -633,8 +708,12 @@ def _handle_search_text(params: Dict, contract: ToolContract) -> Dict:
                                 "line": i,
                                 "content": line.strip()[:300],
                             })
+                            if len(matches) >= 100:
+                                break
                 except Exception:
                     pass
+            if len(matches) >= 100:
+                break
 
         return {
             "pattern": pattern,
@@ -648,18 +727,63 @@ def _handle_search_text(params: Dict, contract: ToolContract) -> Dict:
 
 
 def _handle_get_env(params: Dict, contract: ToolContract) -> Dict:
-    """Get environment variables."""
+    """Get non-secret diagnostic environment variables."""
     name = params.get("name", "")
     try:
         if name:
+            if not _is_safe_environment_name(name):
+                return {
+                    "error": f"Environment variable is not available through this tool: {name}",
+                    "success": False,
+                }
             value = os.environ.get(name, "")
             return {"name": name, "value": value, "success": True}
         else:
-            # Return all env vars (limited)
-            env = {k: v for k, v in os.environ.items() if not k.startswith("_")}
+            env = {
+                key: value
+                for key, value in sorted(os.environ.items())
+                if _is_safe_environment_name(key)
+            }
             return {"env": dict(list(env.items())[:50]), "count": len(env), "success": True}
     except Exception as e:
         return {"error": str(e), "success": False}
+
+
+_SAFE_ENVIRONMENT_NAMES = {
+    "CUDA_VISIBLE_DEVICES",
+    "LANG",
+    "LOG_LEVEL",
+    "PATH",
+    "PYTHONPATH",
+    "PYTHONUNBUFFERED",
+    "QT_AUTO_SCREEN_SCALE_FACTOR",
+    "QT_SCALE_FACTOR_ROUNDING_POLICY",
+}
+_SAFE_ENVIRONMENT_PREFIXES = (
+    "LM_STUDIO_",
+    "NVIDIA_",
+    "REDSIGHT_",
+    "RED_SIGHT_",
+    "VECTOR_BACKEND_",
+)
+_SENSITIVE_ENVIRONMENT_MARKERS = (
+    "AUTH",
+    "COOKIE",
+    "CREDENTIAL",
+    "KEY",
+    "PASSWORD",
+    "SECRET",
+    "TOKEN",
+)
+
+
+def _is_safe_environment_name(name: str) -> bool:
+    normalized = str(name).strip().upper()
+    if not normalized or any(marker in normalized for marker in _SENSITIVE_ENVIRONMENT_MARKERS):
+        return False
+    return normalized in _SAFE_ENVIRONMENT_NAMES or normalized.startswith(
+        _SAFE_ENVIRONMENT_PREFIXES
+    )
 
 
 def _handle_list_skills(params: Dict, contract: ToolContract) -> Dict:

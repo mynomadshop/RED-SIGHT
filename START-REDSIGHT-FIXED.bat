@@ -21,6 +21,12 @@ REM Set working directory to project root
 cd /d "%~dp0"
 
 REM Set RedSight environment variables
+set RED_SIGHT_PLATFORM__MODE=local_preferred
+set RED_SIGHT_PLATFORM__DATA_ROOT=%~dp0data
+set RED_SIGHT_LMSTUDIO__BASE_URL=http://127.0.0.1:1234/v1
+set RED_SIGHT_RETRIEVAL__VECTOR_BACKEND_URL=http://127.0.0.1:6333
+set RED_SIGHT_TELEMETRY__LOG_LEVEL=INFO
+REM Compatibility aliases for older gateway and installer components
 set RED_SIGHT_MODE=local_preferred
 set RED_SIGHT_DATA_ROOT=%~dp0data
 set LM_STUDIO_BASE_URL=http://127.0.0.1:1234/v1

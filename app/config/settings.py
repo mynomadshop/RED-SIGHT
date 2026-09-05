@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 # ─── Configuration Models ───────────────────────────────────────────
 
@@ -32,7 +32,7 @@ class PlatformConfig(BaseModel):
         description="Platform name for UI display and audit trails",
     )
     version: str = Field(
-        default="0.1.0",
+        default="11.6.0",
         description="Platform version",
     )
     
@@ -48,25 +48,40 @@ class PlatformConfig(BaseModel):
 class LmStudioConfig(BaseModel):
     """LM Studio provider configuration."""
     base_url: str = Field(
-        default="http://host.docker.internal:1234/v1",
+        default="http://127.0.0.1:1234/v1",
         description="LM Studio OpenAI-compatible API endpoint",
     )
     timeout_seconds: int = Field(
         default=180,
+        gt=0,
+        le=3600,
         description="Request timeout in seconds",
     )
     max_retries: int = Field(
         default=3,
+        ge=1,
+        le=10,
         description="Number of retry attempts on transient failures",
     )
     retry_delay_seconds: float = Field(
         default=2.0,
+        ge=0,
+        le=60,
         description="Delay between retries (exponential backoff)",
     )
     model_id: Optional[str] = Field(
         default=None,
         description="Default model to use (None = auto-select)",
     )
+    embedding_model_id: Optional[str] = Field(
+        default=None,
+        description="LM Studio embedding model (None = discover a loaded embedding model)",
+    )
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        return _validated_http_url(value, "LM Studio base URL")
 
 
 class RoutingConfig(BaseModel):
@@ -103,6 +118,37 @@ class RetrievalConfig(BaseModel):
         default="qdrant",
         description="Vector search backend: qdrant | chroma | faiss",
     )
+    vector_backend_url: Optional[str] = Field(
+        default=None,
+        description="Optional complete Qdrant URL; takes precedence over host and port",
+    )
+    vector_backend_host: str = Field(
+        default="127.0.0.1",
+        description="Qdrant host when a complete URL is not configured",
+    )
+    vector_backend_port: int = Field(
+        default=6333,
+        ge=1,
+        le=65535,
+        description="Qdrant REST port",
+    )
+    vector_backend_embedded: bool = Field(
+        default=False,
+        description="Run the persistent Qdrant store in-process",
+    )
+    vector_backend_path: Optional[str] = Field(
+        default=None,
+        description="Persistent embedded-Qdrant path (defaults below the platform data root)",
+    )
+    enable_embeddings: bool = Field(
+        default=False,
+        description="Load an embedding model during server startup",
+    )
+
+    @field_validator("vector_backend_url")
+    @classmethod
+    def validate_vector_backend_url(cls, value: Optional[str]) -> Optional[str]:
+        return _validated_http_url(value, "Qdrant URL") if value else None
     hybrid_search: bool = Field(
         default=True,
         description="Enable hybrid (dense + sparse) retrieval",
@@ -295,6 +341,51 @@ class Settings(BaseSettings):
     
     # Telemetry
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_legacy_environment_aliases(cls, data: Any) -> Any:
+        """Map established launcher variables into the typed nested settings.
+
+        Current configuration uses ``RED_SIGHT_<SECTION>__<FIELD>`` names.  The
+        Windows installer and earlier launchers also emit a small set of flat
+        variables, so accepting both forms keeps upgraded installations working.
+        Explicit constructor values and canonical nested variables always win.
+        """
+        values = dict(data or {})
+        aliases = (
+            ("RED_SIGHT_MODE", "platform", "mode"),
+            ("RED_SIGHT_DATA_ROOT", "platform", "data_root"),
+            ("LM_STUDIO_BASE_URL", "lmstudio", "base_url"),
+            ("LM_STUDIO_URL", "lmstudio", "base_url"),
+            ("LM_STUDIO_TIMEOUT", "lmstudio", "timeout_seconds"),
+            ("LM_STUDIO_MODEL", "lmstudio", "model_id"),
+            ("LM_STUDIO_EMBEDDING_MODEL", "lmstudio", "embedding_model_id"),
+            ("VECTOR_BACKEND_URL", "retrieval", "vector_backend_url"),
+            ("QDRANT_URL", "retrieval", "vector_backend_url"),
+            ("VECTOR_BACKEND_HOST", "retrieval", "vector_backend_host"),
+            ("VECTOR_BACKEND_PORT", "retrieval", "vector_backend_port"),
+            ("VECTOR_BACKEND_EMBEDDED", "retrieval", "vector_backend_embedded"),
+            ("VECTOR_BACKEND_PATH", "retrieval", "vector_backend_path"),
+            ("ENABLE_EMBEDDINGS", "retrieval", "enable_embeddings"),
+            ("EMBEDDING_MODEL", "retrieval", "embedding_model"),
+            ("GPU_VRAM_HEADROOM_GB", "routing", "vram_headroom_gb_per_gpu"),
+            ("LOG_LEVEL", "telemetry", "log_level"),
+        )
+
+        for env_name, section_name, field_name in aliases:
+            raw_value = os.getenv(env_name)
+            if raw_value is None:
+                continue
+            existing = values.get(section_name)
+            if isinstance(existing, BaseModel):
+                # An explicitly supplied typed section is authoritative.
+                continue
+            section = dict(existing or {})
+            section.setdefault(field_name, raw_value)
+            values[section_name] = section
+
+        return values
     
     @property
     def data_root_path(self) -> Path:
@@ -340,3 +431,14 @@ def reset_settings() -> None:
     """Reset settings singleton (useful for testing)."""
     global _settings
     _settings = None
+
+
+def _validated_http_url(value: str, label: str) -> str:
+    """Accept only credential-free HTTP(S) service URLs."""
+    candidate = str(value).strip().rstrip("/")
+    parsed = urlsplit(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"{label} must be an http:// or https:// URL with a hostname")
+    if parsed.username or parsed.password:
+        raise ValueError(f"{label} must not contain embedded credentials")
+    return candidate

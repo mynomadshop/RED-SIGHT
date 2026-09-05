@@ -16,7 +16,7 @@ class TestConfig:
         from app.config.settings import Settings
         settings = Settings()
         assert settings.platform.mode == "local_preferred"
-        assert settings.lmstudio.base_url == "http://host.docker.internal:1234/v1"
+        assert settings.lmstudio.base_url == "http://127.0.0.1:1234/v1"
         assert settings.routing.vram_headroom_gb_per_gpu == 3.0
     
     def test_settings_mode_validation(self):

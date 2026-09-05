@@ -7,6 +7,8 @@ Each capability can be checked before attempting to use a feature.
 
 from __future__ import annotations
 
+import json
+import urllib.request
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -70,14 +72,13 @@ class CapabilityRegistry:
 
         Probes GPU, LM Studio, Qdrant, and other subsystems.
         """
-        from app.acceleration.gpu import GpuScheduler
-        from app.models.lm_studio import LmStudioProvider
-        from app.retrieval.vector import VectorStore
+        from app.acceleration.gpu_telemetry import GpuTelemetry
+        from app.config.settings import get_settings
 
         # GPU capability
+        telemetry = GpuTelemetry()
         try:
-            scheduler = GpuScheduler()
-            gpus = scheduler.discover_gpus()
+            gpus = telemetry.get_gpu_status() if telemetry.initialize() else []
             if gpus:
                 self.register(Capability(
                     name="gpu",
@@ -97,17 +98,25 @@ class CapabilityRegistry:
                 description="GPU detection failed",
                 status=CapabilityStatus.MISSING,
             ))
+        finally:
+            telemetry.shutdown()
 
         # LM Studio capability
         try:
-            provider = LmStudioProvider()
-            health = provider.health_check()
-            if health.get("status") == "healthy":
+            base_url = get_settings().lmstudio.base_url
+            request = urllib.request.Request(
+                f"{base_url.rstrip('/')}/models",
+                headers={"Accept": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                payload = json.load(response)
+            model_count = len(payload.get("data", [])) if isinstance(payload, dict) else 0
+            if 200 <= response.status < 300:
                 self.register(Capability(
                     name="lm_studio",
                     description="LM Studio API is reachable",
                     status=CapabilityStatus.ENABLED,
-                    metadata={"model_count": health.get("model_count", 0)},
+                    metadata={"model_count": model_count},
                 ))
             else:
                 self.register(Capability(
@@ -124,8 +133,14 @@ class CapabilityRegistry:
 
         # Vector store capability
         try:
-            store = VectorStore()
-            store.initialize()
+            retrieval = get_settings().retrieval
+            qdrant_url = (
+                retrieval.vector_backend_url
+                or f"http://{retrieval.vector_backend_host}:{retrieval.vector_backend_port}"
+            ).rstrip("/")
+            with urllib.request.urlopen(f"{qdrant_url}/readyz", timeout=3) as response:
+                if not 200 <= response.status < 300:
+                    raise RuntimeError(f"Qdrant returned HTTP {response.status}")
             self.register(Capability(
                 name="vector_store",
                 description="Qdrant vector store is available",

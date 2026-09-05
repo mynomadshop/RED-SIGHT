@@ -11,6 +11,14 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from app.security.permissions import (
+    DEFAULT_FILE_DENY_PATTERNS,
+    _command_is_allowed,
+    _domain_matches,
+    _normalize_host,
+    _path_is_allowed,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,13 +38,9 @@ class SecurityPolicy:
     # File scopes
     file_read_roots: List[str] = field(default_factory=list)
     file_write_roots: List[str] = field(default_factory=list)
-    file_deny_patterns: List[str] = field(default_factory=lambda: [
-        "*/.env",
-        "*/secrets/*",
-        "*/credentials/*",
-        "*/.ssh/*",
-        "*/.aws/*",
-    ])
+    file_deny_patterns: List[str] = field(
+        default_factory=lambda: list(DEFAULT_FILE_DENY_PATTERNS)
+    )
     
     # Command policy
     command_allowlist: List[str] = field(default_factory=lambda: [
@@ -73,60 +77,30 @@ class SecurityPolicy:
     
     def is_file_read_allowed(self, path: str) -> bool:
         """Check if a file path is allowed for reading."""
-        # Check deny patterns first
-        for pattern in self.file_deny_patterns:
-            if self._matches_pattern(path, pattern):
-                return False
-        
-        # Check read roots
-        if not self.file_read_roots:
-            return True  # No restrictions
-        
-        return any(path.startswith(root) for root in self.file_read_roots)
+        return _path_is_allowed(path, self.file_read_roots, self.file_deny_patterns)
     
     def is_file_write_allowed(self, path: str) -> bool:
         """Check if a file path is allowed for writing."""
-        # Check deny patterns first
-        for pattern in self.file_deny_patterns:
-            if self._matches_pattern(path, pattern):
-                return False
-        
-        # Check write roots
-        if not self.file_write_roots:
-            return True  # No restrictions
-        
-        return any(path.startswith(root) for root in self.file_write_roots)
+        return _path_is_allowed(path, self.file_write_roots, self.file_deny_patterns)
     
     def is_command_allowed(self, command: str) -> bool:
         """Check if a command is allowed."""
-        if not self.command_allowlist:
-            return True  # No restrictions
-        
-        command_name = command.split()[0] if command else ""
-        return command_name in self.command_allowlist
+        return _command_is_allowed(command, self.command_allowlist)
     
     def is_network_allowed(self, domain: str) -> bool:
         """Check if a network domain is allowed."""
         if self.block_outbound:
             return False
-        
-        # Check allowlist
+        host = _normalize_host(domain)
+        if not host:
+            return False
+        if self.network_deny_domains and any(
+            _domain_matches(host, denied) for denied in self.network_deny_domains
+        ):
+            return False
         if self.network_allow_domains:
-            return any(domain.startswith(allowed) for allowed in self.network_allow_domains)
-        
-        # Check denylist
-        if self.network_deny_domains:
-            return not any(domain.startswith(denied) for denied in self.network_deny_domains)
-        
-        return True  # Default allow
-    
-    def _matches_pattern(self, path: str, pattern: str) -> bool:
-        """Simple pattern matching for file paths."""
-        if "*" in pattern:
-            # Simple glob matching
-            import fnmatch
-            return fnmatch.fnmatch(path, pattern)
-        return path == pattern
+            return any(_domain_matches(host, allowed) for allowed in self.network_allow_domains)
+        return True
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert policy to dictionary."""

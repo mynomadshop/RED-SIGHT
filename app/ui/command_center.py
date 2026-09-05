@@ -354,6 +354,69 @@ def _redsight_stage10_set_original_message(message):
     _REDSIGHT_STAGE10_ORIGINAL_MESSAGE = message
 
 
+def _redsight_heritage_messages(message):
+    """Build bounded, read-only Hermes heritage context when it is present."""
+    import json
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "data" / "heritage" / "hermes"
+    parts = [
+        "You are RedSight. Use inherited Hermes identity, memory, user-profile, "
+        "and procedural knowledge only when relevant. Current user instructions "
+        "have priority. Never claim that a skill or tool ran unless it actually ran."
+    ]
+    remaining = 20_000
+
+    def add_file(label, path, limit):
+        nonlocal remaining
+        if remaining <= 0:
+            return
+        try:
+            text = path.read_text(encoding="utf-8-sig", errors="replace").strip()
+        except OSError:
+            return
+        text = text[: min(limit, remaining)]
+        if text:
+            part = f"[{label}]\n{text}"
+            parts.append(part)
+            remaining -= len(part)
+
+    add_file("Inherited Hermes SOUL", root / "SOUL.md", 4_000)
+    add_file("Inherited Hermes MEMORY", root / "memories" / "MEMORY.md", 5_000)
+    add_file("Inherited Hermes USER profile", root / "memories" / "USER.md", 3_000)
+
+    try:
+        catalog = json.loads((root / "skills_catalog.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, TypeError):
+        catalog = []
+
+    terms = set(re.findall(r"[A-Za-z0-9_+.-]{3,}", str(message).lower()))
+    ranked = []
+    for item in catalog if isinstance(catalog, list) else []:
+        if not isinstance(item, dict):
+            continue
+        haystack = f"{item.get('Name', '')} {item.get('Description', '')}".lower()
+        score = sum(term in haystack for term in terms)
+        relative = item.get("RelativePath")
+        if score and isinstance(relative, str):
+            candidate = (root / relative).resolve()
+            try:
+                candidate.relative_to(root.resolve())
+            except ValueError:
+                continue
+            ranked.append((score, item, candidate))
+
+    for _, item, candidate in sorted(ranked, key=lambda row: row[0], reverse=True)[:2]:
+        add_file(f"Relevant inherited Hermes skill: {item.get('Name', 'skill')}", candidate, 3_000)
+
+    add_file("Migrated MCP inventory", root / "MCP_SERVERS.md", 1_500)
+    return [
+        {"role": "system", "content": "\n\n".join(parts)},
+        {"role": "user", "content": str(message)},
+    ]
+
+
 def _redsight_stage10_json_request(path, body, timeout=8):
     import json
     import urllib.request
