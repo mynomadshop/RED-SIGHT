@@ -9,8 +9,9 @@
     called from launch_redsight_command_center.py inside a try/except so a
     failure in the extension can never stop the UI from starting.
 
-    Three things are installed:
+    Four things are installed:
 
+      * app\ui\action_palette_stage106.py       provider-optional Settings base
       * app\ui\action_palette_stage114_mcp.py   MCP servers in Settings
       * app\ui\action_palette_stage115_lmstudio.py
                                                 LM Studio endpoint in Settings,
@@ -39,6 +40,7 @@ $ErrorActionPreference = 'Stop'
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 if (-not $OverlayDir) { $OverlayDir = $scriptDir }
+$repoRoot = Split-Path -Parent (Split-Path -Parent $scriptDir)
 
 . (Join-Path (Join-Path (Split-Path -Parent $scriptDir) 'scripts') 'RedSight-Common.ps1')
 
@@ -61,6 +63,19 @@ if (Test-Path -LiteralPath $overlayApp) {
         $copied++
     }
 }
+
+# Stage 10.6 is maintained with the application source because the repository
+# launcher imports it directly. Copy it explicitly as well so the overlay can
+# repair an older extracted payload that never contained the Settings base.
+$settingsSource = Join-Path $repoRoot 'app\ui\action_palette_stage106.py'
+$settingsDest = Join-Path $PayloadDir 'app\ui\action_palette_stage106.py'
+if (-not (Test-Path -LiteralPath $settingsSource -PathType Leaf)) {
+    throw "the Settings base module is missing from $settingsSource"
+}
+New-Item -ItemType Directory -Path (Split-Path -Parent $settingsDest) -Force -ErrorAction SilentlyContinue | Out-Null
+Copy-Item -LiteralPath $settingsSource -Destination $settingsDest -Force
+Write-RsLog '    + app\ui\action_palette_stage106.py' -Level DEBUG
+$copied++
 
 # The runtime configuration module lives at the payload root so setup can copy
 # it into each virtualenv's site-packages, where every RedSight process picks
@@ -112,6 +127,11 @@ if (-not (Test-Path -LiteralPath $patchFile)) {
 # --------------------------------------------------------------------------
 
 $hooks = @(
+    [pscustomobject]@{
+        Marker = '# REDSIGHT_STAGE106_SETTINGS'
+        Module = 'action_palette_stage106'
+        Alias  = '_rs106'
+    },
     [pscustomobject]@{
         Marker = '# REDSIGHT_STAGE114_MCP_SETTINGS'
         Module = 'action_palette_stage114_mcp'

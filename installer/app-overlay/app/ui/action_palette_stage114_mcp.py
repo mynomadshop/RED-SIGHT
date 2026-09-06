@@ -403,10 +403,13 @@ def install() -> bool:
         if tab is not None:
             try:
                 tab.apply()
-            except Exception:
-                import traceback
-
-                traceback.print_exc()
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "MCP servers",
+                    f"The MCP server settings were not saved:\n\n{exc}",
+                )
+                return None
         if original_apply is not None:
             return original_apply(self, *args, **kwargs)
         return None

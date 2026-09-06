@@ -284,6 +284,28 @@ jobs:
           if (Test-Path $uiPy) {
             & $uiPy -c "import PySide6, qasync, httpx, pydantic; print('imports ok')"
             Check '.venv-ui imports PySide6/qasync/httpx/pydantic' ($LASTEXITCODE -eq 0)
+
+            # Prove the real installed widgets construct without a provider
+            # file, API key, or LM Studio configuration. This catches missing
+            # overlay bases that compile cleanly but silently remove Settings.
+            $savedLocalAppData = $env:LOCALAPPDATA
+            $smokeLocalAppData = Join-Path $env:RUNNER_TEMP 'redsight-empty-settings'
+            New-Item -ItemType Directory -Path $smokeLocalAppData -Force | Out-Null
+            try {
+              $env:LOCALAPPDATA = $smokeLocalAppData
+              foreach ($name in @(
+                'REDSIGHT_ACTIVE_PROVIDER', 'REDSIGHT_PROVIDER_MODEL',
+                'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY',
+                'GEMINI_API_KEY', 'XAI_API_KEY', 'REDSIGHT_CUSTOM_API_KEY',
+                'LM_STUDIO_MODEL', 'RED_SIGHT_LMSTUDIO__MODEL_ID'
+              )) {
+                Remove-Item -LiteralPath "Env:\$name" -ErrorAction SilentlyContinue
+              }
+              & $uiPy "$dest\installer\tests\Test-SettingsUi.py"
+              Check 'UI opens unconfigured with complete top Settings' ($LASTEXITCODE -eq 0)
+            } finally {
+              $env:LOCALAPPDATA = $savedLocalAppData
+            }
           }
 
           # No build-machine paths may survive anywhere in the install.

@@ -18,13 +18,23 @@ async def chat_completion(request: dict):
     Accepts messages, model_id, and optional parameters.
     Returns streaming or non-streaming response.
     """
-    from app.server import lmstudio_provider
-    
-    if not lmstudio_provider:
-        raise HTTPException(status_code=503, detail="LM Studio provider not initialized")
+    from app.server import get_chat_provider
+
+    provider, configured_model, provider_name = get_chat_provider()
+    if provider is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No AI provider is configured. Open Settings from the top toolbar "
+                "and choose AI Provider."
+                if provider_name == "none"
+                else f"The selected AI provider ({provider_name}) has no usable credential. "
+                "Open Settings and add or test its configuration."
+            ),
+        )
     
     messages = request.get("messages", [])
-    model_id = request.get("model")
+    model_id = request.get("model") or configured_model
     stream = request.get("stream", False)
     temperature = request.get("temperature", 0.7)
     max_tokens = request.get("max_tokens")
@@ -36,7 +46,7 @@ async def chat_completion(request: dict):
         if stream:
             # For streaming, we need to return an SSE response
             # This is a simplified version - production would use StreamingResponse
-            response = await lmstudio_provider.chat(
+            response = await provider.chat(
                 messages=messages,
                 model_id=model_id,
                 stream=True,
@@ -55,7 +65,7 @@ async def chat_completion(request: dict):
                 "stream": False,
             }
         else:
-            response = await lmstudio_provider.chat(
+            response = await provider.chat(
                 messages=messages,
                 model_id=model_id,
                 stream=False,
@@ -80,20 +90,30 @@ async def chat_stream(request: dict):
     
     Returns tokens as they arrive for real-time display.
     """
-    from app.server import lmstudio_provider
-    
-    if not lmstudio_provider:
-        raise HTTPException(status_code=503, detail="LM Studio provider not initialized")
+    from app.server import get_chat_provider
+
+    provider, configured_model, provider_name = get_chat_provider()
+    if provider is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No AI provider is configured. Open Settings from the top toolbar "
+                "and choose AI Provider."
+                if provider_name == "none"
+                else f"The selected AI provider ({provider_name}) has no usable credential. "
+                "Open Settings and add or test its configuration."
+            ),
+        )
     
     messages = request.get("messages", [])
-    model_id = request.get("model")
+    model_id = request.get("model") or configured_model
     temperature = request.get("temperature", 0.7)
     
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided")
     
     try:
-        response = await lmstudio_provider.chat(
+        response = await provider.chat(
             messages=messages,
             model_id=model_id,
             stream=True,

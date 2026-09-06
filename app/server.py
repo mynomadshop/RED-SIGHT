@@ -8,10 +8,11 @@ Initializes the full knowledge pipeline (Qdrant + SQLite + Embeddings).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
@@ -89,6 +90,25 @@ plugin_manager: Optional["PluginManager"] = None
 event_bus: Optional["PluginEventBus"] = None
 
 
+def get_chat_provider() -> tuple[Any | None, str | None, str]:
+    """Return the provider selected in Settings, its model, and its slug.
+
+    With no provider file/environment value, preserve RedSight's historical
+    local-first behaviour. An explicit ``none`` is different: it is the valid
+    provider-free startup state exposed by the restored Settings dialog.
+    """
+    active = os.getenv("REDSIGHT_ACTIVE_PROVIDER", "").strip().lower()
+    model = os.getenv("REDSIGHT_PROVIDER_MODEL", "").strip() or None
+    if not active or active == "lmstudio":
+        return lmstudio_provider, model, "lmstudio"
+    if active == "none":
+        return None, None, "none"
+    if cloud_providers is None:
+        return None, model, active
+    provider_slug = "google" if active == "gemini" else active
+    return cloud_providers.get(provider_slug), model, active
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler — startup and shutdown."""
@@ -107,10 +127,19 @@ async def lifespan(app: FastAPI):
         gpu_telemetry.start_polling()
         logger.info("GPU telemetry initialized")
 
-    # Initialize LM Studio provider
+    # Initialize LM Studio as a capability, but do not make a provider-free or
+    # cloud-selected desktop wait for a local server it did not configure.
     lmstudio_provider = LmStudioProvider()
-    health = await lmstudio_provider.health_check()
-    logger.info(f"LM Studio health: {'OK' if health else 'UNREACHABLE'}")
+    requested_provider = os.getenv("REDSIGHT_ACTIVE_PROVIDER", "").strip().lower()
+    if requested_provider and requested_provider != "lmstudio":
+        logger.info("LM Studio startup probe skipped; selected provider is %s", requested_provider)
+    else:
+        try:
+            health = await asyncio.wait_for(lmstudio_provider.health_check(), timeout=8.0)
+        except TimeoutError:
+            health = False
+            logger.warning("LM Studio startup probe timed out after 8 seconds")
+        logger.info("LM Studio health: %s", "OK" if health else "UNREACHABLE")
 
     # Initialize job scheduler
     job_scheduler = JobSchedulerImpl(gpu_telemetry=gpu_telemetry)
@@ -611,7 +640,12 @@ async def lifespan(app: FastAPI):
 
     # 18. Cloud provider registry
     from app.models.cloud_providers import (
-        CloudProviderRegistry, OpenAIProvider, AnthropicProvider, GoogleGeminiProvider,
+        AnthropicProvider,
+        CloudProviderRegistry,
+        CustomOpenAIProvider,
+        GoogleGeminiProvider,
+        OpenAIProvider,
+        XAIProvider,
     )
     cloud_registry = CloudProviderRegistry()
     if settings.is_cloud_allowed:
@@ -623,6 +657,7 @@ async def lifespan(app: FastAPI):
                 GoogleGeminiProvider,
                 os.getenv("GOOGLE_API_KEY", "") or os.getenv("GEMINI_API_KEY", ""),
             ),
+            ("xAI", XAIProvider, os.getenv("XAI_API_KEY", "")),
         )
         for name, provider_type, api_key in configured_providers:
             if not api_key:
@@ -632,6 +667,20 @@ async def lifespan(app: FastAPI):
                 cloud_registry.register(provider_type(api_key=api_key))
             except Exception as exc:
                 logger.warning("Failed to register %s provider: %s", name, exc)
+        custom_url = os.getenv("REDSIGHT_CUSTOM_BASE_URL", "")
+        if custom_url:
+            try:
+                cloud_registry.register(
+                    CustomOpenAIProvider(
+                        api_key=os.getenv("REDSIGHT_CUSTOM_API_KEY", ""),
+                        base_url=custom_url,
+                        model_id=os.getenv("REDSIGHT_PROVIDER_MODEL", ""),
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Failed to register custom provider: %s", exc)
+        else:
+            logger.info("Custom cloud provider is not configured")
     else:
         logger.info("Cloud providers disabled by local-first routing policy")
     cloud_providers = cloud_registry

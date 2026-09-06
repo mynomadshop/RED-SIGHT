@@ -606,6 +606,17 @@ function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
 
+  { Silent installs do not display wizard pages, so there is nobody available
+    to answer custom confirmation boxes. /SUPPRESSMSGBOXES only suppresses
+    Inno's own suppressible messages; a MsgBox created here would still block
+    forever. All page values already have safe defaults and ScanHardware is
+    called again by GetBootstrapArgs, so unattended setup can continue. }
+  if WizardSilent then
+  begin
+    Log('silent setup: accepting wizard defaults without interactive confirmations');
+    Exit;
+  end;
+
   { Scan on the way out of the welcome page so the profile page can show real
     findings without freezing the wizard at startup. }
   if CurPageID = wpWelcome then
@@ -820,11 +831,13 @@ begin
   begin
     if ExistingVer = '{#AppVersion}' then
     begin
-      if MsgBox('RedSight {#AppVersion} is already installed at:' + #13#10#13#10 +
-                '    ' + ExistingPath + #13#10#13#10 +
-                'Only one installation is allowed per computer, so setup will reinstall ' +
-                'over it and re-run dependency setup. Continue?',
-                mbConfirmation, MB_YESNO) <> IDYES then
+      if WizardSilent then
+        Log('silent setup: reinstalling over the existing {#AppVersion} installation')
+      else if MsgBox('RedSight {#AppVersion} is already installed at:' + #13#10#13#10 +
+                     '    ' + ExistingPath + #13#10#13#10 +
+                     'Only one installation is allowed per computer, so setup will reinstall ' +
+                     'over it and re-run dependency setup. Continue?',
+                     mbConfirmation, MB_YESNO) <> IDYES then
       begin
         Result := False;
         Exit;
@@ -837,10 +850,13 @@ begin
 
   if not IsAdminInstallMode then
   begin
-    MsgBox('RedSight setup must be run as Administrator.' + #13#10#13#10 +
-           'It installs Docker Desktop, enables the WSL2 Windows features and ' +
-           'writes to Program Files. Right-click the installer and choose ' +
-           '"Run as administrator".', mbCriticalError, MB_OK);
+    if not WizardSilent then
+      MsgBox('RedSight setup must be run as Administrator.' + #13#10#13#10 +
+             'It installs Docker Desktop, enables the WSL2 Windows features and ' +
+             'writes to Program Files. Right-click the installer and choose ' +
+             '"Run as administrator".', mbCriticalError, MB_OK)
+    else
+      Log('silent setup: administrator privileges are required; aborting');
     Result := False;
     Exit;
   end;
@@ -849,6 +865,12 @@ begin
   begin
     if FreeMB < 8192 then
     begin
+      if WizardSilent then
+      begin
+        Log('silent setup: fewer than 8192 MB are free on the system drive; aborting');
+        Result := False;
+        Exit;
+      end;
       if MsgBox('Only ' + IntToStr(FreeMB) + ' MB is free on the system drive.' + #13#10#13#10 +
                 'RedSight needs roughly 8 GB once its Python packages and Docker ' +
                 'images are installed. Continue anyway?',

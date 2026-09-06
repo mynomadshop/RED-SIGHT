@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Tests for the RedSight application overlay.
 
-Covers three things:
+Covers four things:
 
+  * the provider-optional Stage 10.6 Settings base and its durable storage;
   * the MCP settings tab - how a pasted path is turned into server definitions,
     and how those definitions are read back from the file the native MCP layer
     actually loads;
@@ -27,18 +28,20 @@ import types
 from pathlib import Path
 
 OVERLAY = Path(__file__).resolve().parents[1] / "app-overlay"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _stub_pyside6() -> None:
     """Install a minimal PySide6 stand-in so the module imports headlessly."""
     names = {
-        "PySide6.QtCore": ["Qt", "QThread"],
-        "PySide6.QtGui": ["QFont"],
+        "PySide6.QtCore": ["Qt", "QThread", "QTimer", "QUrl"],
+        "PySide6.QtGui": ["QAction", "QDesktopServices", "QFont"],
         "PySide6.QtWidgets": [
-            "QAbstractItemView", "QComboBox", "QFileDialog", "QFormLayout",
-            "QHBoxLayout", "QLabel", "QLineEdit", "QListWidget",
-            "QListWidgetItem", "QMessageBox", "QPushButton", "QSpinBox",
-            "QVBoxLayout", "QWidget",
+            "QAbstractItemView", "QCheckBox", "QComboBox", "QDialog",
+            "QDialogButtonBox", "QFileDialog", "QFormLayout", "QHBoxLayout",
+            "QLabel", "QLineEdit", "QListWidget", "QListWidgetItem",
+            "QMessageBox", "QPlainTextEdit", "QPushButton", "QSizePolicy",
+            "QSpinBox", "QTabWidget", "QToolBar", "QVBoxLayout", "QWidget",
         ],
     }
     root = types.ModuleType("PySide6")
@@ -57,10 +60,22 @@ def _stub_pyside6() -> None:
 
 def _load_module(name: str = "app.ui.action_palette_stage114_mcp"):
     _stub_pyside6()
-    if str(OVERLAY) not in sys.path:
-        sys.path.insert(0, str(OVERLAY))
     import importlib
+    import importlib.util
 
+    overlay_file = OVERLAY.joinpath(*name.split(".")).with_suffix(".py")
+    if overlay_file.is_file():
+        sys.modules.pop(name, None)
+        spec = importlib.util.spec_from_file_location(name, overlay_file)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot load {overlay_file}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
     return importlib.import_module(name)
 
 
@@ -87,6 +102,88 @@ def expect_error(name: str, fn, *args) -> None:
         check(name, True)
         return
     check(name, False, "(no error raised)")
+
+
+def _stage106_settings_checks() -> None:
+    """Settings works before either an API key or local server exists."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        os.environ["LOCALAPPDATA"] = tmp
+        sys.modules.pop("app.ui.action_palette_stage106", None)
+        settings = _load_module("app.ui.action_palette_stage106")
+
+        print("\n== Stage 10.6: provider-optional startup ==")
+        missing = settings.load_provider_config(root / "missing.json")
+        check("a missing provider file is a valid state", missing["active_provider"] == "none")
+        check("no provider probe touches the network", settings.probe_provider("none")[0] is False)
+        applied = settings.apply_provider_environment(missing)
+        check("an unconfigured provider is exported without a key", applied == {
+            "REDSIGHT_ACTIVE_PROVIDER": "none",
+            "REDSIGHT_PROVIDER_MODEL": "",
+        })
+
+        print("\n== Stage 10.6: provider storage ==")
+        config_path = root / "settings" / "provider.json"
+        secrets_path = root / "settings" / "provider-secrets.json"
+        config = settings.provider_defaults()
+        config["active_provider"] = "openai"
+        config["models"]["openai"] = "test-model"
+
+        # CI is not Windows; stand in for DPAPI while retaining the important
+        # storage contract (only encrypted material is written and read back).
+        settings.protect_secret = lambda value: "cipher:" + value[::-1]
+        settings.unprotect_secret = lambda value: value.removeprefix("cipher:")[::-1]
+        written = settings.save_provider_config(
+            config,
+            api_key="private-test-key",
+            config_path=config_path,
+            secrets_path=secrets_path,
+        )
+        check("provider metadata is written", written == config_path and written.is_file())
+        check("provider files have no byte order mark", not written.read_bytes().startswith(b"\xef\xbb\xbf"))
+        check("the selected provider round-trips", settings.load_provider_config(written)["active_provider"] == "openai")
+        check("the selected model round-trips", settings.load_provider_config(written)["models"]["openai"] == "test-model")
+        check("the plaintext key is never written", b"private-test-key" not in secrets_path.read_bytes())
+        check("the encrypted key can be recovered", settings.configured_secret("openai", secrets_path) == "private-test-key")
+
+        settings.save_provider_config(
+            config,
+            api_key=None,
+            config_path=config_path,
+            secrets_path=secrets_path,
+        )
+        check("saving a blank key preserves the existing one", settings.has_stored_secret("openai", secrets_path))
+        settings.save_provider_config(
+            config,
+            clear_secret=True,
+            config_path=config_path,
+            secrets_path=secrets_path,
+        )
+        check("remove saved key is explicit and effective", not settings.has_stored_secret("openai", secrets_path))
+
+        custom = settings.provider_defaults()
+        custom["active_provider"] = "custom"
+        expect_error(
+            "a custom provider requires a complete URL",
+            settings.save_provider_config,
+            custom,
+        )
+
+        print("\n== Stage 10.6: shared runtime storage ==")
+        runtime_path = root / "settings" / "lmstudio.json"
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_path.write_text(
+            json.dumps({"base_url": "http://lan:1234/v1", "model": "loaded-model"}),
+            encoding="utf-8",
+        )
+        settings.save_runtime_config({"runtime_mode": "native", "auto_start": False}, runtime_path)
+        runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+        check("runtime changes preserve the LM Studio endpoint", runtime["base_url"] == "http://lan:1234/v1")
+        check("runtime changes preserve the LM Studio model", runtime["model"] == "loaded-model")
+        check("runtime mode is saved", runtime["runtime_mode"] == "native")
+
+        launcher = (REPO_ROOT / "launch_redsight_command_center.py").read_text(encoding="utf-8")
+        check("the launcher installs the Settings base", "# REDSIGHT_STAGE106_SETTINGS" in launcher and "_rs106.install()" in launcher)
 
 
 
@@ -154,6 +251,40 @@ def _stage115_runtime_checks() -> None:
         env = rb.environment()
         check("container mode leaves the vector backend alone", "VECTOR_BACKEND_EMBEDDED" not in env)
         check("no model means no model variable", "LM_STUDIO_MODEL" not in env)
+
+        print("\n== Stage 11.5: provider environment bridge ==")
+        check(
+            "no provider file preserves legacy local-first routing",
+            rb.provider_environment(Path(tmp) / "missing-provider.json") == {},
+        )
+        rb.PROVIDER_CONFIG_PATH.write_text(
+            json.dumps({
+                "version": 1,
+                "active_provider": "openai",
+                "models": {"openai": "configured-model"},
+                "custom_base_url": "",
+            }),
+            encoding="utf-8",
+        )
+        rb.PROVIDER_SECRETS_PATH.write_text(
+            json.dumps({"openai": "cipher:yek-tset"}),
+            encoding="utf-8",
+        )
+        rb._unprotect_secret = lambda value: value.removeprefix("cipher:")[::-1]
+        provider_env = rb.provider_environment()
+        check("the selected provider is exported", provider_env["REDSIGHT_ACTIVE_PROVIDER"] == "openai")
+        check("the selected model is exported", provider_env["REDSIGHT_PROVIDER_MODEL"] == "configured-model")
+        check("the provider enables governed cloud routing", provider_env["RED_SIGHT_PLATFORM__MODE"] == "cloud_allowed")
+        check("the decrypted key reaches the provider's standard variable", provider_env["OPENAI_API_KEY"] == "test-key")
+        check("the combined runtime environment includes provider settings", rb.environment()["REDSIGHT_ACTIVE_PROVIDER"] == "openai")
+
+        rb.PROVIDER_CONFIG_PATH.write_text(
+            json.dumps({"version": 1, "active_provider": "none", "models": {}}),
+            encoding="utf-8",
+        )
+        provider_env = rb.provider_environment()
+        check("an explicit provider-free choice is retained", provider_env["REDSIGHT_ACTIVE_PROVIDER"] == "none")
+        check("provider-free startup exports no API key", not any(key.endswith("API_KEY") for key in provider_env))
 
         print("\n== Stage 11.5: applying the environment ==")
         os.environ["LM_STUDIO_BASE_URL"] = "http://explicit/v1"
@@ -413,6 +544,7 @@ def main() -> int:
             "-y server" in mcp.describe({"command": "npx", "args": ["-y", "server"]}),
         )
 
+    _stage106_settings_checks()
     _stage115_runtime_checks()
     _stage115_ui_checks()
 

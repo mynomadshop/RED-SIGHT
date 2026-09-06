@@ -41,20 +41,26 @@ site-packages is fully usable, and it must never be able to stop Python.
 
 from __future__ import annotations
 
+import base64
+import ctypes
 import json
 import os
 import re
+from ctypes import wintypes
 from pathlib import Path
 from typing import Any, Dict
 
 __all__ = [
     "CONFIG_PATH",
     "DEFAULT_BASE_URL",
+    "PROVIDER_CONFIG_PATH",
+    "PROVIDER_SECRETS_PATH",
     "apply_environment",
     "base_url",
     "load_config",
     "model_id",
     "normalize_base_url",
+    "provider_environment",
     "root_url",
     "save_config",
 ]
@@ -74,6 +80,111 @@ def _local_app_data() -> Path:
 
 
 CONFIG_PATH = _local_app_data() / "RedSight" / "settings" / "lmstudio.json"
+PROVIDER_CONFIG_PATH = CONFIG_PATH.with_name("provider.json")
+PROVIDER_SECRETS_PATH = CONFIG_PATH.with_name("provider-secrets.json")
+
+_PROVIDERS = {"none", "lmstudio", "openai", "anthropic", "gemini", "xai", "custom"}
+_PROVIDER_KEY_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GOOGLE_API_KEY",
+    "xai": "XAI_API_KEY",
+    "custom": "REDSIGHT_CUSTOM_API_KEY",
+}
+
+
+class _DataBlob(ctypes.Structure):
+    _fields_ = (("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_ubyte)))
+
+
+def _blob(data: bytes) -> tuple[_DataBlob, Any]:
+    buffer = ctypes.create_string_buffer(data)
+    pointer = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
+    return _DataBlob(len(data), pointer), buffer
+
+
+def _read_object(path: Path) -> Dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _unprotect_secret(value: str) -> str:
+    """Read a CurrentUser DPAPI value without ever making startup fail."""
+    if os.name != "nt" or not value:
+        return ""
+    try:
+        raw = base64.b64decode(value, validate=True)
+        incoming, keepalive = _blob(raw)
+        outgoing = _DataBlob()
+        crypt32 = ctypes.windll.crypt32
+        kernel32 = ctypes.windll.kernel32
+        crypt32.CryptUnprotectData.argtypes = (
+            ctypes.POINTER(_DataBlob),
+            ctypes.POINTER(wintypes.LPWSTR),
+            ctypes.POINTER(_DataBlob),
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(_DataBlob),
+        )
+        crypt32.CryptUnprotectData.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        if not crypt32.CryptUnprotectData(
+            ctypes.byref(incoming), None, None, None, None, 0x01, ctypes.byref(outgoing)
+        ):
+            return ""
+        try:
+            return ctypes.string_at(outgoing.pbData, outgoing.cbData).decode("utf-8")
+        finally:
+            del keepalive
+            kernel32.LocalFree(ctypes.cast(outgoing.pbData, ctypes.c_void_p))
+    except Exception:
+        return ""
+
+
+def provider_environment(
+    config_path: Path | str | None = None,
+    secrets_path: Path | str | None = None,
+) -> Dict[str, str]:
+    """Translate the Settings provider files into backend environment values.
+
+    No provider file means legacy local-first behaviour. An explicit ``none``
+    means the UI should open unconfigured and chat should direct the user back
+    to Settings instead of silently trying a local or cloud service.
+    """
+    config_target = Path(config_path) if config_path else PROVIDER_CONFIG_PATH
+    if not config_target.is_file():
+        return {}
+    stored = _read_object(config_target)
+    active = str(stored.get("active_provider") or "none").strip().lower()
+    if active not in _PROVIDERS:
+        active = "none"
+
+    models = stored.get("models")
+    model = str(models.get(active) or "").strip() if isinstance(models, dict) else ""
+    result = {
+        "REDSIGHT_ACTIVE_PROVIDER": active,
+        "REDSIGHT_PROVIDER_MODEL": model,
+    }
+    if active not in _PROVIDER_KEY_ENV:
+        return result
+
+    result["RED_SIGHT_PLATFORM__MODE"] = "cloud_allowed"
+    result["RED_SIGHT_ROUTING__CLOUD_FALLBACK"] = "true"
+    secret_target = Path(secrets_path) if secrets_path else PROVIDER_SECRETS_PATH
+    encrypted = _read_object(secret_target).get(active)
+    secret = _unprotect_secret(str(encrypted or ""))
+    if secret:
+        result[_PROVIDER_KEY_ENV[active]] = secret
+    if active == "custom":
+        custom_url = str(stored.get("custom_base_url") or "").strip().rstrip("/")
+        if custom_url:
+            result["REDSIGHT_CUSTOM_BASE_URL"] = custom_url
+    return result
 
 
 def normalize_base_url(value: Any) -> str:
@@ -214,6 +325,7 @@ def environment(path: Path | str | None = None) -> Dict[str, str]:
         vars_["VECTOR_BACKEND_EMBEDDED"] = "true"
         vars_["VECTOR_BACKEND_HOST"] = "127.0.0.1"
         vars_.setdefault("VECTOR_BACKEND_URL", "")
+    vars_.update(provider_environment())
     return vars_
 
 

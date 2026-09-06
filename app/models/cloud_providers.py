@@ -15,6 +15,8 @@ class CloudProvider(StrEnum):
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
     GOOGLE = "google"
+    XAI = "xai"
+    CUSTOM = "custom"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,13 +128,66 @@ class OpenAIProvider(_BaseProvider):
         stream: bool = False,
         **kwargs: Any,
     ) -> AsyncIterator[str] | str:
-        payload = {"model": model_id or self.models[0].id, "messages": messages, **kwargs}
+        payload = {
+            "model": model_id or self.models[0].id,
+            "messages": messages,
+            **{key: value for key, value in kwargs.items() if value is not None},
+        }
         response = await _maybe_await(self._get_client().post("/chat/completions", json=payload))
         response.raise_for_status()
         data = response.json()
         choices = data.get("choices", [])
         text = choices[0].get("message", {}).get("content", "") if choices else ""
         return _one_chunk(text) if stream else text
+
+
+class XAIProvider(OpenAIProvider):
+    """xAI's OpenAI-compatible chat endpoint."""
+
+    provider = CloudProvider.XAI
+    base_url = "https://api.x.ai/v1"
+    models = (
+        CloudModelInfo(
+            "grok-4.6",
+            "Grok 4.6",
+            provider,
+            context_size=131_072,
+            is_reasoning=True,
+        ),
+    )
+
+
+class CustomOpenAIProvider(OpenAIProvider):
+    """A user-configured OpenAI-compatible endpoint."""
+
+    provider = CloudProvider.CUSTOM
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str = "",
+        timeout: float = 180.0,
+    ) -> None:
+        endpoint = str(base_url or "").strip().rstrip("/")
+        if not endpoint.startswith(("http://", "https://")):
+            raise ValueError("Custom provider base URL must use http:// or https://")
+        self.base_url = endpoint
+        selected_model = str(model_id or "default").strip()
+        self.models = (
+            CloudModelInfo(
+                selected_model,
+                selected_model,
+                self.provider,
+            ),
+        )
+        super().__init__(api_key=api_key, timeout=timeout)
+
+    def _headers(self) -> dict[str, str]:
+        headers = _BaseProvider._headers(self)
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
 
 class AnthropicProvider(_BaseProvider):

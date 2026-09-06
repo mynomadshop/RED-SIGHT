@@ -53,6 +53,18 @@ from app.ui.stable_command_center import StableCommandCenterMainWindow
 CommandCenterMainWindow = StableCommandCenterMainWindow  # noqa: F811 - compatibility alias
 install_action_hooks(CommandCenterMainWindow)
 
+# REDSIGHT_STAGE106_SETTINGS
+try:
+    from app.ui import action_palette_stage106 as _rs106
+
+    _rs106.install()
+except Exception:
+    # Settings is additive: report the defect, but never turn it into another
+    # reason the Command Center cannot open.
+    import traceback
+
+    traceback.print_exc()
+
 # REDSIGHT_STAGE112_UI_EXTENSION
 # Installer overlays attach above this compatibility marker.
 

@@ -838,10 +838,13 @@ def install_settings_tab() -> bool:
         if tab is not None:
             try:
                 tab.apply()
-            except Exception:
-                import traceback
-
-                traceback.print_exc()
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "LM Studio",
+                    f"The LM Studio settings were not saved:\n\n{exc}",
+                )
+                return None
         if original_apply is not None:
             return original_apply(self, *args, **kwargs)
         return None

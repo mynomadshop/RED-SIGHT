@@ -396,6 +396,16 @@ Assert-True -Name 'no apiKey is appended to the argument string' `
             -Condition ($codeText -notmatch "Args\s*:=\s*Args\s*\+\s*'\s*-ApiKey")
 Assert-True -Name 'a leftover answer file is deleted' -Condition ($codeText -match 'DeleteFile\(AnswerPath\)')
 
+# Custom MsgBox calls are not affected by /SUPPRESSMSGBOXES. The previous
+# installer reached the blank-key warning during /VERYSILENT CI installation
+# and waited forever for a button no user could press.
+Assert-True -Name 'silent setup bypasses every wizard confirmation' `
+            -Condition ($codeText -match 'function NextButtonClick[\s\S]{0,900}if WizardSilent then[\s\S]{0,160}Exit')
+Assert-True -Name 'silent reinstall does not request confirmation' `
+            -Condition ($codeText -match "ExistingVer = '\{#AppVersion\}'[\s\S]{0,120}if WizardSilent then")
+Assert-True -Name 'silent low-disk setup aborts instead of prompting' `
+            -Condition ($codeText -match 'FreeMB < 8192[\s\S]{0,120}if WizardSilent then[\s\S]{0,200}Result := False')
+
 # Docker must never be requested on a machine the scan says cannot run WSL2.
 Assert-True -Name 'Docker is gated on the WSL2 verdict' `
             -Condition ($codeText -match "WizardIsComponentSelected\('docker'\)\s*and\s*HwWsl2")

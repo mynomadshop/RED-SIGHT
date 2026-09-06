@@ -9,11 +9,19 @@ from types import ModuleType, SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
+from app.api.routes.chat import chat_completion
 from app.api.routes.skills_tools import PermissionCheckRequest, ToolExecuteRequest
 from app.config.settings import Settings
 from app.core.interfaces import AuditAction, Capability, GpuInfo
+from app.models.cloud_providers import (
+    CloudProvider,
+    CloudProviderRegistry,
+    CustomOpenAIProvider,
+    XAIProvider,
+)
 from app.models.lmstudio import LmStudioProvider
 from app.retrieval.qdrant_client import QdrantClientWrapper
 from app.security.audit import AuditLogger
@@ -154,6 +162,57 @@ def test_lmstudio_provider_chat_stream_embedding_and_rerank():
 
     asyncio.run(exercise())
     assert any(request.url.path.endswith("/chat/completions") for request in requests)
+
+
+def test_settings_cloud_providers_cover_xai_and_custom_endpoints():
+    registry = CloudProviderRegistry()
+    xai = XAIProvider(api_key="xai-key")
+    custom = CustomOpenAIProvider(
+        api_key="custom-key",
+        base_url="https://models.example.test/v1/",
+        model_id="private-model",
+    )
+    registry.register(xai)
+    registry.register(custom)
+
+    assert registry.get(CloudProvider.XAI) is xai
+    assert registry.get(CloudProvider.CUSTOM) is custom
+    assert xai._headers()["Authorization"] == "Bearer xai-key"
+    assert custom.base_url == "https://models.example.test/v1"
+    assert custom.list_models()[0].id == "private-model"
+    assert "Authorization" not in CustomOpenAIProvider(
+        api_key="",
+        base_url="https://models.example.test/v1",
+    )._headers()
+
+    with pytest.raises(ValueError, match="http"):
+        CustomOpenAIProvider(api_key="key", base_url="file:///tmp/provider")
+
+
+def test_chat_route_allows_provider_free_startup_and_uses_saved_model(monkeypatch):
+    fake_server = ModuleType("app.server")
+    fake_server.get_chat_provider = lambda: (None, None, "none")
+    monkeypatch.setitem(sys.modules, "app.server", fake_server)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(chat_completion({"messages": [{"role": "user", "content": "hello"}]}))
+    assert exc_info.value.status_code == 503
+    assert "Settings" in str(exc_info.value.detail)
+
+    seen: dict[str, object] = {}
+
+    class Provider:
+        async def chat(self, **kwargs):
+            seen.update(kwargs)
+            return "configured response"
+
+    fake_server.get_chat_provider = lambda: (Provider(), "saved-model", "openai")
+    response = asyncio.run(
+        chat_completion({"messages": [{"role": "user", "content": "hello"}]})
+    )
+    assert response["message"] == "configured response"
+    assert response["model"] == "saved-model"
+    assert seen["model_id"] == "saved-model"
 
 
 def test_qdrant_url_is_not_combined_with_host(monkeypatch):
