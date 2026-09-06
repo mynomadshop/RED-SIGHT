@@ -158,8 +158,20 @@ jobs:
       - name: Show build artefacts
         shell: pwsh
         run: |
+          $expected = @(
+            "RedSight-Setup-$env:RS_VERSION.exe",
+            "RedSightDesktopWindows$env:RS_VERSION.zip",
+            "SHA256SUMS-v$env:RS_VERSION.txt",
+            "manifest-v$env:RS_VERSION.json"
+          )
+          foreach ($name in $expected) {
+            $path = Join-Path 'dist' $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "required build artefact is missing: $path"
+            }
+          }
           Get-ChildItem dist -File | Format-Table Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
-          Get-Content (Get-ChildItem dist -Filter 'manifest-v*.json' | Select-Object -First 1).FullName
+          Get-Content -LiteralPath (Join-Path 'dist' "manifest-v$env:RS_VERSION.json")
 
       # ----------------------------------------------------------------------
       # Install test. This is the point of building on Windows: the installer we
@@ -280,7 +292,7 @@ jobs:
           Write-Host 'uninstall removed the virtual environments'
 
       - name: Upload release zip
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: RedSightDesktopWindows-${{ env.RS_VERSION }}
           path: |
@@ -293,7 +305,7 @@ jobs:
 
       - name: Upload setup logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: setup-logs-${{ env.RS_VERSION }}
           path: |

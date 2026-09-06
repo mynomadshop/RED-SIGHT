@@ -1499,6 +1499,16 @@ foreach ($installArtifact in @("'runtime'", "'unins*.exe'", "'unins*.dat'", "'re
 Assert-True -Name 'runtime is pruned by path, so an app package named runtime survives' `
             -Condition ($buildScript -match "(?s)\`$prunePaths = @\(.*?'runtime',")
 
+# The workflow validates and uploads these files from dist. They must survive
+# removal of the temporary _zip staging directory, not exist only inside the
+# release archive.
+Assert-True -Name 'the build publishes SHA256SUMS beside the release archive' `
+            -Condition ($buildScript -match [regex]::Escape(
+                'Copy-Item -LiteralPath $sumsPath -Destination (Join-Path $OutputDir $sumsName) -Force'))
+Assert-True -Name 'the build publishes the release manifest beside the release archive' `
+            -Condition ($buildScript -match [regex]::Escape(
+                'Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $OutputDir $manifestName) -Force'))
+
 $gitignore = Get-Content -LiteralPath (Join-Path $repoRoot '.gitignore')
 Assert-True -Name 'the models ignore rule is anchored so app/models is committable' `
             -Condition (-not ($gitignore | Where-Object { $_.Trim() -eq 'models/' }))

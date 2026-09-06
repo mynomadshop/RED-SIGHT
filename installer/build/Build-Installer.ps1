@@ -527,7 +527,8 @@ Copy-Item -LiteralPath $setupExe -Destination $stage -Force
 
 # SHA256SUMS
 $sumsName = "SHA256SUMS-v$Version.txt"
-"$setupHash  $($setupInfo.Name)" | Set-Content -LiteralPath (Join-Path $stage $sumsName) -Encoding ascii
+$sumsPath = Join-Path $stage $sumsName
+"$setupHash  $($setupInfo.Name)" | Set-Content -LiteralPath $sumsPath -Encoding ascii
 
 # README
 $readmeTemplate = Join-Path (Join-Path $installerRoot 'docs') 'README.template.txt'
@@ -618,8 +619,16 @@ $manifest = [ordered]@{
         bytes = $payloadBytes
     }
 }
-Write-RsUtf8File -Path (Join-Path $stage "manifest-v$Version.json") `
-                 -Content ($manifest | ConvertTo-Json -Depth 8)
+$manifestName = "manifest-v$Version.json"
+$manifestPath = Join-Path $stage $manifestName
+Write-RsUtf8File -Path $manifestPath -Content ($manifest | ConvertTo-Json -Depth 8)
+
+# Keep verification sidecars both inside the end-user zip and beside it in the
+# build output. CI and release tooling inspect these files before uploading the
+# archive; leaving them only in the temporary zip staging directory made the
+# build succeed and the immediately following verification step fail.
+Copy-Item -LiteralPath $sumsPath -Destination (Join-Path $OutputDir $sumsName) -Force
+Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $OutputDir $manifestName) -Force
 
 $zipPath = Join-Path $OutputDir "RedSightDesktopWindows$Version.zip"
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
