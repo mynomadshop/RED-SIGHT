@@ -190,24 +190,70 @@ jobs:
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCANCEL',
             "/DIR=$dest", '/COMPONENTS=core', "/LOG=$log"
           )
-          if (-not $p.WaitForExit(3600000)) { $p.Kill($true); throw 'installer did not finish within 60 minutes' }
-          Write-Host "installer exit code: $($p.ExitCode)"
 
-          if (Test-Path $log) {
-            Write-Host '=== setup log (tail) ==='
-            Get-Content $log -Tail 40
+          # A stalled hardware utility or package manager used to leave this
+          # job silent for the full hour. Every long child operation refreshes
+          # the bootstrap log; stop after ten minutes without log activity and
+          # print the evidence before failing.
+          $started = Get-Date
+          $deadline = $started.AddMinutes(60)
+          $nextStatus = $started
+          $timedOut = $false
+          $timeoutReason = ''
+          try {
+            while (-not $p.WaitForExit(30000)) {
+              $now = Get-Date
+              $diagnosticFiles = @()
+              if (Test-Path -LiteralPath $log) { $diagnosticFiles += Get-Item -LiteralPath $log }
+              $diagnosticFiles += @(Get-ChildItem "$env:LOCALAPPDATA\RedSight\logs" -Filter 'bootstrap-*.log' -File -ErrorAction SilentlyContinue)
+              $latest = $diagnosticFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+              $lastActivity = if ($latest) { $latest.LastWriteTime } else { $started }
+
+              if ($now -ge $nextStatus) {
+                $elapsed = [math]::Round(($now - $started).TotalMinutes, 1)
+                Write-Host "installer still running after $elapsed minute(s); latest diagnostic activity: $lastActivity"
+                if ($latest) { Get-Content -LiteralPath $latest.FullName -Tail 8 -ErrorAction SilentlyContinue }
+                $nextStatus = $now.AddMinutes(2)
+              }
+
+              if (($now - $lastActivity).TotalMinutes -ge 10) {
+                $timedOut = $true
+                $timeoutReason = 'installer produced no diagnostic activity for 10 minutes'
+                break
+              }
+              if ($now -ge $deadline) {
+                $timedOut = $true
+                $timeoutReason = 'installer did not finish within 60 minutes'
+                break
+              }
+            }
+
+            if ($timedOut) {
+              try { $p.Kill($true) } catch { try { $p.Kill() } catch { } }
+              try { [void]$p.WaitForExit(15000) } catch { }
+              throw $timeoutReason
+            }
+            $installerExitCode = $p.ExitCode
+            Write-Host "installer exit code: $installerExitCode"
+          } finally {
+            if (Test-Path -LiteralPath $log) {
+              Write-Host '=== setup log (tail) ==='
+              Get-Content -LiteralPath $log -Tail 80 -ErrorAction SilentlyContinue
+            }
+            $bootstrapLog = Get-ChildItem "$env:LOCALAPPDATA\RedSight\logs" -Filter 'bootstrap-*.log' -File -ErrorAction SilentlyContinue |
+                            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($bootstrapLog) {
+              Write-Host "=== bootstrap log: $($bootstrapLog.Name) ==="
+              Get-Content -LiteralPath $bootstrapLog.FullName -ErrorAction SilentlyContinue
+            }
           }
-          $bootstrapLog = Get-ChildItem "$env:LOCALAPPDATA\RedSight\logs" -Filter 'bootstrap-*.log' -ErrorAction SilentlyContinue |
-                          Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if ($bootstrapLog) {
-            Write-Host "=== bootstrap log: $($bootstrapLog.Name) ==="
-            Get-Content $bootstrapLog.FullName
-          } else {
+
+          if (-not $bootstrapLog) {
             throw 'no bootstrap log was produced - first-run setup did not run'
           }
 
           # 0 = clean, 2 = optional steps skipped (expected: no Docker here).
-          if ($p.ExitCode -notin @(0, 2)) { throw "setup returned $($p.ExitCode)" }
+          if ($installerExitCode -notin @(0, 2)) { throw "setup returned $installerExitCode" }
 
       - name: Verify the provisioned install
         shell: pwsh
@@ -303,14 +349,36 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      - name: Collect setup diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          # upload-artifact v7 requires every file to live beneath one root;
+          # copying C: logs into the D: workspace also makes diagnostics from a
+          # failed installer available to the following upload step.
+          $diagnostics = 'dist/_diagnostics'
+          New-Item -ItemType Directory -Path $diagnostics -Force | Out-Null
+          if (Test-Path -LiteralPath 'C:\rs-setup.log') {
+            Copy-Item -LiteralPath 'C:\rs-setup.log' -Destination "$diagnostics/rs-setup.log" -Force
+          }
+          $localRoot = "$env:LOCALAPPDATA\RedSight"
+          if (Test-Path -LiteralPath "$localRoot\logs") {
+            Copy-Item -LiteralPath "$localRoot\logs" -Destination "$diagnostics/redsight-logs" -Recurse -Force
+          }
+          if (Test-Path -LiteralPath "$localRoot\setup-summary.json") {
+            Copy-Item -LiteralPath "$localRoot\setup-summary.json" -Destination "$diagnostics/setup-summary.json" -Force
+          }
+          if (Test-Path -LiteralPath 'dist/_logs') {
+            Copy-Item -LiteralPath 'dist/_logs' -Destination "$diagnostics/build-logs" -Recurse -Force
+          }
+          Get-ChildItem -LiteralPath $diagnostics -Recurse -File | Select-Object FullName, Length, LastWriteTime
+
       - name: Upload setup logs
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: setup-logs-${{ env.RS_VERSION }}
-          path: |
-            C:\rs-setup.log
-            dist/_logs/**
+          path: dist/_diagnostics/**
           retention-days: 14
           if-no-files-found: ignore
 

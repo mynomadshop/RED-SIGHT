@@ -41,9 +41,65 @@ function Get-Cim {
     <# CIM with a WMI fallback; never throws. #>
     param([Parameter(Mandatory)][string]$Class)
     try {
-        return @(Get-CimInstance -ClassName $Class -ErrorAction Stop)
+        # A broken CIM provider must not leave the installer wizard waiting
+        # forever. OperationTimeoutSec is honoured by the WSMan/CIM layer; the
+        # legacy fallback remains for older Windows hosts without Get-CimInstance.
+        return @(Get-CimInstance -ClassName $Class -OperationTimeoutSec 10 -ErrorAction Stop)
     } catch {
         try { return @(Get-WmiObject -Class $Class -ErrorAction Stop) } catch { return @() }
+    }
+}
+
+function Invoke-BoundedProbe {
+    <# Run a hardware utility without letting a bad driver/service hang setup. #>
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [int]$TimeoutSeconds = 15
+    )
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    if ($psi.PSObject.Properties.Name -contains 'ArgumentList') {
+        foreach ($arg in $Arguments) { $psi.ArgumentList.Add($arg) }
+    } else {
+        $psi.Arguments = ($Arguments | ForEach-Object {
+            if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+        }) -join ' '
+    }
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    try {
+        [void]$proc.Start()
+        $outTask = $proc.StandardOutput.ReadToEndAsync()
+        $errTask = $proc.StandardError.ReadToEndAsync()
+        $timedOut = -not $proc.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
+            try { $proc.Kill() } catch { }
+            try { [void]$proc.WaitForExit(5000) } catch { }
+        }
+        $stdout = if ($outTask.Wait(5000)) { $outTask.Result } else { '' }
+        $stderr = if ($errTask.Wait(5000)) { $errTask.Result } else { '' }
+        return [pscustomobject]@{
+            ExitCode = if ($timedOut) { -1 } else { $proc.ExitCode }
+            TimedOut = $timedOut
+            StdOut   = "$stdout"
+            StdErr   = "$stderr"
+        }
+    } catch {
+        return [pscustomobject]@{
+            ExitCode = -1
+            TimedOut = $false
+            StdOut   = ''
+            StdErr   = $_.Exception.Message
+        }
+    } finally {
+        $proc.Dispose()
     }
 }
 
@@ -157,11 +213,19 @@ if ($nvidiaSmi) {
         # carries no kernels for sm_120 (Blackwell, an RTX 50-series card), so it
         # loads and then fails on the first GPU operation. Older nvidia-smi
         # builds do not know the field, so the query falls back.
-        $q = & $nvidiaSmi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv,noheader,nounits 2>$null
-        $haveComputeCap = ($LASTEXITCODE -eq 0) -and (@($q | Where-Object { $_ -and $_.Trim() }).Count -gt 0)
+        $probe = Invoke-BoundedProbe -FilePath $nvidiaSmi -Arguments @(
+            '--query-gpu=name,memory.total,driver_version,compute_cap',
+            '--format=csv,noheader,nounits'
+        )
+        $q = @($probe.StdOut -split "`r?`n")
+        $haveComputeCap = ($probe.ExitCode -eq 0) -and (@($q | Where-Object { $_ -and $_.Trim() }).Count -gt 0)
         if (-not $haveComputeCap) {
             Write-Probe 'nvidia-smi does not report compute_cap; falling back to the shorter query'
-            $q = & $nvidiaSmi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits 2>$null
+            $probe = Invoke-BoundedProbe -FilePath $nvidiaSmi -Arguments @(
+                '--query-gpu=name,memory.total,driver_version',
+                '--format=csv,noheader,nounits'
+            )
+            $q = @($probe.StdOut -split "`r?`n")
         }
         foreach ($line in @($q)) {
             if (-not $line -or -not $line.Trim()) { continue }
@@ -180,7 +244,7 @@ if ($nvidiaSmi) {
             $driverVersion = $parts[2].Trim()
         }
         # "CUDA Version: 12.4" appears in the nvidia-smi banner.
-        $banner = & $nvidiaSmi 2>$null | Out-String
+        $banner = (Invoke-BoundedProbe -FilePath $nvidiaSmi).StdOut
         $m = [regex]::Match($banner, 'CUDA Version:\s*([0-9]+\.[0-9]+)')
         if ($m.Success) { $cudaVersion = $m.Groups[1].Value }
     } catch {
@@ -243,11 +307,25 @@ $virtualizationAvailable = [bool]($hypervisorPresent -or $firmwareVirt)
 # Windows feature state (may need elevation; absence is not proof of anything).
 function Get-FeatureState {
     param([Parameter(Mandatory)][string]$Name)
+    $job = $null
     try {
-        $f = Get-WindowsOptionalFeature -Online -FeatureName $Name -ErrorAction Stop
+        # Get-WindowsOptionalFeature can block behind a stuck servicing stack.
+        # Isolate it so an inconclusive optional-feature probe degrades to the
+        # conservative result instead of freezing the installer wizard.
+        $job = Start-Job -ScriptBlock {
+            param($FeatureName)
+            Get-WindowsOptionalFeature -Online -FeatureName $FeatureName -ErrorAction Stop
+        } -ArgumentList $Name
+        if (-not (Wait-Job -Job $job -Timeout 20)) {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            return $null
+        }
+        $f = Receive-Job -Job $job -ErrorAction Stop
         return ($f.State -eq 'Enabled')
     } catch {
         return $null
+    } finally {
+        if ($job) { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
     }
 }
 $featureWsl = Get-FeatureState -Name 'Microsoft-Windows-Subsystem-Linux'
@@ -257,8 +335,9 @@ $wslExe = Get-Command 'wsl' -CommandType Application -ErrorAction SilentlyContin
 $wslKernel = $false
 if ($wslExe) {
     try {
-        $status = (& $wslExe.Source --status 2>&1 | Out-String) -replace "`0", ''
-        $wslKernel = ($LASTEXITCODE -eq 0 -and $status.Trim().Length -gt 0)
+        $wslStatus = Invoke-BoundedProbe -FilePath $wslExe.Source -Arguments @('--status') -TimeoutSeconds 15
+        $status = ($wslStatus.StdOut + "`n" + $wslStatus.StdErr) -replace "`0", ''
+        $wslKernel = ($wslStatus.ExitCode -eq 0 -and $status.Trim().Length -gt 0)
     } catch { }
 }
 

@@ -483,7 +483,8 @@ function Initialize-RsVenv {
 
     if (-not (Test-Path -LiteralPath $venvPython)) {
         Write-RsLog "creating $Description at $VenvPath" -Level STEP
-        $r = Invoke-RsProcess -FilePath $PythonExe -Arguments @('-m', 'venv', $VenvPath) -TimeoutSeconds 900
+        $r = Invoke-RsProcess -FilePath $PythonExe -Arguments @('-m', 'venv', $VenvPath) `
+                              -TimeoutSeconds 900 -HeartbeatSeconds 30
         if ($r.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $venvPython)) {
             # A partially created venv poisons every later attempt.
             Remove-Item -LiteralPath $VenvPath -Recurse -Force -ErrorAction SilentlyContinue
@@ -506,7 +507,7 @@ function Initialize-RsVenv {
 
     # Upgrade pip itself first; failure here is not fatal, the shipped pip works.
     $r = Invoke-RsProcess -FilePath $venvPython -Arguments (@('-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel') + $common) `
-                          -TimeoutSeconds 900
+                          -TimeoutSeconds 900 -HeartbeatSeconds 30
     if ($r.ExitCode -ne 0) {
         Write-RsLog "    pip self-upgrade failed (continuing with bundled pip): exit $($r.ExitCode)" -Level WARN
     }
@@ -531,7 +532,7 @@ function Initialize-RsVenv {
         $null = Invoke-RsRetry -Description "pip install $($install.Label)" -MaxAttempts 3 -Action {
             $res = Invoke-RsProcess -FilePath $venvPython `
                                     -Arguments (@('-m', 'pip', 'install') + $common + $install.Args) `
-                                    -TimeoutSeconds $TimeoutSeconds
+                                    -TimeoutSeconds $TimeoutSeconds -HeartbeatSeconds 30
             if ($res.TimedOut) { throw "pip install timed out after ${TimeoutSeconds}s" }
             if ($res.ExitCode -ne 0) {
                 $tail = ($res.StdOut + "`n" + $res.StdErr) -split "`r?`n" |

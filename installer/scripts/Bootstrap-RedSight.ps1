@@ -590,7 +590,7 @@ Invoke-RsStep -Name 'Installing WhatsApp bridge Node dependencies' -Action {
     }
     $r = Invoke-RsProcess -FilePath $npm.Source `
                           -Arguments @('install', '--no-audit', '--no-fund', '--loglevel=error') `
-                          -WorkingDirectory $bridge -TimeoutSeconds 1800
+                          -WorkingDirectory $bridge -TimeoutSeconds 1800 -HeartbeatSeconds 30
     if ($r.ExitCode -ne 0) { throw "npm install failed with exit code $($r.ExitCode)" }
 } | Out-Null
 

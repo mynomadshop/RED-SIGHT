@@ -1509,6 +1509,24 @@ Assert-True -Name 'the build publishes the release manifest beside the release a
             -Condition ($buildScript -match [regex]::Escape(
                 'Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $OutputDir $manifestName) -Force'))
 
+$workflow = Get-Content -LiteralPath (Join-Path $repoRoot '.github\workflows\build-windows-installer.yml') -Raw
+Assert-True -Name 'the install gate stops after ten minutes without diagnostic activity' `
+            -Condition ($workflow -match "lastActivity\)\.TotalMinutes -ge 10")
+Assert-True -Name 'setup diagnostics are staged beneath one artifact root' `
+            -Condition ($workflow -match 'path: dist/_diagnostics/\*\*')
+Assert-True -Name 'the setup-log upload no longer mixes C and D drive roots' `
+            -Condition ($workflow -notmatch "(?s)name: setup-logs-.*?path:\s*\|\s*C:\\rs-setup\.log")
+
+$preflightScript = Get-Content -LiteralPath (Join-Path $repoRoot 'installer\scripts\RedSight-Preflight.ps1') -Raw
+Assert-True -Name 'long pip installs refresh the bootstrap log' `
+            -Condition ($preflightScript -match 'TimeoutSeconds \$TimeoutSeconds -HeartbeatSeconds 30')
+
+$hardwareScript = Get-Content -LiteralPath (Join-Path $repoRoot 'installer\scripts\RedSight-Hardware.ps1') -Raw
+Assert-True -Name 'hardware utilities run through a bounded process helper' `
+            -Condition ($hardwareScript -match 'function Invoke-BoundedProbe')
+Assert-True -Name 'wsl status has a finite hardware-probe timeout' `
+            -Condition ($hardwareScript -match "Invoke-BoundedProbe[^\r\n]+wslExe\.Source[^\r\n]+TimeoutSeconds 15")
+
 $gitignore = Get-Content -LiteralPath (Join-Path $repoRoot '.gitignore')
 Assert-True -Name 'the models ignore rule is anchored so app/models is committable' `
             -Condition (-not ($gitignore | Where-Object { $_.Trim() -eq 'models/' }))
