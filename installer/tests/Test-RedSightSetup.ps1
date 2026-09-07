@@ -92,6 +92,7 @@ $proj = Join-Path $tmpRoot 'RedSightInstall'
 New-Item -ItemType Directory -Path $proj -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $proj '.venv-ui') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $proj 'scripts') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $proj 'app\__pycache__') -Force | Out-Null
 
 # plain backslash form, as in LAUNCH-REDSIGHT-DESKTOP.ps1
 Set-Content -LiteralPath (Join-Path $proj 'launcher.ps1') -NoNewline -Encoding utf8 `
@@ -113,6 +114,9 @@ Set-Content -LiteralPath (Join-Path $proj 'untouched.py') -NoNewline -Encoding u
     -Value 'X = "nothing to see here"'
 # a file inside an excluded directory
 Set-Content -LiteralPath (Join-Path $proj '.venv-ui\excluded.py') -NoNewline -Encoding utf8 `
+    -Value 'ROOT = r"C:\Users\walim\RedSight"'
+# nested generated caches are excluded too, not only a cache at the root
+Set-Content -LiteralPath (Join-Path $proj 'app\__pycache__\excluded.py') -NoNewline -Encoding utf8 `
     -Value 'ROOT = r"C:\Users\walim\RedSight"'
 
 $result = Repair-RsHardcodedPaths -ProjectRoot $proj
@@ -151,6 +155,8 @@ Assert-Equal -Name 'unrelated file untouched' -Expected 'X = "nothing to see her
 
 $excluded = Get-Content -LiteralPath (Join-Path $proj '.venv-ui\excluded.py') -Raw
 Assert-True -Name 'files inside .venv-ui are excluded' -Condition ($excluded -like '*walim*')
+$nestedExcluded = Get-Content -LiteralPath (Join-Path $proj 'app\__pycache__\excluded.py') -Raw
+Assert-True -Name 'nested generated-cache files are excluded' -Condition ($nestedExcluded -like '*walim*')
 
 # Idempotency: a second pass must find nothing left to do.
 $again = Repair-RsHardcodedPaths -ProjectRoot $proj
@@ -554,10 +560,6 @@ if (-not $uiPy) {
     Set-Content -LiteralPath (Join-Path $uiRoot 'qasync\__init__.py') -Value '' -Encoding ascii
     Set-Content -LiteralPath (Join-Path $uiRoot 'app\__init__.py') -Value '' -Encoding ascii
     Set-Content -LiteralPath (Join-Path $uiRoot 'app\ui\__init__.py') -Value '' -Encoding ascii
-    Set-Content -LiteralPath (Join-Path $uiRoot 'app\ui\qt_bootstrap.py') -Encoding ascii -Value @(
-        'def configure_qt_pre_application():',
-        '    return True'
-    )
     Set-Content -LiteralPath (Join-Path $uiRoot 'app\ui\command_center.py') -Encoding ascii -Value @(
         'class CommandCenterMainWindow:',
         '    pass'
@@ -1134,6 +1136,7 @@ ROOT = r"C:\Users\builder\RedSight"
 LOGS = r"C:/Users/builder/RedSight/logs"
 UNRELATED = r"C:\Users\builder\Documents"
 OTHER_APP = r"D:\Tools\RedSight"
+PREFIX_ONLY = r"C:\RedSightTest"
 '@ | Set-Content -LiteralPath (Join-Path $rwRoot 'launcher.py') -Encoding ascii
 
 @'
@@ -1159,6 +1162,8 @@ Assert-True -Name 'a bare build-user profile is normalized' `
             -Condition ($launcherText -notmatch 'builder\\Documents' -and $launcherText -match 'Documents')
 Assert-True -Name 'an inherited RedSight root is normalized too' `
             -Condition ($launcherText -notmatch 'D:\\Tools\\RedSight')
+Assert-True -Name 'a longer directory beginning with RedSight is not a false match' `
+            -Condition ($launcherText -match 'C:\\RedSightTest')
 
 $escapedText = Get-Content -LiteralPath (Join-Path $rwRoot 'escaped.json') -Raw
 Assert-True -Name 'the JSON-escaped form is rewritten' -Condition ($escapedText -notmatch 'builder\\\\RedSight')
@@ -1514,6 +1519,8 @@ Assert-True -Name 'the build publishes the release manifest beside the release a
 $workflow = Get-Content -LiteralPath (Join-Path $repoRoot '.github\workflows\build-windows-installer.yml') -Raw
 Assert-True -Name 'the install gate stops after ten minutes without diagnostic activity' `
             -Condition ($workflow -match "lastActivity\)\.TotalMinutes -ge 10")
+Assert-True -Name 'the install gate rejects required bootstrap failures hidden by Inno' `
+            -Condition ($workflow -match 'bootstrapSummary\.failures')
 Assert-True -Name 'setup diagnostics are staged beneath one artifact root' `
             -Condition ($workflow -match 'path: dist/_diagnostics/\*\*')
 Assert-True -Name 'the setup-log upload no longer mixes C and D drive roots' `

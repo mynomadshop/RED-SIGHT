@@ -252,6 +252,20 @@ jobs:
             throw 'no bootstrap log was produced - first-run setup did not run'
           }
 
+          # Inno waits for [Run] entries but does not propagate their process
+          # exit code. Treat a required bootstrap failure as an installer
+          # failure here instead of allowing a nominal setup exit code of 0 to
+          # hide it until a later assertion.
+          $summaryPath = "$env:LOCALAPPDATA\RedSight\setup-summary.json"
+          if (-not (Test-Path -LiteralPath $summaryPath)) {
+            throw 'setup did not write its completion summary'
+          }
+          $bootstrapSummary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+          $requiredFailures = @($bootstrapSummary.failures)
+          if ($requiredFailures.Count) {
+            throw "bootstrap reported $($requiredFailures.Count) required failure(s): $($requiredFailures -join '; ')"
+          }
+
           # 0 = clean, 2 = optional steps skipped (expected: no Docker here).
           if ($installerExitCode -notin @(0, 2)) { throw "setup returned $installerExitCode" }
 
@@ -335,6 +349,7 @@ jobs:
 
           if ($fail) { throw "$fail install verification check(s) failed" }
           Write-Host 'all install verification checks passed' -ForegroundColor Green
+          exit 0
 
       - name: Verify idempotent re-run
         shell: pwsh

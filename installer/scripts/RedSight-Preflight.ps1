@@ -677,10 +677,10 @@ function Test-RsUiLaunch {
         with Qt on its offscreen platform so no display is needed.
 
         A plain module-presence check is not enough here: the UI has repeatedly
-        failed at startup on a fully installed environment (the missing qasync in
-        11.1, a Qt bootstrap raising at import time), and only a real import
-        reproduces that. Returns the traceback so the failure is actionable
-        instead of "the UI did not launch".
+        failed at startup on a fully installed environment (the missing qasync
+        in 11.1, a Command Center dependency raising at import time), and only
+        a real import reproduces that. Returns the traceback so the failure is
+        actionable instead of "the UI did not launch".
     #>
     [CmdletBinding()]
     param(
@@ -708,11 +708,6 @@ try:
     import PySide6.QtWidgets  # noqa: F401
     stage = "qasync"
     import qasync  # noqa: F401
-    stage = "app.ui.qt_bootstrap"
-    import app.ui.qt_bootstrap as qb
-    stage = "configure_qt_pre_application"
-    if hasattr(qb, "configure_qt_pre_application"):
-        qb.configure_qt_pre_application()
     stage = "QApplication"
     app = PySide6.QtWidgets.QApplication.instance() or PySide6.QtWidgets.QApplication([])
     stage = "app.ui.command_center"
@@ -1321,7 +1316,7 @@ function Repair-RsHardcodedPaths {
         )
         Write-RsLog "rewriting the recorded build root $SourceRoot -> $target" -Level DEBUG
     } elseif ($SourceRoot -eq $target) {
-        Write-RsLog 'the payload was built from this directory; no path rewrite is needed' -Level OK
+        Write-RsLog 'the recorded build root already matches the target; checking inherited paths' -Level OK
     } else {
         Write-RsLog 'no build root recorded in this payload' -Level DEBUG
     }
@@ -1332,9 +1327,9 @@ function Repair-RsHardcodedPaths {
     # <profile>\RedSight path becomes the install directory, not
     # <current-profile>\RedSight.
     $patterns += @(
-        @{ Regex = '(?i)[A-Za-z]:\\\\(?:[^\\/:*?"<>|\r\n]+\\\\)*?Red-?Sight'; Replacement = $targetEscaped; Label = 'legacy escaped root' }
-        @{ Regex = '(?i)[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*?Red-?Sight';     Replacement = $target;        Label = 'legacy plain root' }
-        @{ Regex = '(?i)[A-Za-z]:/(?:[^\\/:*?"<>|\r\n]+/)*?Red-?Sight';       Replacement = $targetForward; Label = 'legacy forward root' }
+        @{ Regex = '(?i)[A-Za-z]:\\\\(?:[^\\/:*?"<>|\r\n]+\\\\)*?Red-?Sight(?![A-Za-z0-9_.-])'; Replacement = $targetEscaped; Label = 'legacy escaped root' }
+        @{ Regex = '(?i)[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*?Red-?Sight(?![A-Za-z0-9_.-])';     Replacement = $target;        Label = 'legacy plain root' }
+        @{ Regex = '(?i)[A-Za-z]:/(?:[^\\/:*?"<>|\r\n]+/)*?Red-?Sight(?![A-Za-z0-9_.-])';       Replacement = $targetForward; Label = 'legacy forward root' }
     )
     if ($userProfile) {
         $patterns += @(
@@ -1357,10 +1352,19 @@ function Repair-RsHardcodedPaths {
         Where-Object {
             $rel = $_.FullName.Substring($target.Length).TrimStart('\', '/')
             $first = ($rel -split '[\\/]')[0]
+            $segments = @($rel -split '[\\/]')
+            $inExcludedDir = $false
+            for ($segmentIndex = 0; $segmentIndex -lt ($segments.Count - 1); $segmentIndex++) {
+                if ($excluded -contains $segments[$segmentIndex]) {
+                    $inExcludedDir = $true
+                    break
+                }
+            }
             $isManifest = $_.Name -eq 'redsight-payload.json'
             $isSetupScript = ($rel -match '(?i)^scripts[\\/]windows[\\/]') -and
                              ($excludedFiles -contains $_.Name)
-            (-not ($excluded -contains $first)) -and (-not $isManifest) -and (-not $isSetupScript)
+            (-not ($excluded -contains $first)) -and (-not $inExcludedDir) -and
+                (-not $isManifest) -and (-not $isSetupScript)
         } |
         ForEach-Object {
             $file = $_.FullName
