@@ -1521,6 +1521,8 @@ Assert-True -Name 'the install gate stops after ten minutes without diagnostic a
             -Condition ($workflow -match "lastActivity\)\.TotalMinutes -ge 10")
 Assert-True -Name 'the install gate rejects required bootstrap failures hidden by Inno' `
             -Condition ($workflow -match 'bootstrapSummary\.failures')
+Assert-True -Name 'an accepted idempotent warning code is reset before shell teardown' `
+            -Condition ($workflow -match "(?s)name: Verify idempotent re-run.*?if \(\`$LASTEXITCODE -notin @\(0, 2\)\).*?exit 0")
 Assert-True -Name 'setup diagnostics are staged beneath one artifact root' `
             -Condition ($workflow -match 'path: dist/_diagnostics/\*\*')
 Assert-True -Name 'the setup-log upload no longer mixes C and D drive roots' `

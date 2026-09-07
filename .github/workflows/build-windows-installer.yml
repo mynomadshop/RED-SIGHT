@@ -363,6 +363,10 @@ jobs:
           if (-not (Test-Path 'C:\RedSightTest\.venv-ui\Scripts\python.exe')) {
             throw '.venv-ui disappeared on re-run'
           }
+          # powershell.exe returned the accepted warning code 2. GitHub's pwsh
+          # wrapper otherwise converts that stale native exit code into a failed
+          # step even though every assertion above passed.
+          exit 0
 
       - name: Verify uninstall
         shell: pwsh
