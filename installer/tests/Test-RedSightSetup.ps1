@@ -1116,10 +1116,9 @@ Assert-True -Name 'a missing interpreter is reported, not thrown' -Condition (-n
 Write-Host "`n== Install-path rewriting ==" -ForegroundColor Cyan
 # ==========================================================================
 
-# The rewriter used to match "any drive path ending in \RedSight". The working
-# directory defaults to <UserProfile>\RedSight, so it rewrote the user's own
-# workspace to the install root - which is what left an installation pointing
-# half at one tree and half at another.
+# The manifest gives the exact current build root, while inherited launchers
+# can still name an older RedSight root or build-user profile. User-selected
+# .env directories are the only profile paths that must remain untouched.
 $rwRoot = Join-Path $tmpRoot 'rewrite'
 New-Item -ItemType Directory -Path $rwRoot -Force | Out-Null
 Set-Content -LiteralPath (Join-Path $rwRoot 'redsight-payload.json') `
@@ -1156,14 +1155,15 @@ $launcherText = Get-Content -LiteralPath (Join-Path $rwRoot 'launcher.py') -Raw
 Assert-True -Name 'the plain form is rewritten' -Condition ($launcherText -match [regex]::Escape("r`"$rwRoot`""))
 Assert-True -Name 'the forward-slash form is rewritten' `
             -Condition ($launcherText -match [regex]::Escape(($rwRoot -replace '\\', '/')))
-Assert-True -Name 'an unrelated path under the same profile is left alone' `
-            -Condition ($launcherText -match 'builder\\Documents')
-Assert-True -Name "another application's RedSight folder is left alone" `
-            -Condition ($launcherText -match 'D:\\Tools\\RedSight')
+Assert-True -Name 'a bare build-user profile is normalized' `
+            -Condition ($launcherText -notmatch 'builder\\Documents' -and $launcherText -match 'Documents')
+Assert-True -Name 'an inherited RedSight root is normalized too' `
+            -Condition ($launcherText -notmatch 'D:\\Tools\\RedSight')
 
 $escapedText = Get-Content -LiteralPath (Join-Path $rwRoot 'escaped.json') -Raw
 Assert-True -Name 'the JSON-escaped form is rewritten' -Condition ($escapedText -notmatch 'builder\\\\RedSight')
-Assert-True -Name 'an unrelated escaped path is left alone' -Condition ($escapedText -match 'builder\\\\Music')
+Assert-True -Name 'an escaped build-user profile is normalized' `
+            -Condition ($escapedText -notmatch 'builder\\\\Music' -and $escapedText -match 'Music')
 
 $envText = Get-Content -LiteralPath (Join-Path $rwRoot 'settings.env') -Raw
 foreach ($key in @('REDSIGHT_WORKSPACE', 'REDSIGHT_WORKING_DIR', 'REDSIGHT_OUTPUT_DIR',
@@ -1498,6 +1498,8 @@ foreach ($installArtifact in @("'runtime'", "'unins*.exe'", "'unins*.dat'", "'re
 }
 Assert-True -Name 'runtime is pruned by path, so an app package named runtime survives' `
             -Condition ($buildScript -match "(?s)\`$prunePaths = @\(.*?'runtime',")
+Assert-True -Name 'build-time installer tests are not shipped in the application payload' `
+            -Condition ($buildScript -match [regex]::Escape("'installer\tests'"))
 
 # The workflow validates and uploads these files from dist. They must survive
 # removal of the temporary _zip staging directory, not exist only inside the
@@ -1516,6 +1518,8 @@ Assert-True -Name 'setup diagnostics are staged beneath one artifact root' `
             -Condition ($workflow -match 'path: dist/_diagnostics/\*\*')
 Assert-True -Name 'the setup-log upload no longer mixes C and D drive roots' `
             -Condition ($workflow -notmatch "(?s)name: setup-logs-.*?path:\s*\|\s*C:\\rs-setup\.log")
+Assert-True -Name 'the Settings smoke imports the installed tree explicitly' `
+            -Condition ($workflow -match 'REDSIGHT_TEST_ROOT\s*=\s*\$dest')
 
 $preflightScript = Get-Content -LiteralPath (Join-Path $repoRoot 'installer\scripts\RedSight-Preflight.ps1') -Raw
 Assert-True -Name 'long pip installs refresh the bootstrap log' `

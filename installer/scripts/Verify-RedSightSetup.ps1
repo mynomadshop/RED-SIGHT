@@ -325,10 +325,12 @@ try {
     $agentApi = 'pass'
     $agentDetail = "$apiBase/agent/run answered"
 } catch {
-    if ($_.Exception.Response) {
+    $responseProperty = $_.Exception.PSObject.Properties['Response']
+    if ($responseProperty -and $null -ne $responseProperty.Value) {
         # A protocol response means the backend is up; 404 means the route is absent.
-        $code = [int]$_.Exception.Response.StatusCode
-        $_.Exception.Response.Dispose()
+        $response = $responseProperty.Value
+        $code = [int]$response.StatusCode
+        $response.Dispose()
         if ($code -eq 404) {
             $agentApi = 'warn'
             $agentDetail = "backend is running but $apiBase/agent/run returned 404 - the multi-step run API is not registered"

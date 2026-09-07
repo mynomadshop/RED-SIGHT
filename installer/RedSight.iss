@@ -966,6 +966,11 @@ end;
 function ShouldCleanDocker(): Boolean;
 begin
   Result := False;
+  { Inno evaluates [UninstallRun] Check functions while Setup records the
+    uninstall entry. UninstallSilent raises an internal error in that context,
+    so only ask it after proving this code is running from the uninstaller. }
+  if not IsUninstaller then
+    Exit;
   if UninstallSilent then
     Exit;
   Result := MsgBox('Also remove the RedSight Docker containers and images?' + #13#10#13#10 +

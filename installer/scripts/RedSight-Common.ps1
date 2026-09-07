@@ -157,7 +157,8 @@ function Test-RsOnline {
             return $true
         } catch {
             # A protocol-level error still proves we reached the host.
-            if ($_.Exception.Response) { return $true }
+            $responseProperty = $_.Exception.PSObject.Properties['Response']
+            if ($responseProperty -and $null -ne $responseProperty.Value) { return $true }
         }
     }
     return $false
@@ -378,7 +379,30 @@ function Get-RsFileHashSafe {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path, [string]$Algorithm = 'SHA256')
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
-    return (Get-FileHash -LiteralPath $Path -Algorithm $Algorithm).Hash.ToLowerInvariant()
+
+    # Do not depend on Get-FileHash here. It lives in
+    # Microsoft.PowerShell.Utility and is absent when Windows PowerShell is
+    # started with the deliberately minimal module path used by setup. The
+    # bundle integrity check runs before Python exists, so a missing cmdlet at
+    # this point otherwise makes an entirely offline installer unusable.
+    $hasher = switch ($Algorithm.Trim().ToUpperInvariant()) {
+        'MD5'    { [System.Security.Cryptography.MD5]::Create(); break }
+        'SHA1'   { [System.Security.Cryptography.SHA1]::Create(); break }
+        'SHA256' { [System.Security.Cryptography.SHA256]::Create(); break }
+        'SHA384' { [System.Security.Cryptography.SHA384]::Create(); break }
+        'SHA512' { [System.Security.Cryptography.SHA512]::Create(); break }
+        default  { throw "unsupported hash algorithm: $Algorithm" }
+    }
+
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $Path).Path)
+        $digest = $hasher.ComputeHash($stream)
+        return ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $hasher) { $hasher.Dispose() }
+    }
 }
 
 function Save-RsDownload {
@@ -436,7 +460,7 @@ function Save-RsDownload {
         if ($len -le 0) { throw 'download produced an empty file' }
 
         if ($Sha256) {
-            $actual = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
+            $actual = Get-RsFileHashSafe -Path $tmp -Algorithm SHA256
             if ($actual -ne $Sha256.ToLowerInvariant()) {
                 throw "SHA256 mismatch: expected $Sha256, got $actual"
             }

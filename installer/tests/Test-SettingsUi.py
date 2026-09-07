@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Headless smoke test for the installed Command Center Settings surface."""
 
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 # The Windows runner has no interactive desktop. Qt's offscreen platform still
 # constructs real widgets and actions, which is exactly what this test needs.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_OPENGL", "software")
+
+# CI keeps this test in its checkout instead of shipping all build-time tests
+# in the installer. REDSIGHT_TEST_ROOT points it at the installed payload;
+# direct invocations default to the repository containing this file.
+ROOT = Path(os.environ.get("REDSIGHT_TEST_ROOT") or Path(__file__).resolve().parents[2])
+ROOT = ROOT.resolve()
+sys.path.insert(0, str(ROOT))
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction

@@ -80,6 +80,7 @@ $prunePaths = @(
     'backups', 'release', 'dist', 'build', 'qdrant_storage', 'storage',
     'outputs',                          # local filesystem scan results
     'runtime',                          # the private Python setup expands per install
+    'installer\tests',                  # build-time regression tests, not application runtime
     'data\runtime',                     # runtime state
     'data\memory_exports',              # exported chat sessions
     'data\skills',                      # downloaded third-party skill sources

@@ -1263,11 +1263,11 @@ function Repair-RsHardcodedPaths {
         then report a stale reference on every fresh install.
 
         The root that gets rewritten comes from redsight-payload.json, written
-        at build time. When that is missing - a payload from an older build -
-        the previous heuristic applies: any drive path ending in \RedSight. That
-        heuristic is why this function needs the protections below, because the
-        user's own working directory defaults to <UserProfile>\RedSight and
-        matches it.
+        at build time. Repository-source payloads can also contain launchers and
+        migration scripts inherited from older installations, so stale Windows
+        paths ending in \RedSight are normalized as well. Bare build-profile
+        paths are changed to the installing user's profile instead of being
+        left embedded in source and compose files.
 
         Never rewritten:
           * the target path itself
@@ -1284,6 +1284,11 @@ function Repair-RsHardcodedPaths {
     $target = (Resolve-Path -LiteralPath $ProjectRoot).Path.TrimEnd('\')
     $targetEscaped = $target -replace '\\', '\\'
     $targetForward = $target -replace '\\', '/'
+    $userProfile = [Environment]::GetFolderPath('UserProfile')
+    if (-not $userProfile) { $userProfile = $env:USERPROFILE }
+    $userProfile = "$userProfile".TrimEnd('\', '/')
+    $userProfileEscaped = $userProfile -replace '\\', '\\'
+    $userProfileForward = $userProfile -replace '\\', '/'
 
     if (-not $PSBoundParameters.ContainsKey('SourceRoot')) {
         $SourceRoot = Get-RsPayloadSourceRoot -ProjectRoot $target
@@ -1305,26 +1310,38 @@ function Repair-RsHardcodedPaths {
                        'Bootstrap-RedSight.ps1', 'Verify-RedSightSetup.ps1', 'Start-RedSight.ps1',
                        'Uninstall-RedSightDocker.ps1', 'Repair-RedSight.ps1')
 
+    $patterns = @()
     if ($SourceRoot -and ($SourceRoot -ne $target)) {
-        # The exact recorded root, in each encoding. Nothing else is touched.
+        # The exact recorded root, in each encoding, is handled first.
         $literal = [regex]::Escape($SourceRoot)
-        $patterns = @(
-            @{ Regex = [regex]::Escape(($SourceRoot -replace '\\', '\\')); Replacement = $targetEscaped; Label = 'escaped' }
-            @{ Regex = $literal;                                          Replacement = $target;        Label = 'plain' }
-            @{ Regex = [regex]::Escape(($SourceRoot -replace '\\', '/')); Replacement = $targetForward; Label = 'forward' }
+        $patterns += @(
+            @{ Regex = '(?i)' + [regex]::Escape(($SourceRoot -replace '\\', '\\')); Replacement = $targetEscaped; Label = 'recorded escaped root' }
+            @{ Regex = '(?i)' + $literal;                                          Replacement = $target;        Label = 'recorded plain root' }
+            @{ Regex = '(?i)' + [regex]::Escape(($SourceRoot -replace '\\', '/')); Replacement = $targetForward; Label = 'recorded forward root' }
         )
         Write-RsLog "rewriting the recorded build root $SourceRoot -> $target" -Level DEBUG
     } elseif ($SourceRoot -eq $target) {
         Write-RsLog 'the payload was built from this directory; no path rewrite is needed' -Level OK
-        return [pscustomobject]@{ Rewritten = 0; Failed = 0; Files = @(); SourceRoot = $SourceRoot }
     } else {
-        # A drive-letter path ending in \RedSight, in each of the three encodings.
-        $patterns = @(
-            @{ Regex = '[A-Za-z]:\\\\(?:[^\\/:*?"<>|\r\n]+\\\\)*?RedSight'; Replacement = $targetEscaped; Label = 'escaped' }
-            @{ Regex = '[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*?RedSight';     Replacement = $target;        Label = 'plain' }
-            @{ Regex = '[A-Za-z]:/(?:[^\\/:*?"<>|\r\n]+/)*?RedSight';       Replacement = $targetForward; Label = 'forward' }
+        Write-RsLog 'no build root recorded in this payload' -Level DEBUG
+    }
+
+    # Old launchers can predate the recorded source root. Normalize any
+    # product-root reference, then replace remaining build-user profiles with
+    # the profile running setup. Product roots come first so a full
+    # <profile>\RedSight path becomes the install directory, not
+    # <current-profile>\RedSight.
+    $patterns += @(
+        @{ Regex = '(?i)[A-Za-z]:\\\\(?:[^\\/:*?"<>|\r\n]+\\\\)*?Red-?Sight'; Replacement = $targetEscaped; Label = 'legacy escaped root' }
+        @{ Regex = '(?i)[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*?Red-?Sight';     Replacement = $target;        Label = 'legacy plain root' }
+        @{ Regex = '(?i)[A-Za-z]:/(?:[^\\/:*?"<>|\r\n]+/)*?Red-?Sight';       Replacement = $targetForward; Label = 'legacy forward root' }
+    )
+    if ($userProfile) {
+        $patterns += @(
+            @{ Regex = '(?i)[A-Za-z]:\\\\Users\\\\[^\\/:*?"<>|\r\n]+'; Replacement = $userProfileEscaped; Label = 'escaped user profile' }
+            @{ Regex = '(?i)[A-Za-z]:\\Users\\[^\\/:*?"<>|\r\n]+';         Replacement = $userProfile;        Label = 'plain user profile' }
+            @{ Regex = '(?i)[A-Za-z]:/Users/[^\\/:*?"<>|\r\n]+';             Replacement = $userProfileForward; Label = 'forward user profile' }
         )
-        Write-RsLog 'no build root recorded in this payload; matching any path ending in \RedSight' -Level DEBUG
     }
 
     # Lines assigning a user-chosen directory keep their value verbatim.
@@ -1340,7 +1357,10 @@ function Repair-RsHardcodedPaths {
         Where-Object {
             $rel = $_.FullName.Substring($target.Length).TrimStart('\', '/')
             $first = ($rel -split '[\\/]')[0]
-            (-not ($excluded -contains $first)) -and (-not ($excludedFiles -contains $_.Name))
+            $isManifest = $_.Name -eq 'redsight-payload.json'
+            $isSetupScript = ($rel -match '(?i)^scripts[\\/]windows[\\/]') -and
+                             ($excludedFiles -contains $_.Name)
+            (-not ($excluded -contains $first)) -and (-not $isManifest) -and (-not $isSetupScript)
         } |
         ForEach-Object {
             $file = $_.FullName

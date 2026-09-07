@@ -301,9 +301,11 @@ jobs:
               )) {
                 Remove-Item -LiteralPath "Env:\$name" -ErrorAction SilentlyContinue
               }
-              & $uiPy "$dest\installer\tests\Test-SettingsUi.py"
+              $env:REDSIGHT_TEST_ROOT = $dest
+              & $uiPy (Resolve-Path 'installer\tests\Test-SettingsUi.py').Path
               Check 'UI opens unconfigured with complete top Settings' ($LASTEXITCODE -eq 0)
             } finally {
+              Remove-Item -LiteralPath 'Env:\REDSIGHT_TEST_ROOT' -ErrorAction SilentlyContinue
               $env:LOCALAPPDATA = $savedLocalAppData
             }
           }

@@ -405,6 +405,8 @@ Assert-True -Name 'silent reinstall does not request confirmation' `
             -Condition ($codeText -match "ExistingVer = '\{#AppVersion\}'[\s\S]{0,120}if WizardSilent then")
 Assert-True -Name 'silent low-disk setup aborts instead of prompting' `
             -Condition ($codeText -match 'FreeMB < 8192[\s\S]{0,120}if WizardSilent then[\s\S]{0,200}Result := False')
+Assert-True -Name 'uninstall-only silent check is never called during setup' `
+            -Condition ($codeText -match 'function ShouldCleanDocker[\s\S]{0,320}if not IsUninstaller then[\s\S]{0,100}if UninstallSilent then')
 
 # Docker must never be requested on a machine the scan says cannot run WSL2.
 Assert-True -Name 'Docker is gated on the WSL2 verdict' `
