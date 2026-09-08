@@ -9,22 +9,27 @@ from types import ModuleType, SimpleNamespace
 
 import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.api.routes.chat import chat_completion
+from app.api.routes.chat import ChatRequest, _provider_chat, chat_completion
 from app.api.routes.skills_tools import PermissionCheckRequest, ToolExecuteRequest
 from app.config.settings import Settings
 from app.core.interfaces import AuditAction, Capability, GpuInfo
 from app.models.cloud_providers import (
+    AnthropicProvider,
     CloudProvider,
     CloudProviderRegistry,
     CustomOpenAIProvider,
+    GoogleGeminiProvider,
     XAIProvider,
 )
 from app.models.lmstudio import LmStudioProvider
+from app.retrieval.embedding_loader import EmbeddingModelLoader
 from app.retrieval.qdrant_client import QdrantClientWrapper
 from app.security.audit import AuditLogger
+from app.security.local_api import configure_local_api_security
 from app.security.permissions import PermissionChecker, PermissionPolicy
 from app.skills.sandbox import SkillSandbox
 from app.tools.builtin import (
@@ -37,6 +42,11 @@ from app.tools.builtin import (
 )
 from app.tools.contract import ToolContract
 from app.tools.test_runner import TestRunner
+from redsight_actions import mcp_native_stage111 as native_mcp
+from redsight_actions.tool_planning import (
+    build_agent_tool_schemas,
+    decode_native_tool_steps,
+)
 
 
 def test_settings_accept_canonical_nested_environment(monkeypatch, tmp_path):
@@ -213,6 +223,98 @@ def test_chat_route_allows_provider_free_startup_and_uses_saved_model(monkeypatc
     assert response["message"] == "configured response"
     assert response["model"] == "saved-model"
     assert seen["model_id"] == "saved-model"
+
+
+def test_chat_request_accepts_standard_null_content_tool_call_turn():
+    request = ChatRequest.model_validate(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "content": "ready", "tool_call_id": "call-1"},
+            ]
+        }
+    )
+
+    assert request.messages[0].content is None
+    assert request.messages[1].tool_call_id == "call-1"
+
+
+def test_optional_native_tools_fall_back_for_older_local_models():
+    class Provider:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                request = httpx.Request("POST", "http://lm.test/v1/chat/completions")
+                response = httpx.Response(400, request=request)
+                upstream = httpx.HTTPStatusError("unsupported tools", request=request, response=response)
+                raise RuntimeError("local model rejected tools") from upstream
+            return '{"steps":[]}'
+
+    provider = Provider()
+    result = asyncio.run(
+        _provider_chat(
+            provider,
+            {
+                "messages": [{"role": "user", "content": "plan"}],
+                "tools": [{"type": "function", "function": {"name": "read_file"}}],
+                "tool_choice": "auto",
+            },
+        )
+    )
+
+    assert result == '{"steps":[]}'
+    assert len(provider.calls) == 2
+    assert "tools" in provider.calls[0]
+    assert "tools" not in provider.calls[1]
+
+
+def test_lmstudio_embedding_loader_batches_concurrently_and_preserves_order():
+    calls: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(
+                200,
+                json={"data": [{"id": "chat-model"}, {"id": "nomic-embed-text"}]},
+            )
+        payload = json.loads(request.content)
+        batch = payload["input"]
+        calls.append(batch)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"index": index, "embedding": [float(value.removeprefix("t"))]}
+                    for index, value in reversed(list(enumerate(batch)))
+                ]
+            },
+        )
+
+    async def exercise():
+        loader = EmbeddingModelLoader(lmstudio_url="http://lm.test/v1")
+        loader._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            assert await loader._load_lmstudio() is True
+            return await loader.embed([f"t{index}" for index in range(25)])
+        finally:
+            await loader.close()
+
+    vectors = asyncio.run(exercise())
+    assert vectors == [[float(index)] for index in range(25)]
+    assert sorted(map(len, calls)) == [5, 10, 10]
 
 
 def test_qdrant_url_is_not_combined_with_host(monkeypatch):
@@ -515,3 +617,247 @@ def test_public_execution_models_reject_privileged_roles():
         ToolExecuteRequest(tool_name="read_file", role="admin")
     with pytest.raises(ValidationError):
         PermissionCheckRequest(tool_name="read_file", role="agent")
+
+
+def test_local_api_requires_token_restricts_cors_and_bounds_requests(monkeypatch):
+    monkeypatch.setenv("REDSIGHT_LOCAL_API_TOKEN", "test-local-token")
+    app = FastAPI()
+    configure_local_api_security(
+        app,
+        public_paths={"/health"},
+        max_request_bytes=8,
+    )
+
+    @app.get("/health")
+    async def health():
+        return {"ok": True}
+
+    @app.post("/protected")
+    async def protected():
+        return {"ok": True}
+
+    client = TestClient(app)
+    assert client.get("/health").status_code == 200
+    assert client.post("/protected").status_code == 401
+    accepted = client.post(
+        "/protected",
+        headers={"X-RedSight-Token": "test-local-token", "Origin": "http://localhost:3000"},
+    )
+    assert accepted.status_code == 200
+    assert accepted.headers["access-control-allow-origin"] == "http://localhost:3000"
+    rejected_origin = client.post(
+        "/protected",
+        headers={"X-RedSight-Token": "test-local-token", "Origin": "https://attacker.invalid"},
+    )
+    assert "access-control-allow-origin" not in rejected_origin.headers
+    oversized = client.post(
+        "/protected",
+        content=b"123456789",
+        headers={"X-RedSight-Token": "test-local-token"},
+    )
+    assert oversized.status_code == 413
+
+
+def test_native_mcp_stdio_lists_and_calls_tools(tmp_path):
+    server = tmp_path / "fake_mcp.py"
+    server.write_text(
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    request = json.loads(line)\n"
+        "    if 'id' not in request:\n"
+        "        continue\n"
+        "    method = request.get('method')\n"
+        "    if method == 'initialize':\n"
+        "        result = {'protocolVersion': '2025-06-18', 'capabilities': "
+        "{'tools': {}}, 'serverInfo': {'name': 'fixture', 'version': '1'}}\n"
+        "    elif method == 'tools/list':\n"
+        "        result = {'tools': [{'name': 'echo', 'description': 'Echo input', "
+        "'inputSchema': {'type': 'object'}}]}\n"
+        "    else:\n"
+        "        params = request.get('params', {})\n"
+        "        result = {'content': [{'type': 'text', 'text': "
+        "str(params.get('arguments', {}).get('text', ''))}]}\n"
+        "    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], "
+        "'result': result}), flush=True)\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "mcp-native.json"
+    config.write_text(
+        json.dumps(
+            {
+                "mcp_servers": {
+                    "fixture": {
+                        "transport": "stdio",
+                        "command": sys.executable,
+                        "args": [str(server)],
+                        "env": {"PRIVATE_VALUE": "${MCP_FIXTURE_SECRET}"},
+                        "timeout": 5,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    tested = asyncio.run(native_mcp.test_server("fixture", config_path=config))
+    called = asyncio.run(
+        native_mcp.call_tool(
+            "fixture",
+            "echo",
+            {"text": "ready"},
+            config_path=config,
+        )
+    )
+
+    assert tested["tool_count"] == 1
+    assert tested["tools"][0]["name"] == "echo"
+    assert called["result"]["content"][0]["text"] == "ready"
+    assert "env" not in native_mcp.sanitized_server_definitions(config)[0]
+
+
+def test_native_agent_tool_schemas_and_calls_keep_governance():
+    specs = {
+        "filesystem.read": {
+            "description": "Read one file",
+            "params": "path:str, max_chars?:int<=50000",
+            "agent": True,
+        },
+        "filesystem.write": {
+            "description": "Write one file",
+            "params": "path:str, content:str",
+            "agent": True,
+        },
+        "system.hidden": {"description": "Hidden", "params": "", "agent": False},
+    }
+    schemas = build_agent_tool_schemas(specs)
+    assert {item["function"]["name"] for item in schemas} == {
+        "filesystem__read",
+        "filesystem__write",
+    }
+    read_schema = next(
+        item["function"]["parameters"]
+        for item in schemas
+        if item["function"]["name"] == "filesystem__read"
+    )
+    assert read_schema["required"] == ["path"]
+    assert read_schema["properties"]["max_chars"]["maximum"] == 50_000
+
+    raw = json.dumps(
+        {
+            "content": "Read the requested file.",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "filesystem__read",
+                        "arguments": json.dumps({"path": "C:/notes.txt"}),
+                    }
+                },
+                {"function": {"name": "invented__tool", "arguments": "{}"}},
+            ],
+        }
+    )
+    decoded = decode_native_tool_steps(
+        raw,
+        specs,
+        agent_allowed=lambda name: name in specs and bool(specs[name]["agent"]),
+        requires_approval=lambda name: name.endswith("write"),
+    )
+    assert decoded is not None
+    steps, summary = decoded
+    assert summary == "Read the requested file."
+    assert steps == [
+        {
+            "tool": "filesystem.read",
+            "params": {"path": "C:/notes.txt"},
+            "reason": "Selected through native provider tool calling.",
+            "requires_approval": False,
+        }
+    ]
+
+
+def test_native_provider_tool_payloads_are_translated():
+    captured: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if "anthropic" in request.url.host:
+            captured["anthropic"] = payload
+            return httpx.Response(
+                200,
+                json={
+                    "content": [
+                        {"type": "text", "text": "checking"},
+                        {"type": "tool_use", "id": "call-1", "name": "lookup", "input": {"q": "x"}}
+                    ]
+                },
+            )
+        assert request.headers["x-goog-api-key"] == "key"
+        assert "key" not in request.url.params
+        captured["gemini"] = payload
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {"content": {"parts": [
+                        {"text": "checking"},
+                        {"functionCall": {"name": "lookup", "args": {"q": "x"}}},
+                    ]}}
+                ]
+            },
+        )
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look up data",
+                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+            },
+        }
+    ]
+
+    async def exercise():
+        anthropic = AnthropicProvider(api_key="key", base_url="https://anthropic.test/v1")
+        gemini = GoogleGeminiProvider(api_key="key", base_url="https://gemini.test/v1beta")
+        anthropic._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url=anthropic.base_url
+        )
+        gemini._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url=gemini.base_url,
+            headers=gemini._headers(),
+        )
+        try:
+            anthropic_result = await anthropic.chat(
+                [{"role": "user", "content": "use a tool"}],
+                tools=tools,
+                tool_choice="required",
+                max_tokens=200,
+            )
+            gemini_result = await gemini.chat(
+                [{"role": "user", "content": "use a tool"}],
+                tools=tools,
+                tool_choice="required",
+                max_tokens=200,
+                temperature=0.2,
+            )
+        finally:
+            await anthropic.close()
+            await gemini.close()
+        return anthropic_result, gemini_result
+
+    anthropic_result, gemini_result = asyncio.run(exercise())
+    anthropic_message = json.loads(anthropic_result)
+    assert anthropic_message["content"] == "checking"
+    assert anthropic_message["tool_calls"][0]["function"]["name"] == "lookup"
+    assert captured["anthropic"]["tools"][0]["input_schema"]["type"] == "object"
+    assert captured["anthropic"]["tool_choice"] == {"type": "any"}
+    gemini_message = json.loads(gemini_result)
+    assert gemini_message["content"] == "checking"
+    assert gemini_message["tool_calls"][0]["function"]["name"] == "lookup"
+    assert captured["gemini"]["generationConfig"] == {
+        "temperature": 0.2,
+        "maxOutputTokens": 200,
+    }
+    assert captured["gemini"]["toolConfig"]["functionCallingConfig"]["mode"] == "ANY"

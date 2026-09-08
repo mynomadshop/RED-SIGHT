@@ -10,6 +10,7 @@ Knowledge search with:
 - Citation pack with provenance
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -94,14 +95,18 @@ async def search_knowledge(request: Dict[str, Any]) -> Dict[str, Any]:
     search_collections = collections or await _search_engine.list_collections()
 
     all_dense_results = []
-    for coll in search_collections:
-        try:
-            coll_results = await _search_engine._search_collection(
-                query_vector, coll, top_k=top_k, filters=None
-            )
+    dense_batches = await asyncio.gather(
+        *(
+            _search_engine._search_collection(query_vector, coll, top_k=top_k, filters=None)
+            for coll in search_collections
+        ),
+        return_exceptions=True,
+    )
+    for coll, coll_results in zip(search_collections, dense_batches):
+        if isinstance(coll_results, BaseException):
+            logger.warning("Collection '%s' search failed: %s", coll, coll_results)
+        else:
             all_dense_results.extend(coll_results)
-        except Exception as e:
-            logger.warning(f"Collection '{coll}' search failed: {e}")
 
     # ── Step 2: Sparse BM25 search (if hybrid) ───────────────────
     if hybrid and _bm25_index:

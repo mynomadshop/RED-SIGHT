@@ -204,10 +204,11 @@ class MultiAgentOrchestrator:
                         raise ValueError("Circular dependency detected in tasks")
                     break
                 
-                # Execute ready tasks (up to max_concurrent)
-                for task in ready_tasks[:self._max_concurrent]:
-                    await self._execute_task(task, result)
-                    completed_tasks.add(task.task_id)
+                # Independent dependency-ready tasks run concurrently, bounded
+                # by the orchestrator's configured worker count.
+                wave = ready_tasks[:self._max_concurrent]
+                await asyncio.gather(*(self._execute_task(task, result) for task in wave))
+                completed_tasks.update(task.task_id for task in wave)
                 
                 pending_tasks = [t for t in pending_tasks if t.task_id not in completed_tasks]
             

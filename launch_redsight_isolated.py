@@ -1,23 +1,16 @@
 #!/usr/bin/env python3
 """
 RedSight Environment Isolator
-Strips hermes-agent paths from sys.path before importing anything else.
+Starts the command center without inherited PYTHONPATH entries.
 """
-import sys
 import os
-
-# Strip hermes-agent paths from sys.path
-sys.path = [
-    p for p in sys.path
-    if 'hermes' not in p
-]
+import sys
 
 # Also clear PYTHONPATH to prevent re-import
 os.environ.pop('PYTHONPATH', None)
 
 # Now import and run the actual launcher
 import subprocess
-import os
 
 # Get the directory of this script
 script_dir = os.path.dirname(os.path.abspath(__file__))

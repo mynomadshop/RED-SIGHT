@@ -372,6 +372,47 @@ class TestMetadataDB:
         await db.close()
 
     @pytest.mark.asyncio
+    async def test_chunk_batch_uses_one_database_round_trip(self, db_path):
+        """A document's chunks are persisted with one executemany statement."""
+        from sqlalchemy import event
+
+        from app.retrieval.metadata_db import MetadataDB
+
+        db = MetadataDB(db_path=db_path)
+        await db.init_db()
+        source_id = await db.get_or_create_source("/test/batch.pdf", "test", "batch-hash")
+        chunk_statements = 0
+
+        def count_chunk_inserts(connection, cursor, statement, parameters, context, executemany):
+            del connection, cursor, parameters, context
+            nonlocal chunk_statements
+            if statement.lstrip().upper().startswith("INSERT INTO CHUNKS"):
+                assert executemany is True
+                chunk_statements += 1
+
+        event.listen(db._engine, "before_cursor_execute", count_chunk_inserts)
+        try:
+            persisted = await db.bulk_upsert_chunks(
+                [
+                    {
+                        "chunk_id": f"batch-{index}",
+                        "source_file_id": source_id,
+                        "collection": "knowledge_docs",
+                        "content": f"Chunk {index}",
+                        "chunk_index": index,
+                    }
+                    for index in range(100)
+                ]
+            )
+        finally:
+            event.remove(db._engine, "before_cursor_execute", count_chunk_inserts)
+
+        assert persisted is True
+        assert chunk_statements == 1
+        assert len(await db.get_chunks_for_source(source_id)) == 100
+        await db.close()
+
+    @pytest.mark.asyncio
     async def test_index_version_operations(self, db_path):
         """Test index version creation and rollback."""
         from app.retrieval.metadata_db import MetadataDB

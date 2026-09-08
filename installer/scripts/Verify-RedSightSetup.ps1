@@ -300,7 +300,7 @@ foreach ($rel in $agentFiles.Keys) {
 }
 
 # The inherited skill catalog is what "advanced workflows" draws on.
-$skillRoot = Join-Path $ProjectRoot 'data\heritage\hermes\skills'
+$skillRoot = Join-Path $ProjectRoot 'data\heritage\redsight\skills'
 $skillCount = 0
 if (Test-Path -LiteralPath $skillRoot) {
     $skillCount = @(Get-ChildItem -LiteralPath $skillRoot -Recurse -Filter 'SKILL.md' -File -ErrorAction SilentlyContinue).Count

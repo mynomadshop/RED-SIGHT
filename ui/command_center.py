@@ -14,6 +14,7 @@ import json
 from datetime import datetime
 
 import httpx
+from app.security.local_api import auth_headers
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QUrl
 from PySide6.QtGui import QFont, QColor, QKeySequence
 from PySide6.QtWidgets import (
@@ -55,7 +56,7 @@ class RedSightAPI:
 
     def __init__(self, base_url: str = "http://127.0.0.1:8000"):
         self.base_url = base_url
-        self._client = httpx.AsyncClient(base_url=base_url, timeout=30)
+        self._client = httpx.AsyncClient(base_url=base_url, timeout=30, headers=auth_headers(), trust_env=False)
 
     async def search(self, query: str, top_k: int = 20,
                      collections: list = None) -> dict:
@@ -111,19 +112,25 @@ class RedSightAPI:
         return resp.json()
 
     async def chat(self, message: str, model: str = None) -> str:
-        """Send chat message via WebSocket."""
-        async with self._client.websocket_connect("/ws/stream") as ws:
-            await ws.send_json({"message": message, "model": model})
-            response = ""
-            while True:
-                data = await ws.receive_json()
-                if "token" in data:
-                    response += data["token"]
-                elif "done" in data:
+        """Send chat through the authenticated SSE endpoint."""
+        payload = {
+            "messages": [{"role": "user", "content": message}],
+            "model": model,
+            "stream": True,
+        }
+        response_text = ""
+        async with self._client.stream("POST", "/api/v1/chat/stream", json=payload) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                event = json.loads(line[6:])
+                if "error" in event:
+                    raise RuntimeError(str(event["error"]))
+                response_text += str(event.get("token", ""))
+                if event.get("done"):
                     break
-                elif "error" in data:
-                    raise Exception(data["error"])
-            return response
+        return response_text
 
     async def close(self):
         await self._client.aclose()

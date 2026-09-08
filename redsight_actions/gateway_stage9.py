@@ -509,6 +509,22 @@ def system_scan(
     complete = True
     stop_reason = None
 
+    file_upsert = """
+        INSERT INTO files(
+            path, scan_id, root, size, modified, extension, knowledge_candidate
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(path)
+        DO UPDATE SET
+            scan_id=excluded.scan_id,
+            root=excluded.root,
+            size=excluded.size,
+            modified=excluded.modified,
+            extension=excluded.extension,
+            knowledge_candidate=excluded.knowledge_candidate
+    """
+    pending_rows = []
+
     try:
 
         for root in roots:
@@ -626,27 +642,7 @@ def system_scan(
                                 str(path)
                             )
 
-                    connection.execute(
-                        """
-                        INSERT INTO files(
-                            path,
-                            scan_id,
-                            root,
-                            size,
-                            modified,
-                            extension,
-                            knowledge_candidate
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(path)
-                        DO UPDATE SET
-                            scan_id=excluded.scan_id,
-                            root=excluded.root,
-                            size=excluded.size,
-                            modified=excluded.modified,
-                            extension=excluded.extension,
-                            knowledge_candidate=excluded.knowledge_candidate
-                        """,
+                    pending_rows.append(
                         (
                             str(path),
                             scan_id,
@@ -661,7 +657,7 @@ def system_scan(
                             1
                             if candidate
                             else 0,
-                        ),
+                        )
                     )
 
                     if (
@@ -670,6 +666,8 @@ def system_scan(
                         == 0
                     ):
 
+                        connection.executemany(file_upsert, pending_rows)
+                        pending_rows.clear()
                         connection.commit()
 
                 if not complete:
@@ -680,6 +678,8 @@ def system_scan(
 
                 break
 
+        if pending_rows:
+            connection.executemany(file_upsert, pending_rows)
         connection.commit()
 
     finally:
@@ -1001,86 +1001,49 @@ async def rag_index(
         )
     ).strip()
 
+    container_paths = [map_host_to_container(path) for path in paths]
     results = []
 
-    async with httpx.AsyncClient(
-        timeout=600.0,
-    ) as client:
-
-        for path in paths:
-
-            container_path = map_host_to_container(
-                path
+    try:
+        async with httpx.AsyncClient(
+            timeout=600.0,
+            headers=base.auth_headers(),
+            trust_env=False,
+        ) as client:
+            response = await client.post(
+                base.REDSIGHT_URL + "/api/v1/jobs/index/batch",
+                json={
+                    "paths": container_paths,
+                    "collection": collection,
+                    "project": project,
+                },
             )
-
-            try:
-
-                response = await client.post(
-                    base.REDSIGHT_URL
-                    + "/api/v1/jobs/index/batch",
-
-                    json={
-                        "paths": [
-                            container_path
-                        ],
-
-                        "collection":
-                            collection,
-
-                        "project":
-                            project,
-                    },
-                )
-
-                try:
-
-                    payload = response.json()
-
-                except Exception:
-
-                    payload = {
-                        "text":
-                            response.text[
-                                :5000
-                            ]
-                    }
-
-                results.append(
-                    {
-                        "host_path":
-                            str(path),
-
-                        "container_path":
-                            container_path,
-
-                        "status_code":
-                            response.status_code,
-
-                        "ok":
-                            response.is_success,
-
-                        "response":
-                            payload,
-                    }
-                )
-
-            except Exception as exc:
-
-                results.append(
-                    {
-                        "host_path":
-                            str(path),
-
-                        "container_path":
-                            container_path,
-
-                        "ok":
-                            False,
-
-                        "error":
-                            repr(exc),
-                    }
-                )
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {"text": response.text[:5000]}
+        jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
+        for index, (path, container_path) in enumerate(zip(paths, container_paths)):
+            job = jobs[index] if index < len(jobs) else payload
+            results.append(
+                {
+                    "host_path": str(path),
+                    "container_path": container_path,
+                    "status_code": response.status_code,
+                    "ok": response.is_success,
+                    "response": job,
+                }
+            )
+    except Exception as exc:
+        results.extend(
+            {
+                "host_path": str(path),
+                "container_path": container_path,
+                "ok": False,
+                "error": repr(exc),
+            }
+            for path, container_path in zip(paths, container_paths)
+        )
 
     return {
         "ok":

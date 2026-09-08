@@ -16,7 +16,7 @@ import uuid
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -24,10 +24,17 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from fastapi import FastAPI
-from fastapi import HTTPException
+from fastapi import HTTPException, Query
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from pydantic import Field
+
+from app.security.local_api import auth_headers, configure_local_api_security
+from redsight_actions import mcp_native_stage111 as native_mcp
+from redsight_actions.tool_planning import (
+    build_agent_tool_schemas,
+    decode_native_tool_steps,
+)
 
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -76,7 +83,7 @@ HERITAGE = (
     ROOT
     / "data"
     / "heritage"
-    / "hermes"
+    / "redsight"
 )
 
 SECRETS_FILE = (
@@ -220,7 +227,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 
     "skills.list": {
         "description":
-            "List inherited Hermes skills.",
+            "List RED-SIGHT skills.",
         "risk": "read",
         "approval": False,
         "agent": True,
@@ -230,7 +237,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 
     "skills.invoke": {
         "description":
-            "Load a migrated Hermes skill and use it as procedural "
+            "Load a configured RED-SIGHT skill and use it as procedural "
             "knowledge for a RedSight model request.",
         "risk": "model",
         "approval": False,
@@ -241,7 +248,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 
     "mcp.list": {
         "description":
-            "List migrated Hermes MCP server definitions.",
+            "List configured RED-SIGHT MCP server definitions.",
         "risk": "read",
         "approval": False,
         "agent": True,
@@ -251,12 +258,32 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 
     "mcp.test": {
         "description":
-            "Ask Hermes to test a configured MCP server connection.",
+            "Test a configured MCP server and list its tools.",
         "risk": "read",
         "approval": False,
         "agent": False,
         "params":
             "name:str",
+    },
+
+    "mcp.native.test": {
+        "description":
+            "Test a configured native MCP server and list its tools.",
+        "risk": "read",
+        "approval": False,
+        "agent": False,
+        "params":
+            "name:str",
+    },
+
+    "mcp.call": {
+        "description":
+            "Call a tool exposed by an explicitly configured MCP server.",
+        "risk": "external_action",
+        "approval": True,
+        "agent": True,
+        "params":
+            "server:str, tool:str, arguments?:dict",
     },
 
     "task.create": {
@@ -286,51 +313,57 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 # MODELS
 # ====================================================================
 
-class ToolExecuteRequest(BaseModel):
+class GatewayRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-    tool: str
+
+class ToolExecuteRequest(GatewayRequest):
+
+    tool: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9_.-]+$")
 
     params: dict[str, Any] = Field(
-        default_factory=dict
+        default_factory=dict,
+        max_length=100,
     )
 
     approved: bool = False
 
 
-class BraveKeyRequest(BaseModel):
+class BraveKeyRequest(GatewayRequest):
 
-    api_key: str
-
-
-class AgentPlanRequest(BaseModel):
-
-    goal: str
+    api_key: str = Field(min_length=10, max_length=4096)
 
 
-class AgentExecuteRequest(BaseModel):
+class AgentPlanRequest(GatewayRequest):
 
-    goal: str
+    goal: str = Field(min_length=1, max_length=20_000)
 
-    plan: list[dict[str, Any]]
+
+class AgentExecuteRequest(GatewayRequest):
+
+    goal: str = Field(min_length=1, max_length=20_000)
+
+    plan: list[dict[str, Any]] = Field(min_length=1, max_length=50)
 
     approved: bool = False
 
 
-class TaskCreateRequest(BaseModel):
+class TaskCreateRequest(GatewayRequest):
 
-    name: str
+    name: str = Field(min_length=1, max_length=200)
 
-    tool: str
+    tool: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9_.-]+$")
 
     params: dict[str, Any] = Field(
-        default_factory=dict
+        default_factory=dict,
+        max_length=100,
     )
 
-    cron: str | None = None
+    cron: str | None = Field(default=None, max_length=200)
 
-    run_at: str | None = None
+    run_at: str | None = Field(default=None, max_length=100)
 
-    timezone: str | None = None
+    timezone: str | None = Field(default=None, max_length=100)
 
     approved: bool = False
 
@@ -1755,8 +1788,104 @@ def filesystem_write(
 
 
 # ====================================================================
-# HERMES SKILLS
+# REDSIGHT SKILLS
 # ====================================================================
+
+def _skill_roots() -> list[Path]:
+
+    roots = [
+        HERITAGE / "skills",
+        ROOT / "skills",
+    ]
+    configured = os.environ.get("REDSIGHT_SKILLS_DIR", "")
+    roots.extend(
+        Path(value).expanduser()
+        for value in configured.split(os.pathsep)
+        if value.strip()
+    )
+    workspace = os.environ.get("REDSIGHT_WORKSPACE", "").strip()
+    if workspace:
+        roots.append(Path(workspace).expanduser() / "skills")
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            key = str(root.resolve())
+        except OSError:
+            continue
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+def _skill_metadata(path: Path) -> dict[str, Any]:
+
+    text = path.read_text(encoding="utf-8-sig", errors="replace")[:32_000]
+    name = path.parent.name.replace("-", " ").replace("_", " ").strip()
+    description = ""
+    lines = text.splitlines()
+    if lines and lines[0].strip() == "---":
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            key, separator, value = line.partition(":")
+            if not separator:
+                continue
+            cleaned = value.strip().strip("\"'")
+            if key.strip().lower() == "name" and cleaned:
+                name = cleaned
+            elif key.strip().lower() == "description" and cleaned:
+                description = cleaned
+    if not name:
+        heading = next((line[2:].strip() for line in lines if line.startswith("# ")), "")
+        name = heading or "skill"
+    if not description:
+        description = next(
+            (
+                line.strip()
+                for line in lines
+                if line.strip()
+                and not line.lstrip().startswith(("#", "---", "name:", "description:"))
+            ),
+            "Procedural RED-SIGHT skill",
+        )
+    return {
+        "Name": name[:200],
+        "Description": description[:1_000],
+        "RelativePath": path.name,
+        "Source": "discovered",
+        "_Path": str(path.resolve()),
+    }
+
+
+def _catalog_item_path(item: dict[str, Any]) -> Path | None:
+
+    internal = str(item.get("_Path", "")).strip()
+    if internal:
+        path = Path(internal)
+        return path if path.is_file() else None
+    relative = str(item.get("RelativePath", "")).strip()
+    if not relative:
+        return None
+    try:
+        path = (HERITAGE / relative).resolve()
+        if not path.is_relative_to(HERITAGE.resolve()) or not path.is_file():
+            return None
+        return path
+    except OSError:
+        return None
+
+
+def public_skill(item: dict[str, Any]) -> dict[str, Any]:
+
+    return {
+        str(key): value
+        for key, value in item.items()
+        if not str(key).startswith("_")
+    }
+
 
 def load_skill_catalog():
 
@@ -1765,21 +1894,36 @@ def load_skill_catalog():
         / "skills_catalog.json"
     )
 
-    if not path.exists():
+    catalog: list[dict[str, Any]] = []
+    if path.is_file() and path.stat().st_size <= 2_000_000:
+        try:
+            stored = json.loads(path.read_text(encoding="utf-8-sig"))
+            if isinstance(stored, list):
+                catalog.extend(item for item in stored if isinstance(item, dict))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            pass
 
-        return []
-
-    try:
-
-        return json.loads(
-            path.read_text(
-                encoding="utf-8-sig"
-            )
-        )
-
-    except Exception:
-
-        return []
+    known_paths = {
+        str(skill_path.resolve())
+        for item in catalog
+        if (skill_path := _catalog_item_path(item)) is not None
+    }
+    for root in _skill_roots():
+        if not root.is_dir():
+            continue
+        try:
+            candidates = root.rglob("SKILL.md")
+            for number, skill_path in enumerate(candidates):
+                if number >= 1_000:
+                    break
+                resolved = str(skill_path.resolve())
+                if resolved in known_paths or skill_path.stat().st_size > 1_000_000:
+                    continue
+                catalog.append(_skill_metadata(skill_path))
+                known_paths.add(resolved)
+        except OSError:
+            continue
+    return catalog
 
 
 def skills_list(
@@ -1846,34 +1990,26 @@ def skills_list(
             ),
 
         "skills":
-            catalog[:limit],
+            [public_skill(item) for item in catalog[:limit]],
     }
 
 
 async def redsight_chat(
     messages: list[dict[str, str]],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | None = None,
 ):
-
-    async with httpx.AsyncClient(
-        timeout=180.0,
-    ) as client:
-
-        response = await client.post(
-            REDSIGHT_URL
-            + "/api/v1/chat",
-
-            json={
-                "messages":
-                    messages,
-
-                "stream":
-                    False,
-            },
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
+    payload: dict[str, Any] = {"messages": messages, "stream": False}
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = tool_choice or "auto"
+    response = await _redsight_client().post(
+        "/api/v1/chat",
+        json=payload,
+    )
+    response.raise_for_status()
+    data = response.json()
 
     message = data.get(
         "message"
@@ -1953,23 +2089,15 @@ async def skills_invoke(
     if not matches:
 
         raise ValueError(
-            "No migrated Hermes skill matched: "
+            "No configured RED-SIGHT skill matched: "
             + requested
         )
 
     item = matches[0]
 
-    relative = str(
-        item.get(
-            "RelativePath",
-            ""
-        )
-    )
-
-    skill_path = (
-        HERITAGE
-        / relative
-    )
+    skill_path = _catalog_item_path(item)
+    if skill_path is None:
+        raise FileNotFoundError("The configured skill file is unavailable")
 
     skill_text = skill_path.read_text(
         encoding="utf-8-sig",
@@ -1984,7 +2112,7 @@ async def skills_invoke(
 
                 "content":
                     (
-                        "You are RedSight using an inherited Hermes "
+                        "You are RedSight using a RED-SIGHT "
                         "procedural skill. Follow the useful procedure "
                         "but do not claim external actions occurred "
                         "unless an actual tool result says they occurred.\n\n"
@@ -2068,6 +2196,9 @@ def mcp_list():
         "ok":
             True,
 
+        "native_servers":
+            native_mcp.sanitized_server_definitions(),
+
         "servers":
             manifest.get(
                 "mcp_servers",
@@ -2079,7 +2210,7 @@ def mcp_list():
     }
 
 
-def mcp_test(
+async def mcp_test(
     params: dict[str, Any],
 ):
 
@@ -2096,35 +2227,32 @@ def mcp_test(
             "name is required"
         )
 
-    result = subprocess.run(
-        [
-            "hermes",
-            "mcp",
-            "test",
-            name,
-        ],
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=90,
-    )
+    return await native_mcp.test_server(name)
 
-    return {
-        "ok":
-            result.returncode == 0,
 
-        "server":
-            name,
+async def mcp_call(
+    params: dict[str, Any],
+):
 
-        "stdout":
-            result.stdout[-12000:],
+    server = str(
+        params.get("server")
+        or params.get("name")
+        or ""
+    ).strip()
+    tool = str(
+        params.get("tool")
+        or ""
+    ).strip()
+    arguments = params.get("arguments", {})
 
-        "stderr":
-            result.stderr[-6000:],
+    if not server:
+        raise ValueError("server is required")
+    if not tool:
+        raise ValueError("tool is required")
+    if not isinstance(arguments, dict):
+        raise ValueError("arguments must be an object")
 
-        "exit_code":
-            result.returncode,
-    }
+    return await native_mcp.call_tool(server, tool, arguments)
 
 
 # ====================================================================
@@ -2671,9 +2799,15 @@ async def execute_tool_core(
 
             result = mcp_list()
 
-        elif tool == "mcp.test":
+        elif tool in {"mcp.test", "mcp.native.test"}:
 
-            result = mcp_test(
+            result = await mcp_test(
+                params
+            )
+
+        elif tool == "mcp.call":
+
+            result = await mcp_call(
                 params
             )
 
@@ -2789,6 +2923,26 @@ def agent_tool_catalog():
     }
 
 
+def agent_tool_schemas(*, exclude: set[str] | None = None) -> list[dict[str, Any]]:
+    """Return native provider function definitions for agent-allowed tools."""
+    return build_agent_tool_schemas(TOOL_SPECS, exclude=exclude)
+
+
+def native_tool_steps(
+    raw: str,
+    *,
+    exclude: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], str] | None:
+    """Decode provider-native function calls into the governed plan format."""
+    return decode_native_tool_steps(
+        raw,
+        TOOL_SPECS,
+        agent_allowed=tool_agent_allowed,
+        requires_approval=tool_requires_approval,
+        exclude=exclude,
+    )
+
+
 async def create_agent_plan(
     goal: str,
 ):
@@ -2830,8 +2984,19 @@ async def create_agent_plan(
                 "content":
                     goal,
             },
-        ]
+        ],
+        tools=agent_tool_schemas(),
+        tool_choice="auto",
     )
+
+    native = native_tool_steps(raw)
+    if native is not None:
+        steps, summary = native
+        return {
+            "steps": steps,
+            "summary": summary or "Plan selected through native provider tool calling.",
+            "requires_approval": any(step["requires_approval"] for step in steps),
+        }
 
     candidate = raw.strip()
 
@@ -3108,6 +3273,38 @@ app = FastAPI(
     version="1.0.0",
 )
 
+_LOCAL_AUTH_HEADERS = auth_headers()
+configure_local_api_security(
+    app,
+    public_paths={"/health"},
+    header_name=next(iter(_LOCAL_AUTH_HEADERS)),
+    allowed_origins=(),
+)
+
+_REDSIGHT_CLIENT: httpx.AsyncClient | None = None
+
+
+def _redsight_client() -> httpx.AsyncClient:
+    """Reuse loopback connections so every agent step avoids a new TCP setup."""
+    global _REDSIGHT_CLIENT
+    if _REDSIGHT_CLIENT is None or _REDSIGHT_CLIENT.is_closed:
+        _REDSIGHT_CLIENT = httpx.AsyncClient(
+            base_url=REDSIGHT_URL,
+            headers=_LOCAL_AUTH_HEADERS,
+            timeout=httpx.Timeout(180.0, connect=3.0, pool=3.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            trust_env=False,
+        )
+    return _REDSIGHT_CLIENT
+
+
+@app.on_event("shutdown")
+async def close_gateway_clients() -> None:
+    global _REDSIGHT_CLIENT
+    if _REDSIGHT_CLIENT is not None:
+        await _REDSIGHT_CLIENT.aclose()
+        _REDSIGHT_CLIENT = None
+
 
 @app.get(
     "/health"
@@ -3353,6 +3550,7 @@ async def task_resume(
 )
 async def task_delete(
     task_id: str,
+    confirm: Literal["delete"] = Query(..., description="Explicit deletion confirmation"),
 ):
 
     job = SCHEDULER.get_job(

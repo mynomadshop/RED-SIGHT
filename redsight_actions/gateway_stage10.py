@@ -11,11 +11,11 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from redsight_actions import gateway_stage91 as s91
 
@@ -60,46 +60,52 @@ STOPWORDS = {
 }
 
 
-class MemoryBuildRequest(BaseModel):
-    user_message: str
-    effective_message: str | None = None
-    heritage_context: str = ""
-    session_id: str | None = None
+class MemoryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
-class MemoryCommitRequest(BaseModel):
-    user_message: str
-    assistant_message: str
-    effective_message: str | None = None
-    session_id: str | None = None
+class MemoryBuildRequest(MemoryRequest):
+    user_message: str = Field(min_length=1, max_length=250_000)
+    effective_message: str | None = Field(default=None, max_length=250_000)
+    heritage_context: str = Field(default="", max_length=50_000)
+    session_id: str | None = Field(default=None, max_length=100)
 
 
-class SessionNewRequest(BaseModel):
-    title: str | None = None
+class MemoryCommitRequest(MemoryRequest):
+    user_message: str = Field(min_length=1, max_length=250_000)
+    assistant_message: str = Field(min_length=1, max_length=500_000)
+    effective_message: str | None = Field(default=None, max_length=250_000)
+    session_id: str | None = Field(default=None, max_length=100)
 
 
-class SessionRenameRequest(BaseModel):
-    title: str
+class SessionNewRequest(MemoryRequest):
+    title: str | None = Field(default=None, max_length=200)
 
 
-class SessionPinRequest(BaseModel):
+class SessionRenameRequest(MemoryRequest):
+    title: str = Field(min_length=1, max_length=200)
+
+
+class SessionPinRequest(MemoryRequest):
     pinned: bool = True
 
 
-class SessionArchiveRequest(BaseModel):
+class SessionArchiveRequest(MemoryRequest):
     archived: bool = True
 
 
-class MemorySearchRequest(BaseModel):
-    query: str
-    limit: int = 10
-    memory_types: list[str] | None = None
+class MemorySearchRequest(MemoryRequest):
+    query: str = Field(min_length=1, max_length=20_000)
+    limit: int = Field(default=10, ge=1, le=30)
+    memory_types: list[Literal["semantic", "episodic", "imported"]] | None = Field(
+        default=None, max_length=3
+    )
 
 
-class RagExpandRequest(BaseModel):
+class RagExpandRequest(MemoryRequest):
     paths: list[str] | str
-    max_files: int = 200
-    max_size_mb: int = 100
+    max_files: int = Field(default=200, ge=1, le=500_000)
+    max_size_mb: int = Field(default=100, ge=1, le=1_024)
 
 
 def _connect() -> sqlite3.Connection:
@@ -314,9 +320,15 @@ def list_sessions(include_archived: bool = False, limit: int = 200) -> list[dict
     with DB_LOCK, _connect() as db:
         rows = db.execute(
             f"""
-            SELECT * FROM sessions
+            SELECT s.*,
+                   t.id AS task_id, t.goal AS task_goal, t.status AS task_status,
+                   t.plan_json AS task_plan_json, t.results_json AS task_results_json,
+                   t.current_step AS task_current_step, t.approved AS task_approved,
+                   t.created_at AS task_created_at, t.updated_at AS task_updated_at
+            FROM sessions s
+            LEFT JOIN tasks t ON t.id=s.active_task_id
             {where}
-            ORDER BY pinned DESC, updated_at DESC
+            ORDER BY s.pinned DESC, s.updated_at DESC
             LIMIT ?
             """,
             (max(1, min(int(limit), 500)),),
@@ -324,11 +336,33 @@ def list_sessions(include_archived: bool = False, limit: int = 200) -> list[dict
     active = setting_get("active_session_id")
     result = []
     for row in rows:
-        item = dict(row)
+        raw = dict(row)
+        task_id = raw.pop("task_id")
+        task = None
+        if task_id:
+            task = {
+                "id": task_id,
+                "session_id": raw["id"],
+                "goal": raw.pop("task_goal"),
+                "status": raw.pop("task_status"),
+                "plan": _loads(raw.pop("task_plan_json"), {}),
+                "results": _loads(raw.pop("task_results_json"), {}),
+                "current_step": raw.pop("task_current_step"),
+                "approved": bool(raw.pop("task_approved")),
+                "created_at": raw.pop("task_created_at"),
+                "updated_at": raw.pop("task_updated_at"),
+            }
+        else:
+            for key in (
+                "task_goal", "task_status", "task_plan_json", "task_results_json",
+                "task_current_step", "task_approved", "task_created_at", "task_updated_at",
+            ):
+                raw.pop(key, None)
+        item = raw
         item["pinned"] = bool(item["pinned"])
         item["archived"] = bool(item["archived"])
         item["active"] = item["id"] == active
-        item["active_task"] = get_active_task(item["id"])
+        item["active_task"] = task
         result.append(item)
     return result
 
@@ -524,15 +558,15 @@ def retrieve_memories(query: str, limit: int = 10,
     now = _now()
     result = []
     with DB_LOCK, _connect() as db:
+        db.executemany(
+            """
+            UPDATE memories
+            SET last_used_at=?, use_count=use_count+1
+            WHERE id=?
+            """,
+            [(now, row["id"]) for _, row in selected],
+        )
         for score, row in selected:
-            db.execute(
-                """
-                UPDATE memories
-                SET last_used_at=?, use_count=use_count+1
-                WHERE id=?
-                """,
-                (now, row["id"]),
-            )
             result.append(
                 {
                     "id": row["id"],
@@ -772,24 +806,26 @@ def refresh_capabilities() -> None:
         "rag:directory_expansion":
             "Host directories are expanded into supported files before RAG submission.",
         "skills:guided_execution":
-            "Inherited Hermes skills can guide actual allow-listed RedSight tool plans.",
+            "Inherited RedSight skills can guide actual allow-listed RedSight tool plans.",
     }
     for name, description in static.items():
         entries[name] = (description, "active", {})
     with DB_LOCK, _connect() as db:
-        for name, (description, status, metadata) in entries.items():
-            db.execute(
-                """
-                INSERT INTO capabilities(name,description,status,metadata_json,updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET
-                    description=excluded.description,
-                    status=excluded.status,
-                    metadata_json=excluded.metadata_json,
-                    updated_at=excluded.updated_at
-                """,
-                (name, description, status, _json(metadata), now),
-            )
+        db.executemany(
+            """
+            INSERT INTO capabilities(name,description,status,metadata_json,updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                description=excluded.description,
+                status=excluded.status,
+                metadata_json=excluded.metadata_json,
+                updated_at=excluded.updated_at
+            """,
+            [
+                (name, description, status, _json(metadata), now)
+                for name, (description, status, metadata) in entries.items()
+            ],
+        )
         db.commit()
 
 
@@ -813,8 +849,8 @@ def seed_heritage_memory() -> None:
     if setting_get("heritage_memory_seeded") == "1":
         return
     candidates = [
-        (base.HERITAGE / "memories" / "USER.md", "imported", "Hermes USER"),
-        (base.HERITAGE / "memories" / "MEMORY.md", "imported", "Hermes MEMORY"),
+        (base.HERITAGE / "memories" / "USER.md", "imported", "RedSight USER"),
+        (base.HERITAGE / "memories" / "MEMORY.md", "imported", "RedSight MEMORY"),
     ]
     for path, memory_type, label in candidates:
         if not path.exists():
@@ -883,15 +919,14 @@ async def index_memory_exports(session_id: str) -> None:
         for path in (session_path, memory_path):
             relative = path.resolve().relative_to(host_root.resolve())
             paths.append("/host/user/" + relative.as_posix())
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            await client.post(
-                base.REDSIGHT_URL + "/api/v1/jobs/index/batch",
-                json={
-                    "paths": paths,
-                    "collection": "episodic_memory",
-                    "project": "redsight-conversation-memory",
-                },
-            )
+        await base._redsight_client().post(
+            "/api/v1/jobs/index/batch",
+            json={
+                "paths": paths,
+                "collection": "episodic_memory",
+                "project": "redsight-conversation-memory",
+            },
+        )
     except Exception as exc:
         add_event(session_id, "memory_index_warning", {"error": repr(exc)})
 
@@ -1123,7 +1158,7 @@ def skills_list_stage10(params: dict[str, Any]) -> dict[str, Any]:
     else:
         filtered = list(catalog)
     total = len(filtered)
-    page = filtered[offset:offset + limit]
+    page = [base.public_skill(item) for item in filtered[offset:offset + limit]]
     return {
         "ok": True,
         "total": total,
@@ -1228,32 +1263,33 @@ async def rag_index_expanded(params: dict[str, Any]) -> dict[str, Any]:
     collection = str(params.get("collection", "knowledge_docs"))
     project = str(params.get("project", "host-knowledge"))
     batch_size = max(1, min(int(params.get("batch_size", 25)), 100))
-    submitted = 0
-    failed = []
-    async with httpx.AsyncClient(timeout=600.0) as client:
-        for start in range(0, len(paths), batch_size):
-            batch = paths[start:start + batch_size]
-            try:
-                response = await client.post(
-                    base.REDSIGHT_URL + "/api/v1/jobs/index/batch",
+    batches = [paths[start:start + batch_size] for start in range(0, len(paths), batch_size)]
+    semaphore = asyncio.Semaphore(3)
+
+    async def submit(batch: list[str]) -> tuple[int, dict[str, Any] | None]:
+        try:
+            async with semaphore:
+                response = await base._redsight_client().post(
+                    "/api/v1/jobs/index/batch",
                     json={
                         "paths": batch,
                         "collection": collection,
                         "project": project,
                     },
                 )
-                if response.is_success:
-                    submitted += len(batch)
-                else:
-                    failed.append(
-                        {
-                            "status_code": response.status_code,
-                            "paths": batch[:3],
-                            "body": response.text[:2000],
-                        }
-                    )
-            except Exception as exc:
-                failed.append({"paths": batch[:3], "error": repr(exc)})
+            if response.is_success:
+                return len(batch), None
+            return 0, {
+                "status_code": response.status_code,
+                "paths": batch[:3],
+                "body": response.text[:2000],
+            }
+        except Exception as exc:
+            return 0, {"paths": batch[:3], "error": repr(exc)}
+
+    outcomes = await asyncio.gather(*(submit(batch) for batch in batches))
+    submitted = sum(count for count, _ in outcomes)
+    failed = [failure for _, failure in outcomes if failure is not None]
     return {
         "ok": not failed,
         "collection": collection,
@@ -1300,12 +1336,11 @@ def _find_skill(skill_name: str) -> tuple[dict[str, Any], str]:
             partial.append(item)
     matches = exact or partial
     if not matches:
-        raise ValueError("No migrated Hermes skill matched: " + skill_name)
+        raise ValueError("No configured RED-SIGHT skill matched: " + skill_name)
     item = matches[0]
-    relative = str(item.get("RelativePath", ""))
-    path = base.HERITAGE / relative
-    if not path.is_file():
-        raise FileNotFoundError(str(path))
+    path = base._catalog_item_path(item)
+    if path is None:
+        raise FileNotFoundError("The configured skill file is unavailable")
     text = path.read_text(encoding="utf-8-sig", errors="replace")
     return item, text[:20000]
 
@@ -1318,7 +1353,7 @@ async def skill_execute_stage10(params: dict[str, Any], approved: bool) -> dict[
     item, skill_text = _find_skill(skill_name)
     tool_catalog = base.agent_tool_catalog()
     planner_prompt = (
-        "You are a governed RedSight skill executor. The inherited Hermes "
+        "You are a governed RedSight skill executor. The RED-SIGHT "
         "SKILL.md below is procedural guidance. Create an allow-listed RedSight "
         "tool plan only when actual tools are needed. Never invent tools. "
         "Return ONLY JSON: "
@@ -1333,27 +1368,37 @@ async def skill_execute_stage10(params: dict[str, Any], approved: bool) -> dict[
         [
             {"role": "system", "content": planner_prompt},
             {"role": "user", "content": instruction},
-        ]
+        ],
+        tools=base.agent_tool_schemas(exclude={"skills.invoke", "skills.execute"}),
+        tool_choice="auto",
     )
     parsed = _extract_json_object(raw)
-    steps = []
-    for step in parsed.get("steps", [])[:8]:
-        if not isinstance(step, dict):
-            continue
-        tool = str(step.get("tool", ""))
-        if tool == "skills.execute" or not base.tool_agent_allowed(tool):
-            continue
-        p = step.get("params", {})
-        if not isinstance(p, dict):
-            p = {}
-        steps.append(
-            {
-                "tool": tool,
-                "params": p,
-                "reason": str(step.get("reason", ""))[:500],
-                "requires_approval": base.tool_requires_approval(tool),
-            }
-        )
+    native = base.native_tool_steps(
+        raw,
+        exclude={"skills.invoke", "skills.execute"},
+    )
+    if native is not None:
+        steps, native_summary = native
+        parsed = {"summary": native_summary}
+    else:
+        steps = []
+        for step in parsed.get("steps", [])[:8]:
+            if not isinstance(step, dict):
+                continue
+            tool = str(step.get("tool", ""))
+            if tool in {"skills.invoke", "skills.execute"} or not base.tool_agent_allowed(tool):
+                continue
+            p = step.get("params", {})
+            if not isinstance(p, dict):
+                p = {}
+            steps.append(
+                {
+                    "tool": tool,
+                    "params": p,
+                    "reason": str(step.get("reason", ""))[:500],
+                    "requires_approval": base.tool_requires_approval(tool),
+                }
+            )
     if any(step["requires_approval"] for step in steps) and not approved:
         return {
             "ok": False,
@@ -1384,7 +1429,7 @@ async def skill_execute_stage10(params: dict[str, Any], approved: bool) -> dict[
             {
                 "role": "system",
                 "content": (
-                    "Use this inherited Hermes skill as procedural guidance. "
+                    "Use this RED-SIGHT skill as procedural guidance. "
                     "Describe only actions supported by the supplied tool results. "
                     "If no tools ran, answer as skill-guided reasoning.\n\n"
                     + skill_text
@@ -1419,7 +1464,7 @@ async def skill_execute_stage10(params: dict[str, Any], approved: bool) -> dict[
 
 base.TOOL_SPECS["skills.execute"] = {
     "description": (
-        "Execute an inherited Hermes skill as procedural guidance, allowing it "
+        "Execute a RED-SIGHT skill as procedural guidance, allowing it "
         "to plan and call only allow-listed RedSight tools with approval gates."
     ),
     "risk": "orchestrated",
@@ -1468,7 +1513,7 @@ async def create_plan_stage10(goal: str):
     )
     if relevant_skills:
         effective_goal += (
-            "\n\nRELEVANT INHERITED HERMES SKILLS AVAILABLE FOR skills.execute:\n"
+            "\n\nRELEVANT INHERITED RED-SIGHT SKILLS AVAILABLE FOR skills.execute:\n"
             + "\n".join(
                 f"- {item.get('Name')}: {item.get('Description','')}"
                 for item in relevant_skills
@@ -1742,7 +1787,7 @@ async def memory_selftest():
 
         skills = skills_list_stage10({"limit": 5})
 
-        sample_root = ROOT / "data" / "heritage" / "hermes" / "memories"
+        sample_root = ROOT / "data" / "heritage" / "redsight" / "memories"
         rag_expand_ok = False
         rag_count = 0
         if sample_root.exists():

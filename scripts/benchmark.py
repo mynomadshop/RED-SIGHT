@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.security.local_api import auth_headers
+
 logger = logging.getLogger(__name__)
 
 
@@ -204,7 +206,7 @@ class BenchmarkSuite:
         
         start = time.time()
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=5.0, headers=auth_headers(), trust_env=False) as client:
                 response = await client.get("http://127.0.0.1:8000/api/v1/health")
                 latency_ms = (time.time() - start) * 1000
                 
@@ -235,7 +237,7 @@ class BenchmarkSuite:
         
         start = time.time()
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=auth_headers(), trust_env=False) as client:
                 response = await client.get(
                     "http://127.0.0.1:8000/api/v1/search",
                     params={"query": "", "limit": 0},
@@ -266,13 +268,13 @@ class BenchmarkSuite:
         
         latencies = []
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=60.0, headers=auth_headers(), trust_env=False) as client:
                 # Send a simple query and measure TTFT
                 start = time.time()
                 async with client.stream(
                     "POST",
                     "http://127.0.0.1:8000/api/v1/chat",
-                    json={"message": "Hello", "stream": True},
+                    json={"messages": [{"role": "user", "content": "Hello"}], "stream": True},
                 ) as response:
                     async for line in response.aiter_lines():
                         if line.startswith("data: "):
@@ -312,12 +314,15 @@ class BenchmarkSuite:
         import httpx
         
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=60.0, headers=auth_headers(), trust_env=False) as client:
                 start = time.time()
                 async with client.stream(
                     "POST",
                     "http://127.0.0.1:8000/api/v1/chat",
-                    json={"message": "Write a short story about AI", "stream": True},
+                    json={
+                        "messages": [{"role": "user", "content": "Write a short story about AI"}],
+                        "stream": True,
+                    },
                 ) as response:
                     token_count = 0
                     async for line in response.aiter_lines():
@@ -350,10 +355,13 @@ class BenchmarkSuite:
         
         start = time.time()
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=60.0, headers=auth_headers(), trust_env=False) as client:
                 response = await client.post(
                     "http://127.0.0.1:8000/api/v1/chat",
-                    json={"message": "Write a short story about AI", "stream": False},
+                    json={
+                        "messages": [{"role": "user", "content": "Write a short story about AI"}],
+                        "stream": False,
+                    },
                 )
                 latency_ms = (time.time() - start) * 1000
                 
@@ -381,7 +389,7 @@ class BenchmarkSuite:
         
         latencies = []
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=auth_headers(), trust_env=False) as client:
                 for _ in range(10):
                     start = time.time()
                     await client.get(
@@ -433,7 +441,7 @@ class BenchmarkSuite:
             import httpx
             
             recall_scores = []
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=auth_headers(), trust_env=False) as client:
                 for query in queries[:5]:  # Test first 5
                     response = await client.get(
                         "http://127.0.0.1:8000/api/v1/search",
@@ -471,7 +479,7 @@ class BenchmarkSuite:
         
         latencies = []
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, headers=auth_headers(), trust_env=False) as client:
                 async def single_request():
                     start = time.time()
                     try:
@@ -516,7 +524,7 @@ class BenchmarkSuite:
         import httpx
         
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, headers=auth_headers(), trust_env=False) as client:
                 queries = ["test1", "test2", "test3", "test4", "test5"]
                 
                 start = time.time()

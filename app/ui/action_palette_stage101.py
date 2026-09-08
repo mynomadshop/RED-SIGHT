@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from app.security.local_api import auth_headers
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
@@ -43,6 +45,20 @@ CHAT_LOG = LOG_DIR / "chat-ui-stage101.log"
 
 BACKEND_URL = "http://127.0.0.1:8000"
 GATEWAY_URL = "http://127.0.0.1:8765"
+_BACKEND_CLIENT: httpx.AsyncClient | None = None
+
+
+def _backend_client() -> httpx.AsyncClient:
+    global _BACKEND_CLIENT
+    if _BACKEND_CLIENT is None or _BACKEND_CLIENT.is_closed:
+        _BACKEND_CLIENT = httpx.AsyncClient(
+            base_url=BACKEND_URL,
+            timeout=httpx.Timeout(600.0, connect=3.0, pool=3.0),
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            headers=auth_headers(),
+            trust_env=False,
+        )
+    return _BACKEND_CLIENT
 
 RESET_PHRASES = {
     "new chat",
@@ -214,12 +230,10 @@ async def _build_messages(original: str, effective: str) -> tuple[str, list[dict
 
 
 async def _backend_chat(messages: list[dict[str, str]]) -> tuple[str, dict[str, Any]]:
-    timeout = httpx.Timeout(600.0, connect=20.0)
-    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-        response = await client.post(
-            BACKEND_URL + "/api/v1/chat",
-            json={"messages": messages, "stream": False},
-        )
+    response = await _backend_client().post(
+        "/api/v1/chat",
+        json={"messages": messages, "stream": False},
+    )
 
     raw = response.text
     if response.status_code < 200 or response.status_code >= 300:

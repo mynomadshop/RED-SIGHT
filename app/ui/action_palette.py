@@ -9,6 +9,8 @@ import urllib.request
 
 from pathlib import Path
 
+from app.security.local_api import auth_headers
+
 from PySide6.QtCore import QObject
 from PySide6.QtCore import Qt
 
@@ -46,7 +48,7 @@ def _json_request(
 
     data = None
 
-    headers = {}
+    headers = auth_headers()
 
     if body is not None:
 
@@ -1030,7 +1032,7 @@ def _find_chat_input(
                 if (
                     "heritage"
                     in combined
-                    or "inherited hermes"
+                    or "inherited redsight"
                     in combined
                 ):
 

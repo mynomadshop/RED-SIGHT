@@ -7,7 +7,7 @@ audit trail, and agent orchestration.
 """
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Any, Dict, List, Literal, Optional
 
 router = APIRouter()
@@ -15,9 +15,13 @@ router = APIRouter()
 
 # ─── Request/Response Models ──────────────────────────────────────
 
-class SkillSearchRequest(BaseModel):
-    query: str = Field(..., description="Natural language query")
-    limit: int = Field(default=10, description="Max results")
+class StrictRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class SkillSearchRequest(StrictRequest):
+    query: str = Field(..., min_length=1, max_length=20_000, description="Natural language query")
+    limit: int = Field(default=10, ge=1, le=100, description="Max results")
 
 
 class SkillSearchResult(BaseModel):
@@ -28,9 +32,9 @@ class SkillSearchResult(BaseModel):
     score: float
 
 
-class ToolExecuteRequest(BaseModel):
-    tool_name: str
-    params: Dict[str, Any] = Field(default_factory=dict)
+class ToolExecuteRequest(StrictRequest):
+    tool_name: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_.-]+$")
+    params: Dict[str, Any] = Field(default_factory=dict, max_length=100)
     role: Literal["user"] = Field(
         default="user",
         description="Public API execution is restricted to the non-privileged user role",
@@ -44,25 +48,25 @@ class ToolExecuteResult(BaseModel):
     execution_time_ms: float = 0.0
 
 
-class OrchestrateRequest(BaseModel):
-    query: str = Field(..., description="User query")
+class OrchestrateRequest(StrictRequest):
+    query: str = Field(..., min_length=1, max_length=20_000, description="User query")
     role: Literal["user"] = Field(
         default="user",
         description="Public API orchestration is restricted to the non-privileged user role",
     )
 
 
-class AuditQueryRequest(BaseModel):
-    actor: Optional[str] = None
-    action: Optional[str] = None
+class AuditQueryRequest(StrictRequest):
+    actor: Optional[str] = Field(default=None, max_length=200)
+    action: Optional[str] = Field(default=None, max_length=100)
     start_time: Optional[float] = None
     end_time: Optional[float] = None
-    limit: int = Field(default=100)
+    limit: int = Field(default=100, ge=1, le=1_000)
 
 
-class TestValidateRequest(BaseModel):
-    tool_name: str
-    params: Dict[str, Any] = Field(default_factory=dict)
+class TestValidateRequest(StrictRequest):
+    tool_name: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_.-]+$")
+    params: Dict[str, Any] = Field(default_factory=dict, max_length=100)
 
 
 # ─── Skill Discovery Endpoints ────────────────────────────────────
@@ -224,10 +228,10 @@ async def audit_stats():
 
 # ─── Permission Check Endpoint ────────────────────────────────────
 
-class PermissionCheckRequest(BaseModel):
-    tool_name: str
+class PermissionCheckRequest(StrictRequest):
+    tool_name: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_.-]+$")
     role: Literal["user"] = Field(default="user")
-    params: Dict[str, Any] = Field(default_factory=dict)
+    params: Dict[str, Any] = Field(default_factory=dict, max_length=100)
 
 
 @router.post("/permissions/check")

@@ -6,15 +6,10 @@ REM Save original environment
 set "ORIGINAL_PATH=%PATH%"
 set "ORIGINAL_PYTHONPATH=%PYTHONPATH%"
 
-REM Remove hermes-agent venv from PATH to prevent conflicts
-set "PATH=%PATH:C:\Users\walim\AppData\Local\hermes\hermes-agent\venv\Scripts;=%"
-set "PATH=%PATH:C:\Users\walim\AppData\Local\hermes\hermes-agent\venv\;=%"
-set "PATH=%PATH:C:\Users\walim\AppData\Local\hermes\hermes-agent;=%"
-
 REM Add RedSight .venv to PATH first
 set "PATH=%~dp0.venv\Scripts;%PATH%"
 
-REM Clear PYTHONPATH to prevent hermes-agent from being imported
+REM Clear PYTHONPATH to prevent unrelated environments from being imported
 set "PYTHONPATH="
 
 REM Set working directory to project root

@@ -101,6 +101,25 @@ $env:LM_STUDIO_URL = "http://127.0.0.1:1234"
 $env:LM_STUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
 $env:LM_BASE_URL = "http://127.0.0.1:1234/v1"
 
+# Load DPAPI-protected provider settings plus the random local API token before
+# Docker starts. Compose passes only the active process environment into the
+# backend; secret values are never written to this script or its command line.
+$RuntimeJson = & $UiPython -c "import json,redsight_bootstrap as r;print(json.dumps(r.environment()))" 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $RuntimeJson) {
+    throw "Could not initialize RedSight runtime configuration."
+}
+try {
+    $RuntimeEnvironment = $RuntimeJson | ConvertFrom-Json
+    foreach ($entry in $RuntimeEnvironment.PSObject.Properties) {
+        Set-Item -Path ("Env:" + $entry.Name) -Value ([string]$entry.Value)
+    }
+} catch {
+    throw "Could not load RedSight runtime configuration: $($_.Exception.Message)"
+}
+if (-not $env:REDSIGHT_LOCAL_API_TOKEN) {
+    throw "Could not initialize RedSight local API authentication."
+}
+
 Write-RSLog "============================================================"
 Write-RSLog "REDSIGHT UNIFIED LAUNCH"
 Write-RSLog "Restart mode: $Restart"

@@ -33,7 +33,7 @@ def _read(path: Path) -> str:
         )
 
 
-class HermesHeritageDock(QDockWidget):
+class RedSightHeritageDock(QDockWidget):
 
     def __init__(
         self,
@@ -41,7 +41,7 @@ class HermesHeritageDock(QDockWidget):
         parent=None,
     ):
         super().__init__(
-            "HERMES HERITAGE",
+            "REDSIGHT HERITAGE",
             parent,
         )
 
@@ -53,7 +53,7 @@ class HermesHeritageDock(QDockWidget):
         self.visible_skills = []
 
         self.setObjectName(
-            "RedSightHermesHeritageDock"
+            "RedSightHeritageDock"
         )
 
         self.setMinimumWidth(
@@ -174,7 +174,7 @@ class HermesHeritageDock(QDockWidget):
         self.search = QLineEdit()
 
         self.search.setPlaceholderText(
-            "Search inherited Hermes skills..."
+            "Search RED-SIGHT skills..."
         )
 
         splitter = QSplitter(
@@ -241,11 +241,11 @@ class HermesHeritageDock(QDockWidget):
         )
 
         self.overview.setPlainText(
-            "REDSIGHT HERMES HERITAGE\n\n"
-            + "Hermes source:\n"
+            "RED-SIGHT HERITAGE\n\n"
+            + "RedSight source:\n"
             + str(
                 manifest.get(
-                    "hermes_home",
+                    "redsight_home",
                     "unknown",
                 )
             )
@@ -295,7 +295,7 @@ class HermesHeritageDock(QDockWidget):
             )
             + "\n\n"
             + (
-                "Hermes Soul, Memory, USER profile, Skills and MCP "
+                "RedSight Soul, Memory, USER profile, Skills and MCP "
                 "definitions are preserved inside RedSight heritage."
             )
         )
@@ -586,11 +586,11 @@ def attach_heritage_ui(
     # HERITAGE SIDE PANEL
     # -------------------------------------------------------------
 
-    dock = HermesHeritageDock(
+    dock = RedSightHeritageDock(
         root
         / "data"
         / "heritage"
-        / "hermes",
+        / "redsight",
         window,
     )
 

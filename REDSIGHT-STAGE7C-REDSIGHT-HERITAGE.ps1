@@ -2,29 +2,29 @@
 
 # =====================================================================
 # REDSIGHT STAGE-7C
-# HERMES HERITAGE MIGRATION
+# REDSIGHT HERITAGE MIGRATION
 #
 # Migrates:
 #   - SOUL.md
 #   - MEMORY.md
 #   - USER.md
 #   - Local/self-taught skills
-#   - Hermes cron/scheduled definitions
+#   - RedSight cron/scheduled definitions
 #   - MCP configuration/inventory
 #   - Installed-skill inventory
 #
 # Adds:
-#   - HERMES HERITAGE side panel
+#   - REDSIGHT HERITAGE side panel
 #   - REDSIGHT red brand/logo header
 #   - Soul/Memory/User tabs
 #   - Searchable Skills browser
 #   - MCP server tab
-#   - Automatic Hermes context injection into Command Center chat
+#   - Automatic RedSight context injection into Command Center chat
 #   - Read-only heritage mount into Docker
 #   - Best-effort NON-DESTRUCTIVE RAG indexing
 #
 # Does NOT:
-#   - delete Hermes
+#   - delete RedSight
 #   - delete Qdrant
 #   - delete RedSight data
 #   - call the destructive collection reindex endpoint
@@ -38,11 +38,11 @@ $UiVenv     = Join-Path $Root ".venv-ui"
 $UiPython   = Join-Path $UiVenv "Scripts\python.exe"
 $Override   = Join-Path $Root "docker-compose.override.yml"
 
-$HeritageRoot = Join-Path $Root "data\heritage\hermes"
+$HeritageRoot = Join-Path $Root "data\heritage\redsight"
 $PrivateRoot  = Join-Path $env:LOCALAPPDATA "RedSight\private"
 
 $Stamp      = Get-Date -Format "yyyyMMdd-HHmmss"
-$BackupRoot = Join-Path $Root ".repair-backups\stage7c-hermes-$Stamp"
+$BackupRoot = Join-Path $Root ".repair-backups\stage7c-redsight-$Stamp"
 
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 
@@ -83,7 +83,7 @@ function Test-DockerEngine {
 Write-Host ""
 Write-Host "===================================================================="
 Write-Host " REDSIGHT STAGE-7C"
-Write-Host " HERMES SOUL + MEMORY + SKILLS + MCP HERITAGE MIGRATION"
+Write-Host " REDSIGHT SOUL + MEMORY + SKILLS + MCP HERITAGE MIGRATION"
 Write-Host "===================================================================="
 Write-Host ""
 
@@ -108,26 +108,26 @@ if (-not (Test-Path $Override)) {
 }
 
 # =====================================================================
-# 2. DISCOVER REAL HERMES HOME
+# 2. DISCOVER REAL REDSIGHT HOME
 # =====================================================================
 
-Write-Host "=== Discovering Hermes home ==="
+Write-Host "=== Discovering RedSight home ==="
 
-$HermesCandidates = @()
+$RedSightCandidates = @()
 
-if ($env:HERMES_HOME) {
-    $HermesCandidates += $env:HERMES_HOME
+if ($env:REDSIGHT_HOME) {
+    $RedSightCandidates += $env:REDSIGHT_HOME
 }
 
-$HermesCandidates += @(
-    (Join-Path $env:LOCALAPPDATA "hermes"),
-    (Join-Path $env:USERPROFILE ".hermes"),
-    (Join-Path $env:APPDATA "hermes")
+$RedSightCandidates += @(
+    (Join-Path $env:LOCALAPPDATA "redsight"),
+    (Join-Path $env:USERPROFILE ".redsight"),
+    (Join-Path $env:APPDATA "redsight")
 )
 
-$HermesHome = $null
+$RedSightHome = $null
 
-foreach ($Candidate in ($HermesCandidates | Select-Object -Unique)) {
+foreach ($Candidate in ($RedSightCandidates | Select-Object -Unique)) {
 
     if (-not (Test-Path $Candidate)) {
         continue
@@ -139,17 +139,17 @@ foreach ($Candidate in ($HermesCandidates | Select-Object -Unique)) {
         (Test-Path (Join-Path $Candidate "skills"))
     ) {
 
-        $HermesHome = $Candidate
+        $RedSightHome = $Candidate
         break
     }
 }
 
-if (-not $HermesHome) {
-    throw "Could not locate a valid Hermes home."
+if (-not $RedSightHome) {
+    throw "Could not locate a valid RedSight home."
 }
 
-Write-Host "HERMES_HOME:"
-Write-Host $HermesHome
+Write-Host "REDSIGHT_HOME:"
+Write-Host $RedSightHome
 Write-Host ""
 
 # =====================================================================
@@ -188,7 +188,7 @@ Write-Host ""
 # =====================================================================
 # 4. RECREATE ONLY THE DERIVED HERITAGE COPY
 #
-# The original Hermes files remain untouched.
+# The original RedSight files remain untouched.
 # =====================================================================
 
 if (Test-Path $HeritageRoot) {
@@ -224,16 +224,16 @@ New-Item `
     Out-Null
 
 # =====================================================================
-# 5. MIGRATE HERMES SOUL
+# 5. MIGRATE REDSIGHT SOUL
 # =====================================================================
 
 Write-Host "===================================================================="
-Write-Host " MIGRATING HERMES SOUL"
+Write-Host " MIGRATING REDSIGHT SOUL"
 Write-Host "===================================================================="
 
 $SoulCandidates = @(
-    (Join-Path $HermesHome "SOUL.md"),
-    (Join-Path $env:USERPROFILE ".hermes\SOUL.md")
+    (Join-Path $RedSightHome "SOUL.md"),
+    (Join-Path $env:USERPROFILE ".redsight\SOUL.md")
 ) | Select-Object -Unique
 
 $SoulSource = $null
@@ -259,11 +259,11 @@ if ($SoulSource) {
 }
 else {
 
-    Write-Warning "No SOUL.md was found at the expected Hermes locations."
+    Write-Warning "No SOUL.md was found at the expected RedSight locations."
 
     Write-Utf8 `
         -Path (Join-Path $HeritageRoot "SOUL.md") `
-        -Text "# Hermes Soul`r`n`r`nNo Hermes SOUL.md was found during migration."
+        -Text "# RedSight Soul`r`n`r`nNo RedSight SOUL.md was found during migration."
 }
 
 Write-Host ""
@@ -273,11 +273,11 @@ Write-Host ""
 # =====================================================================
 
 Write-Host "===================================================================="
-Write-Host " MIGRATING HERMES MEMORY"
+Write-Host " MIGRATING REDSIGHT MEMORY"
 Write-Host "===================================================================="
 
 $MemoryRoot =
-    Join-Path $HermesHome "memories"
+    Join-Path $RedSightHome "memories"
 
 foreach ($Name in @(
     "MEMORY.md",
@@ -312,13 +312,13 @@ Write-Host "=== Migrating context/instruction files ==="
 
 foreach ($Name in @(
     "AGENTS.md",
-    "HERMES.md",
-    ".hermes.md",
+    "REDSIGHT.md",
+    ".redsight.md",
     "CLAUDE.md"
 )) {
 
     foreach ($Base in @(
-        $HermesHome,
+        $RedSightHome,
         $env:USERPROFILE,
         $Root
     )) {
@@ -353,18 +353,18 @@ foreach ($Name in @(
 
 Write-Host ""
 Write-Host "===================================================================="
-Write-Host " MIGRATING HERMES SKILLS"
+Write-Host " MIGRATING REDSIGHT SKILLS"
 Write-Host "===================================================================="
 
 $SkillRoots = @(
     [PSCustomObject]@{
-        Name = "hermes-home"
-        Path = (Join-Path $HermesHome "skills")
+        Name = "redsight-home"
+        Path = (Join-Path $RedSightHome "skills")
     },
 
     [PSCustomObject]@{
-        Name = "dot-hermes"
-        Path = (Join-Path $env:USERPROFILE ".hermes\skills")
+        Name = "dot-redsight"
+        Path = (Join-Path $env:USERPROFILE ".redsight\skills")
     }
 )
 
@@ -428,16 +428,16 @@ foreach ($SkillRoot in $SkillRoots) {
 }
 
 # =====================================================================
-# 9. MIGRATE HERMES CRON / AUTOMATION DEFINITIONS
+# 9. MIGRATE REDSIGHT CRON / AUTOMATION DEFINITIONS
 # =====================================================================
 
 $CronSource =
-    Join-Path $HermesHome "cron"
+    Join-Path $RedSightHome "cron"
 
 if (Test-Path $CronSource) {
 
     Write-Host ""
-    Write-Host "Migrating Hermes cron definitions..."
+    Write-Host "Migrating RedSight cron definitions..."
 
     Copy-Item `
         -LiteralPath $CronSource `
@@ -447,7 +447,7 @@ if (Test-Path $CronSource) {
 }
 
 # =====================================================================
-# 10. PRESERVE PRIVATE HERMES CONFIG OUTSIDE THE REDSIGHT REPOSITORY
+# 10. PRESERVE PRIVATE REDSIGHT CONFIG OUTSIDE THE REDSIGHT REPOSITORY
 #
 # This keeps MCP environment/header secrets out of the visible UI/RAG.
 # =====================================================================
@@ -457,20 +457,20 @@ Write-Host "====================================================================
 Write-Host " MIGRATING MCP CONFIGURATION"
 Write-Host "===================================================================="
 
-$HermesConfig =
-    Join-Path $HermesHome "config.yaml"
+$RedSightConfig =
+    Join-Path $RedSightHome "config.yaml"
 
 $PrivateConfig =
-    Join-Path $PrivateRoot "hermes-config.yaml"
+    Join-Path $PrivateRoot "redsight-config.yaml"
 
-if (Test-Path $HermesConfig) {
+if (Test-Path $RedSightConfig) {
 
     Copy-Item `
-        -LiteralPath $HermesConfig `
+        -LiteralPath $RedSightConfig `
         -Destination $PrivateConfig `
         -Force
 
-    Write-Host "Private Hermes configuration preserved at:"
+    Write-Host "Private RedSight configuration preserved at:"
     Write-Host $PrivateConfig
 
     $ErrorActionPreference = "Continue"
@@ -486,15 +486,15 @@ if (Test-Path $HermesConfig) {
 }
 else {
 
-    Write-Warning "Hermes config.yaml was not found."
+    Write-Warning "RedSight config.yaml was not found."
 }
 
 # =====================================================================
-# 11. EXPORT LIVE HERMES MCP + SKILL INVENTORIES
+# 11. EXPORT LIVE REDSIGHT MCP + SKILL INVENTORIES
 # =====================================================================
 
-$HermesExe =
-    Get-Command hermes `
+$RedSightExe =
+    Get-Command redsight `
         -ErrorAction SilentlyContinue
 
 $McpInventory =
@@ -505,15 +505,15 @@ $SkillInventory =
 
 $McpRaw = ""
 
-if ($HermesExe) {
+if ($RedSightExe) {
 
     Write-Host ""
-    Write-Host "Reading Hermes MCP server inventory..."
+    Write-Host "Reading RedSight MCP server inventory..."
 
     $ErrorActionPreference = "Continue"
 
     $McpLines =
-        & hermes mcp list 2>&1
+        & redsight mcp list 2>&1
 
     $McpExit =
         $LASTEXITCODE
@@ -526,8 +526,8 @@ if ($HermesExe) {
     Write-Utf8 `
         -Path $McpInventory `
         -Text (
-            "# Migrated Hermes MCP Servers`r`n`r`n" +
-            "Source HERMES_HOME: $HermesHome`r`n`r`n" +
+            "# Migrated RedSight MCP Servers`r`n`r`n" +
+            "Source REDSIGHT_HOME: $RedSightHome`r`n`r`n" +
             "```text`r`n" +
             $McpRaw +
             "`r`n```"
@@ -536,12 +536,12 @@ if ($HermesExe) {
     Write-Host $McpRaw
 
     Write-Host ""
-    Write-Host "Reading Hermes installed-skill inventory..."
+    Write-Host "Reading RedSight installed-skill inventory..."
 
     $ErrorActionPreference = "Continue"
 
     $SkillLines =
-        & hermes skills list 2>&1
+        & redsight skills list 2>&1
 
     $ErrorActionPreference = "Stop"
 
@@ -551,11 +551,11 @@ if ($HermesExe) {
 }
 else {
 
-    Write-Warning "hermes executable was not found in PATH."
+    Write-Warning "redsight executable was not found in PATH."
 
     Write-Utf8 `
         -Path $McpInventory `
-        -Text "# Migrated Hermes MCP Servers`r`n`r`nHermes CLI unavailable during migration."
+        -Text "# Migrated RedSight MCP Servers`r`n`r`nRedSight CLI unavailable during migration."
 }
 
 # =====================================================================
@@ -666,12 +666,12 @@ foreach ($SkillFile in $SkillFiles) {
     $Source =
         "unknown"
 
-    if ($Relative -like "skills\hermes-home\*") {
-        $Source = "hermes-home"
+    if ($Relative -like "skills\redsight-home\*") {
+        $Source = "redsight-home"
     }
 
-    if ($Relative -like "skills\dot-hermes\*") {
-        $Source = "dot-hermes"
+    if ($Relative -like "skills\dot-redsight\*") {
+        $Source = "dot-redsight"
     }
 
     $Catalog +=
@@ -709,8 +709,8 @@ Write-Host ""
 $Manifest =
     [PSCustomObject]@{
         migrated_at       = (Get-Date).ToString("o")
-        source             = "Hermes Agent"
-        hermes_home        = $HermesHome
+        source             = "RedSight Agent"
+        redsight_home        = $RedSightHome
         soul_present       = (Test-Path (Join-Path $HeritageRoot "SOUL.md"))
         memory_present     = (Test-Path (Join-Path $HeritageRoot "memories\MEMORY.md"))
         user_present       = (Test-Path (Join-Path $HeritageRoot "memories\USER.md"))
@@ -846,7 +846,7 @@ else {
 Write-Host ""
 
 # =====================================================================
-# 15. MAKE HERMES SOUL / MEMORY / RELEVANT SKILLS FUNCTIONAL IN CHAT
+# 15. MAKE REDSIGHT SOUL / MEMORY / RELEVANT SKILLS FUNCTIONAL IN CHAT
 #
 # This does not pretend to execute a SKILL.md.
 #
@@ -858,7 +858,7 @@ Write-Host ""
 # =====================================================================
 
 Write-Host "===================================================================="
-Write-Host " WIRING HERMES HERITAGE INTO COMMAND CENTER CHAT"
+Write-Host " WIRING REDSIGHT HERITAGE INTO COMMAND CENTER CHAT"
 Write-Host "===================================================================="
 
 $UiText =
@@ -891,10 +891,10 @@ $HelperLines = @(
     '    import json'
     '    import re'
     ''
-    '    root = Path(__file__).resolve().parents[2] / "data" / "heritage" / "hermes"'
+    '    root = Path(__file__).resolve().parents[2] / "data" / "heritage" / "redsight"'
     ''
     '    parts = ['
-    '        "You are RedSight. You have inherited selected identity, memory, user-profile, procedural skill, and MCP context from the user''s Hermes Agent. Use it when relevant. Current user instructions always take precedence. A SKILL.md describes procedure; do not claim a tool was executed merely because a skill describes it."'
+    '        "You are RedSight. You have inherited selected identity, memory, user-profile, procedural skill, and MCP context from the user''s RedSight Agent. Use it when relevant. Current user instructions always take precedence. A SKILL.md describes procedure; do not claim a tool was executed merely because a skill describes it."'
     '    ]'
     ''
     '    def add_text(label, path, limit):'
@@ -905,9 +905,9 @@ $HelperLines = @(
     '        if text:'
     '            parts.append("[" + label + "]\n" + text[:limit])'
     ''
-    '    add_text("Inherited Hermes SOUL", root / "SOUL.md", 6000)'
-    '    add_text("Inherited Hermes MEMORY", root / "memories" / "MEMORY.md", 6000)'
-    '    add_text("Inherited Hermes USER profile", root / "memories" / "USER.md", 5000)'
+    '    add_text("Inherited RedSight SOUL", root / "SOUL.md", 6000)'
+    '    add_text("Inherited RedSight MEMORY", root / "memories" / "MEMORY.md", 6000)'
+    '    add_text("Inherited RedSight USER profile", root / "memories" / "USER.md", 5000)'
     ''
     '    try:'
     '        catalog = json.loads((root / "skills_catalog.json").read_text(encoding="utf-8-sig"))'
@@ -935,7 +935,7 @@ $HelperLines = @(
     '        except Exception:'
     '            continue'
     '        if skill_text:'
-    '            parts.append("[Relevant inherited Hermes skill: {}]\n{}".format(item.get("Name", "skill"), skill_text[:4000]))'
+    '            parts.append("[Relevant RED-SIGHT skill: {}]\n{}".format(item.get("Name", "skill"), skill_text[:4000]))'
     ''
     '    add_text("Migrated MCP server inventory", root / "MCP_SERVERS.md", 3000)'
     ''
@@ -1026,15 +1026,15 @@ else {
     $Utf8
 )
 
-Write-Host "Hermes context injection: ENABLED"
+Write-Host "RedSight context injection: ENABLED"
 Write-Host ""
 
 # =====================================================================
-# 16. BUILD HERMES HERITAGE SIDE PANEL + REDSIGHT LOGO
+# 16. BUILD REDSIGHT HERITAGE SIDE PANEL + REDSIGHT LOGO
 # =====================================================================
 
 Write-Host "===================================================================="
-Write-Host " BUILDING HERMES HERITAGE SIDE PANEL + REDSIGHT LOGO"
+Write-Host " BUILDING REDSIGHT HERITAGE SIDE PANEL + REDSIGHT LOGO"
 Write-Host "===================================================================="
 
 $PanelLines = @(
@@ -1066,13 +1066,13 @@ $PanelLines = @(
     '        return "Unavailable: " + str(exc)'
     ''
     ''
-    'class HermesHeritageDock(QDockWidget):'
+    'class RedSightHeritageDock(QDockWidget):'
     '    def __init__(self, root: Path, parent=None):'
-    '        super().__init__("HERMES HERITAGE", parent)'
+    '        super().__init__("REDSIGHT HERITAGE", parent)'
     '        self.root = root'
     '        self.catalog = []'
     ''
-    '        self.setObjectName("RedSightHermesHeritageDock")'
+    '        self.setObjectName("RedSightHeritageDock")'
     '        self.setMinimumWidth(440)'
     ''
     '        tabs = QTabWidget()'
@@ -1139,7 +1139,7 @@ $PanelLines = @(
     '        layout = QVBoxLayout(widget)'
     ''
     '        self.skill_search = QLineEdit()'
-    '        self.skill_search.setPlaceholderText("Search inherited Hermes skills...")'
+    '        self.skill_search.setPlaceholderText("Search RED-SIGHT skills...")'
     ''
     '        splitter = QSplitter(Qt.Orientation.Vertical)'
     ''
@@ -1167,9 +1167,9 @@ $PanelLines = @(
     '            manifest = {}'
     ''
     '        self.overview.setPlainText('
-    '            "REDSIGHT HERMES HERITAGE\n\n"'
+    '            "RED-SIGHT HERITAGE\n\n"'
     '            "Migrated: {}\n"'
-    '            "Hermes home: {}\n"'
+    '            "RedSight home: {}\n"'
     '            "Skills: {}\n"'
     '            "SOUL: {}\n"'
     '            "MEMORY: {}\n"'
@@ -1178,7 +1178,7 @@ $PanelLines = @(
     '            "Soul, memory and relevant skill procedures are injected into Command Center chat context automatically."'
     '            .format('
     '                manifest.get("migrated_at", "unknown"),'
-    '                manifest.get("hermes_home", "unknown"),'
+    '                manifest.get("redsight_home", "unknown"),'
     '                manifest.get("skill_count", 0),'
     '                manifest.get("soul_present", False),'
     '                manifest.get("memory_present", False),'
@@ -1258,7 +1258,7 @@ $PanelLines = @(
     ''
     'def attach_heritage_ui(window, root):'
     '    root = Path(root)'
-    '    heritage_root = root / "data" / "heritage" / "hermes"'
+    '    heritage_root = root / "data" / "heritage" / "redsight"'
     ''
     '    toolbar = QToolBar("RedSight Brand", window)'
     '    toolbar.setObjectName("RedSightBrandToolbar")'
@@ -1299,7 +1299,7 @@ $PanelLines = @(
     '        toolbar,'
     '    )'
     ''
-    '    dock = HermesHeritageDock(heritage_root, window)'
+    '    dock = RedSightHeritageDock(heritage_root, window)'
     ''
     '    window.addDockWidget('
     '        Qt.DockWidgetArea.LeftDockWidgetArea,'
@@ -1560,7 +1560,7 @@ $ErrorActionPreference = "Continue"
 docker exec `
     redsight `
     sh -lc `
-    "ls -la /heritage/hermes && echo HERITAGE_MOUNT=PASS"
+    "ls -la /heritage/redsight && echo HERITAGE_MOUNT=PASS"
 
 $MountExit =
     $LASTEXITCODE
@@ -1581,7 +1581,7 @@ Write-Host ""
 # =====================================================================
 
 Write-Host "===================================================================="
-Write-Host " NON-DESTRUCTIVE HERMES RAG INGESTION"
+Write-Host " NON-DESTRUCTIVE REDSIGHT RAG INGESTION"
 Write-Host "===================================================================="
 
 function Invoke-HeritageIndex {
@@ -1599,7 +1599,7 @@ function Invoke-HeritageIndex {
         @{
             paths      = $Paths
             collection = $Collection
-            project    = "hermes-heritage"
+            project    = "redsight-heritage"
         } |
         ConvertTo-Json `
             -Depth 6
@@ -1645,15 +1645,15 @@ function Invoke-HeritageIndex {
 $KnowledgePaths = @()
 
 if (Test-Path (Join-Path $HeritageRoot "SOUL.md")) {
-    $KnowledgePaths += "/heritage/hermes/SOUL.md"
+    $KnowledgePaths += "/heritage/redsight/SOUL.md"
 }
 
 if (Test-Path (Join-Path $HeritageRoot "memories")) {
-    $KnowledgePaths += "/heritage/hermes/memories"
+    $KnowledgePaths += "/heritage/redsight/memories"
 }
 
 if (Test-Path (Join-Path $HeritageRoot "context")) {
-    $KnowledgePaths += "/heritage/hermes/context"
+    $KnowledgePaths += "/heritage/redsight/context"
 }
 
 Invoke-HeritageIndex `
@@ -1663,12 +1663,12 @@ Invoke-HeritageIndex `
 if ($Catalog.Count -gt 0) {
 
     Invoke-HeritageIndex `
-        -Paths @("/heritage/hermes/skills") `
+        -Paths @("/heritage/redsight/skills") `
         -Collection "skills_index"
 }
 
 Invoke-HeritageIndex `
-    -Paths @("/heritage/hermes/MCP_SERVERS.md") `
+    -Paths @("/heritage/redsight/MCP_SERVERS.md") `
     -Collection "tool_catalog"
 
 Write-Host ""
@@ -1802,19 +1802,19 @@ docker exec `
     nvidia-smi -L
 
 Write-Host ""
-Write-Host "Hermes source home       : $HermesHome"
-Write-Host "Hermes skills migrated   : $($Catalog.Count)"
-Write-Host "Hermes SOUL migrated     : $(Test-Path (Join-Path $HeritageRoot 'SOUL.md'))"
-Write-Host "Hermes MEMORY migrated   : $(Test-Path (Join-Path $HeritageRoot 'memories\MEMORY.md'))"
-Write-Host "Hermes USER migrated     : $(Test-Path (Join-Path $HeritageRoot 'memories\USER.md'))"
-Write-Host "Hermes MCP inventory     : $(Test-Path $McpInventory)"
+Write-Host "RedSight source home       : $RedSightHome"
+Write-Host "RedSight skills migrated   : $($Catalog.Count)"
+Write-Host "RedSight SOUL migrated     : $(Test-Path (Join-Path $HeritageRoot 'SOUL.md'))"
+Write-Host "RedSight MEMORY migrated   : $(Test-Path (Join-Path $HeritageRoot 'memories\MEMORY.md'))"
+Write-Host "RedSight USER migrated     : $(Test-Path (Join-Path $HeritageRoot 'memories\USER.md'))"
+Write-Host "RedSight MCP inventory     : $(Test-Path $McpInventory)"
 Write-Host "Private MCP/config copy  : $PrivateConfig"
-Write-Host "RAG heritage mount       : /heritage/hermes"
+Write-Host "RAG heritage mount       : /heritage/redsight"
 Write-Host "Command Center PID       : $($UiProcess.Id)"
 Write-Host ""
 Write-Host "UI additions:"
 Write-Host "  REDSIGHT red logo / brand header"
-Write-Host "  HERMES HERITAGE left-side panel"
+Write-Host "  REDSIGHT HERITAGE left-side panel"
 Write-Host "  Soul tab"
 Write-Host "  Memory + User tab"
 Write-Host "  Searchable Skills tab"
@@ -1831,7 +1831,7 @@ Write-Host "Backups / diagnostics:"
 Write-Host $BackupRoot
 Write-Host ""
 Write-Host "Qdrant volumes/data were NOT deleted."
-Write-Host "Original Hermes data was NOT modified."
+Write-Host "Original RedSight data was NOT modified."
 Write-Host ""
 Write-Host "===================================================================="
 Write-Host " STAGE-7C COMPLETE"

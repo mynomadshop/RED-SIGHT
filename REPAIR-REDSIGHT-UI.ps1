@@ -45,7 +45,7 @@ Write-Host ""
 
 
 # ============================================================
-# 2. REMOVE HERMES / GLOBAL PYTHON CONTAMINATION
+# 2. REMOVE REDSIGHT / GLOBAL PYTHON CONTAMINATION
 # ============================================================
 
 Write-Host "[2/10] Clearing external Python environment contamination..."
@@ -373,7 +373,7 @@ $PermanentLauncher = @"
 
 Set-Location `$Root
 
-# Isolate from Hermes/global Python variables
+# Isolate from RedSight/global Python variables
 `$env:PYTHONPATH = `$null
 `$env:PYTHONHOME = `$null
 `$env:PYTHONNOUSERSITE = "1"

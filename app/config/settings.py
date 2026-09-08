@@ -58,16 +58,28 @@ class LmStudioConfig(BaseModel):
         description="Request timeout in seconds",
     )
     max_retries: int = Field(
-        default=3,
+        default=2,
         ge=1,
         le=10,
         description="Number of retry attempts on transient failures",
     )
     retry_delay_seconds: float = Field(
-        default=2.0,
+        default=0.35,
         ge=0,
         le=60,
         description="Delay between retries (exponential backoff)",
+    )
+    connect_timeout_seconds: float = Field(
+        default=3.0,
+        gt=0,
+        le=60,
+        description="Fast-fail connection timeout for the local LM Studio server",
+    )
+    keepalive_connections: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Reusable HTTP connections retained for LM Studio",
     )
     model_id: Optional[str] = Field(
         default=None,
@@ -240,6 +252,26 @@ class SecurityConfig(BaseModel):
     local_only_mode: bool = Field(
         default=False,
         description="Block all outbound network requests",
+    )
+    api_auth_enabled: bool = Field(
+        default=True,
+        description="Require the per-installation bearer token on local APIs",
+    )
+    api_token_header: str = Field(
+        default="X-RedSight-Token",
+        min_length=1,
+        max_length=64,
+        description="Header used for local API authentication",
+    )
+    max_request_bytes: int = Field(
+        default=2 * 1024 * 1024,
+        ge=1024,
+        le=64 * 1024 * 1024,
+        description="Maximum accepted HTTP request body size",
+    )
+    cors_allowed_origins: List[str] = Field(
+        default_factory=list,
+        description="Additional exact browser origins allowed to call the API",
     )
     secret_storage: str = Field(
         default="dpapi",

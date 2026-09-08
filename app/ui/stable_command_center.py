@@ -15,6 +15,8 @@ from typing import Any
 
 import httpx
 
+from app.security.local_api import auth_headers
+
 from .command_center import (
     ChatWidget,
     CommandCenterMainWindow,
@@ -65,7 +67,7 @@ class StableCommandCenterMainWindow(CommandCenterMainWindow):
         try:
             messages = await asyncio.to_thread(_redsight_stage10_messages, message)
             timeout = httpx.Timeout(30.0, connect=5.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout, headers=auth_headers(), trust_env=False) as client:
                 response = await client.post(
                     f"{self._api_base_url}/api/v1/chat",
                     json={"messages": messages, "stream": False},

@@ -118,6 +118,9 @@ async def lifespan(app: FastAPI):
     global cloud_providers, multi_agent_orchestrator, system_monitor
     global ws_hub, memory_store, plugin_manager
 
+    embedding_loader = None
+    reranker = None
+
     # Startup
     logger.info("RedSight starting up...")
 
@@ -131,14 +134,15 @@ async def lifespan(app: FastAPI):
     # cloud-selected desktop wait for a local server it did not configure.
     lmstudio_provider = LmStudioProvider()
     requested_provider = os.getenv("REDSIGHT_ACTIVE_PROVIDER", "").strip().lower()
+    health = False
     if requested_provider and requested_provider != "lmstudio":
         logger.info("LM Studio startup probe skipped; selected provider is %s", requested_provider)
     else:
         try:
-            health = await asyncio.wait_for(lmstudio_provider.health_check(), timeout=8.0)
+            health = await asyncio.wait_for(lmstudio_provider.health_check(), timeout=4.0)
         except TimeoutError:
             health = False
-            logger.warning("LM Studio startup probe timed out after 8 seconds")
+            logger.warning("LM Studio startup probe timed out after 4 seconds")
         logger.info("LM Studio health: %s", "OK" if health else "UNREACHABLE")
 
     # Initialize job scheduler
@@ -196,13 +200,13 @@ async def lifespan(app: FastAPI):
     embedding_model = None
     if settings.retrieval.enable_embeddings:
         logger.info("Loading embedding model...")
-        loader = EmbeddingModelLoader(
+        embedding_loader = EmbeddingModelLoader(
             model_name=settings.retrieval.embedding_model or "sentence-transformers/all-MiniLM-L6-v2",
             lmstudio_url=settings.lmstudio.base_url or None,
         )
-        if await loader.load():
-            embedding_model = loader.model
-            logger.info(f"Embedding model loaded: {loader.get_info()}")
+        if await embedding_loader.load():
+            embedding_model = embedding_loader
+            logger.info(f"Embedding model loaded: {embedding_loader.get_info()}")
         else:
             logger.warning("No embedding model available — indexing without vectors")
 
@@ -260,6 +264,7 @@ async def lifespan(app: FastAPI):
         metadata_db=metadata_db,
         embedding_model=embedding_model,
         bm25_index=bm25_index,  # Feed BM25 for sparse indexing
+        max_concurrent=settings.routing.max_concurrent_jobs,
     )
     set_jobs_indexer(indexer)
 
@@ -641,32 +646,72 @@ async def lifespan(app: FastAPI):
     # 18. Cloud provider registry
     from app.models.cloud_providers import (
         AnthropicProvider,
+        CloudProvider,
         CloudProviderRegistry,
         CustomOpenAIProvider,
         GoogleGeminiProvider,
+        OpenAICompatibleProvider,
         OpenAIProvider,
         XAIProvider,
     )
     cloud_registry = CloudProviderRegistry()
     if settings.is_cloud_allowed:
         configured_providers = (
-            ("OpenAI", OpenAIProvider, os.getenv("OPENAI_API_KEY", "")),
-            ("Anthropic", AnthropicProvider, os.getenv("ANTHROPIC_API_KEY", "")),
+            ("OpenAI", OpenAIProvider, os.getenv("OPENAI_API_KEY", ""), "REDSIGHT_OPENAI_BASE_URL"),
+            ("Anthropic", AnthropicProvider, os.getenv("ANTHROPIC_API_KEY", ""), "REDSIGHT_ANTHROPIC_BASE_URL"),
             (
                 "Google",
                 GoogleGeminiProvider,
                 os.getenv("GOOGLE_API_KEY", "") or os.getenv("GEMINI_API_KEY", ""),
+                "REDSIGHT_GEMINI_BASE_URL",
             ),
-            ("xAI", XAIProvider, os.getenv("XAI_API_KEY", "")),
+            ("xAI", XAIProvider, os.getenv("XAI_API_KEY", ""), "REDSIGHT_XAI_BASE_URL"),
         )
-        for name, provider_type, api_key in configured_providers:
+        for name, provider_type, api_key, base_url_env in configured_providers:
             if not api_key:
                 logger.info("%s cloud provider is not configured", name)
                 continue
             try:
-                cloud_registry.register(provider_type(api_key=api_key))
+                active_model = os.getenv("REDSIGHT_PROVIDER_MODEL", "") if requested_provider in {
+                    name.lower(), "gemini" if name == "Google" else name.lower()
+                } else ""
+                cloud_registry.register(
+                    provider_type(
+                        api_key=api_key,
+                        base_url=os.getenv(base_url_env, "") or None,
+                        model_id=active_model,
+                    )
+                )
             except Exception as exc:
                 logger.warning("Failed to register %s provider: %s", name, exc)
+
+        compatible_specs = (
+            (CloudProvider.OPENROUTER, "OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
+            (CloudProvider.GROQ, "GROQ_API_KEY", "https://api.groq.com/openai/v1"),
+            (CloudProvider.MISTRAL, "MISTRAL_API_KEY", "https://api.mistral.ai/v1"),
+            (CloudProvider.TOGETHER, "TOGETHER_API_KEY", "https://api.together.xyz/v1"),
+            (CloudProvider.DEEPSEEK, "DEEPSEEK_API_KEY", "https://api.deepseek.com"),
+            (CloudProvider.CEREBRAS, "CEREBRAS_API_KEY", "https://api.cerebras.ai/v1"),
+        )
+        for provider_kind, key_env, default_url in compatible_specs:
+            api_key = os.getenv(key_env, "")
+            if not api_key:
+                continue
+            try:
+                model_id = os.getenv("REDSIGHT_PROVIDER_MODEL", "") if requested_provider == provider_kind.value else ""
+                if not model_id:
+                    logger.warning("%s has a key but no selected model", provider_kind.value)
+                    continue
+                cloud_registry.register(
+                    OpenAICompatibleProvider(
+                        provider=provider_kind,
+                        api_key=api_key,
+                        base_url=os.getenv(f"REDSIGHT_{provider_kind.value.upper()}_BASE_URL", default_url),
+                        model_id=model_id,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Failed to register %s provider: %s", provider_kind.value, exc)
         custom_url = os.getenv("REDSIGHT_CUSTOM_BASE_URL", "")
         if custom_url:
             try:
@@ -780,6 +825,10 @@ async def lifespan(app: FastAPI):
             gpu_telemetry.shutdown()
         if lmstudio_provider:
             await lmstudio_provider.close()
+        if embedding_loader:
+            await embedding_loader.close()
+        if reranker:
+            await reranker.close()
         if qdrant:
             await qdrant.close()
         if metadata_db:
@@ -796,6 +845,17 @@ def create_app() -> FastAPI:
         version=settings.platform.version,
         description="High-Performance Local AI Intelligence Platform",
         lifespan=lifespan,
+    )
+
+    from app.security.local_api import configure_local_api_security
+
+    configure_local_api_security(
+        app,
+        public_paths={"/api/v1/health"},
+        auth_enabled=settings.security.api_auth_enabled,
+        header_name=settings.security.api_token_header,
+        max_request_bytes=settings.security.max_request_bytes,
+        allowed_origins=settings.security.cors_allowed_origins,
     )
 
     # Register routes
@@ -838,19 +898,26 @@ async def websocket_stream(websocket: WebSocket):
         while True:
             # Receive message from client
             data = await websocket.receive_json()
-            message = data.get("message", "")
-            model_id = data.get("model")
+            if not isinstance(data, dict):
+                await websocket.send_json({"error": "A JSON object is required"})
+                continue
+            message = str(data.get("message") or "")
+            model_id = str(data.get("model") or "").strip() or None
 
             if not message:
                 await websocket.send_json({"error": "No message provided"})
                 continue
+            if len(message) > 250_000 or (model_id and len(model_id) > 300):
+                await websocket.send_json({"error": "Message or model exceeds the size limit"})
+                continue
 
             # Stream response
-            if lmstudio_provider:
+            provider, configured_model, provider_name = get_chat_provider()
+            if provider:
                 try:
-                    response = await lmstudio_provider.chat(
+                    response = await provider.chat(
                         messages=[{"role": "user", "content": message}],
-                        model_id=model_id,
+                        model_id=model_id or configured_model,
                         stream=True,
                     )
 
@@ -859,10 +926,13 @@ async def websocket_stream(websocket: WebSocket):
 
                     await websocket.send_json({"done": True})
 
-                except Exception as e:
-                    await websocket.send_json({"error": str(e)})
+                except Exception as exc:
+                    logger.exception("%s WebSocket chat failed", provider_name)
+                    await websocket.send_json(
+                        {"error": f"{provider_name} chat failed ({type(exc).__name__})"}
+                    )
             else:
-                await websocket.send_json({"error": "LM Studio not available"})
+                await websocket.send_json({"error": "No usable AI provider is configured"})
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")

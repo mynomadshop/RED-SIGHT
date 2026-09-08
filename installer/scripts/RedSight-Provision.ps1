@@ -361,15 +361,37 @@ function Get-RsDependencyPlan {
 # AI provider configuration
 # --------------------------------------------------------------------------
 
-# Must match app/ui/action_palette_stage105.py.
-$script:RsProviders = @('lmstudio', 'openai', 'gemini', 'xai', 'anthropic', 'custom')
+# Must match app/ui/action_palette_stage106.py.
+$script:RsProviders = @(
+    'lmstudio', 'openai', 'gemini', 'xai', 'anthropic', 'openrouter',
+    'groq', 'mistral', 'together', 'deepseek', 'cerebras', 'custom'
+)
 $script:RsProviderDefaultModels = @{
     lmstudio  = ''
     openai    = 'gpt-5.6-terra'
-    gemini    = 'gemini-3.7-flash'
+    gemini    = 'gemini-3.8-flash'
     xai       = 'grok-4.6'
     anthropic = 'claude-sonnet-5'
+    openrouter = 'openai/gpt-4o-mini'
+    groq       = 'llama-3.3-70b-versatile'
+    mistral    = 'mistral-small-latest'
+    together   = 'meta-llama/Llama-3.3-70B-Instruct-Turbo'
+    deepseek   = 'deepseek-chat'
+    cerebras   = 'llama-3.3-70b'
     custom    = ''
+}
+$script:RsProviderBaseUrls = @{
+    openai     = 'https://api.openai.com/v1'
+    anthropic  = 'https://api.anthropic.com/v1'
+    gemini     = 'https://generativelanguage.googleapis.com/v1beta'
+    xai        = 'https://api.x.ai/v1'
+    openrouter = 'https://openrouter.ai/api/v1'
+    groq       = 'https://api.groq.com/openai/v1'
+    mistral    = 'https://api.mistral.ai/v1'
+    together   = 'https://api.together.xyz/v1'
+    deepseek   = 'https://api.deepseek.com'
+    cerebras   = 'https://api.cerebras.ai/v1'
+    custom     = ''
 }
 
 function Get-RsSettingsDir {
@@ -407,7 +429,10 @@ function Set-RsProviderConfig {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][ValidateSet('lmstudio', 'openai', 'gemini', 'xai', 'anthropic', 'custom')]
+        [Parameter(Mandatory)][ValidateSet(
+            'lmstudio', 'openai', 'gemini', 'xai', 'anthropic', 'openrouter',
+            'groq', 'mistral', 'together', 'deepseek', 'cerebras', 'custom'
+        )]
         [string]$Provider,
         [string]$ApiKey,
         [string]$Model,
@@ -422,6 +447,8 @@ function Set-RsProviderConfig {
     # Preserve any models the user already configured for other providers.
     $models = @{}
     foreach ($slug in $script:RsProviders) { $models[$slug] = [string]$script:RsProviderDefaultModels[$slug] }
+    $baseUrls = @{}
+    foreach ($slug in $script:RsProviderBaseUrls.Keys) { $baseUrls[$slug] = [string]$script:RsProviderBaseUrls[$slug] }
     $customBase = ''
     if (Test-Path -LiteralPath $configFile) {
         try {
@@ -429,6 +456,12 @@ function Set-RsProviderConfig {
             foreach ($slug in $script:RsProviders) {
                 $p = $existing.models.PSObject.Properties[$slug]
                 if ($p -and $p.Value) { $models[$slug] = [string]$p.Value }
+            }
+            if ($existing.PSObject.Properties['base_urls']) {
+                foreach ($slug in $script:RsProviderBaseUrls.Keys) {
+                    $p = $existing.base_urls.PSObject.Properties[$slug]
+                    if ($p -and $p.Value) { $baseUrls[$slug] = [string]$p.Value }
+                }
             }
             $cb = $existing.PSObject.Properties['custom_base_url']
             if ($cb -and $cb.Value) { $customBase = [string]$cb.Value }
@@ -438,12 +471,14 @@ function Set-RsProviderConfig {
     }
 
     if ($Model) { $models[$Provider] = $Model }
-    if ($BaseUrl) { $customBase = $BaseUrl }
+    if ($BaseUrl) { $baseUrls[$Provider] = $BaseUrl }
+    $customBase = [string]$baseUrls['custom']
 
     $config = [ordered]@{
-        version         = 1
+        version         = 2
         active_provider = $Provider
         models          = $models
+        base_urls       = $baseUrls
         custom_base_url = $customBase
     }
     # Written without a BOM: the application reads these with Python's json,

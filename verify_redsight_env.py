@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """
 RedSight Environment Verifier
-Strips hermes-agent paths from sys.path and verifies all imports.
+Verifies imports without inherited PYTHONPATH entries.
 """
 import sys
 import os
 import importlib
-
-# Strip hermes-agent paths from sys.path
-sys.path = [
-    p for p in sys.path
-    if 'hermes' not in p
-]
 
 # Clear PYTHONPATH
 os.environ.pop('PYTHONPATH', None)

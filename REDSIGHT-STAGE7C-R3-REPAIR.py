@@ -29,7 +29,7 @@ OVERRIDE = ROOT / "docker-compose.override.yml"
 
 UI_PYTHON = ROOT / ".venv-ui" / "Scripts" / "python.exe"
 
-HERITAGE = ROOT / "data" / "heritage" / "hermes"
+HERITAGE = ROOT / "data" / "heritage" / "redsight"
 
 LOCALAPPDATA = Path(os.environ["LOCALAPPDATA"])
 USERPROFILE = Path(os.environ["USERPROFILE"])
@@ -452,21 +452,21 @@ def ensure_docker():
 
 
 # =====================================================================
-# HERMES DISCOVERY
+# REDSIGHT DISCOVERY
 # =====================================================================
 
-def discover_hermes():
+def discover_redsight():
 
     candidates = []
 
     if os.environ.get(
-        "HERMES_HOME"
+        "REDSIGHT_HOME"
     ):
 
         candidates.append(
             Path(
                 os.environ[
-                    "HERMES_HOME"
+                    "REDSIGHT_HOME"
                 ]
             )
         )
@@ -474,10 +474,10 @@ def discover_hermes():
     candidates.extend(
         [
             LOCALAPPDATA
-            / "hermes",
+            / "redsight",
 
             USERPROFILE
-            / ".hermes",
+            / ".redsight",
 
             Path(
                 os.environ.get(
@@ -485,7 +485,7 @@ def discover_hermes():
                     "",
                 )
             )
-            / "hermes",
+            / "redsight",
         ]
     )
 
@@ -525,12 +525,12 @@ def discover_hermes():
             return candidate
 
     raise RuntimeError(
-        "Could not locate Hermes home."
+        "Could not locate RedSight home."
     )
 
 
 # =====================================================================
-# HERMES HERITAGE COPY
+# REDSIGHT HERITAGE COPY
 # =====================================================================
 
 def copy_tree(
@@ -573,14 +573,14 @@ def copy_tree(
     )
 
 
-def hermes_command(
+def redsight_command(
     arguments,
 ):
     try:
 
         result = subprocess.run(
             [
-                "hermes",
+                "redsight",
                 *arguments,
             ],
             capture_output=True,
@@ -607,20 +607,20 @@ def hermes_command(
     except Exception as exc:
 
         return (
-            "Hermes CLI unavailable: "
+            "RedSight CLI unavailable: "
             + repr(exc)
         )
 
 
 def build_heritage(
-    hermes: Path,
+    redsight: Path,
 ):
     log("")
     log(
         "============================================================"
     )
     log(
-        " HERMES HERITAGE MIGRATION"
+        " REDSIGHT HERITAGE MIGRATION"
     )
     log(
         "============================================================"
@@ -631,7 +631,7 @@ def build_heritage(
         / "data"
         / "heritage"
         / (
-            ".hermes-stage-"
+            ".redsight-stage-"
             + STAMP
         )
     )
@@ -668,11 +668,11 @@ def build_heritage(
     # ---------------------------------------------------------------
 
     soul_candidates = [
-        hermes
+        redsight
         / "SOUL.md",
 
         USERPROFILE
-        / ".hermes"
+        / ".redsight"
         / "SOUL.md",
     ]
 
@@ -686,10 +686,10 @@ def build_heritage(
         None,
     )
 
-    # Search Hermes itself, while excluding documentation examples.
+    # Search RedSight itself, while excluding documentation examples.
     if soul is None:
 
-        for item in hermes.rglob(
+        for item in redsight.rglob(
             "SOUL.md"
         ):
 
@@ -729,7 +729,7 @@ def build_heritage(
             stage
             / "SOUL.md",
             (
-                "# Hermes Soul\n\n"
+                "# RedSight Soul\n\n"
                 "No user SOUL.md was located during migration.\n"
             ),
         )
@@ -748,15 +748,15 @@ def build_heritage(
     ):
 
         candidates = [
-            hermes
+            redsight
             / "memories"
             / name,
 
-            hermes
+            redsight
             / name,
 
             USERPROFILE
-            / ".hermes"
+            / ".redsight"
             / "memories"
             / name,
         ]
@@ -799,13 +799,13 @@ def build_heritage(
 
     for name in (
         "AGENTS.md",
-        "HERMES.md",
-        ".hermes.md",
+        "REDSIGHT.md",
+        ".redsight.md",
         "CLAUDE.md",
     ):
 
         for base in (
-            hermes,
+            redsight,
             USERPROFILE,
             ROOT,
         ):
@@ -845,22 +845,22 @@ def build_heritage(
     # ---------------------------------------------------------------
 
     copy_tree(
-        hermes
+        redsight
         / "skills",
 
         stage
         / "skills"
-        / "hermes-home",
+        / "redsight-home",
     )
 
     copy_tree(
         USERPROFILE
-        / ".hermes"
+        / ".redsight"
         / "skills",
 
         stage
         / "skills"
-        / "dot-hermes",
+        / "dot-redsight",
     )
 
     # ---------------------------------------------------------------
@@ -868,7 +868,7 @@ def build_heritage(
     # ---------------------------------------------------------------
 
     copy_tree(
-        hermes
+        redsight
         / "cron",
 
         stage
@@ -880,13 +880,13 @@ def build_heritage(
     # ---------------------------------------------------------------
 
     config = (
-        hermes
+        redsight
         / "config.yaml"
     )
 
     private_config = (
         PRIVATE_ROOT
-        / "hermes-config.yaml"
+        / "redsight-config.yaml"
     )
 
     if config.exists():
@@ -916,14 +916,14 @@ def build_heritage(
     # MCP + skill inventories
     # ---------------------------------------------------------------
 
-    mcp_output = hermes_command(
+    mcp_output = redsight_command(
         [
             "mcp",
             "list",
         ]
     )
 
-    skills_output = hermes_command(
+    skills_output = redsight_command(
         [
             "skills",
             "list",
@@ -934,7 +934,7 @@ def build_heritage(
         stage
         / "MCP_SERVERS.md",
         (
-            "# Migrated Hermes MCP Servers\n\n"
+            "# Migrated RedSight MCP Servers\n\n"
             "```text\n"
             + mcp_output
             + "\n```\n"
@@ -1306,10 +1306,10 @@ def build_heritage(
 
     manifest = {
         "source":
-            "Hermes Agent",
+            "RedSight Agent",
 
-        "hermes_home":
-            str(hermes),
+        "redsight_home":
+            str(redsight),
 
         "soul_present":
             (
@@ -1455,7 +1455,7 @@ def _read(path: Path) -> str:
         )
 
 
-class HermesHeritageDock(
+class RedSightHeritageDock(
     QDockWidget
 ):
     def __init__(
@@ -1464,7 +1464,7 @@ class HermesHeritageDock(
         parent=None,
     ):
         super().__init__(
-            "HERMES HERITAGE",
+            "REDSIGHT HERITAGE",
             parent,
         )
 
@@ -1474,7 +1474,7 @@ class HermesHeritageDock(
         self._visible = []
 
         self.setObjectName(
-            "RedSightHermesHeritageDock"
+            "RedSightHeritageDock"
         )
 
         self.setMinimumWidth(
@@ -1595,7 +1595,7 @@ class HermesHeritageDock(
         self.search = QLineEdit()
 
         self.search.setPlaceholderText(
-            "Search inherited Hermes skills..."
+            "Search RED-SIGHT skills..."
         )
 
         splitter = QSplitter(
@@ -1661,11 +1661,11 @@ class HermesHeritageDock(
         )
 
         self.overview.setPlainText(
-            "REDSIGHT HERMES HERITAGE\n\n"
-            + "Hermes source: "
+            "RED-SIGHT HERITAGE\n\n"
+            + "RedSight source: "
             + str(
                 manifest.get(
-                    "hermes_home",
+                    "redsight_home",
                     "unknown",
                 )
             )
@@ -1969,11 +1969,11 @@ def attach_heritage_ui(
         toolbar,
     )
 
-    dock = HermesHeritageDock(
+    dock = RedSightHeritageDock(
         root
         / "data"
         / "heritage"
-        / "hermes",
+        / "redsight",
         window,
     )
 
@@ -2005,14 +2005,14 @@ def _redsight_heritage_messages(message):
         Path(__file__).resolve().parents[2]
         / "data"
         / "heritage"
-        / "hermes"
+        / "redsight"
     )
 
     parts = [
         (
             "You are RedSight. You inherited selected identity, "
             "memory, user-profile and procedural knowledge from "
-            "the user's Hermes Agent. Use inherited material only "
+            "the user's RedSight Agent. Use inherited material only "
             "when relevant. Current user instructions take priority. "
             "A SKILL.md is procedural guidance; never claim a tool "
             "or procedure was executed unless it actually was."
@@ -2076,14 +2076,14 @@ def _redsight_heritage_messages(message):
         )
 
     add(
-        "Inherited Hermes SOUL",
+        "Inherited RedSight SOUL",
         root
         / "SOUL.md",
         3500,
     )
 
     add(
-        "Inherited Hermes MEMORY",
+        "Inherited RedSight MEMORY",
         root
         / "memories"
         / "MEMORY.md",
@@ -2091,7 +2091,7 @@ def _redsight_heritage_messages(message):
     )
 
     add(
-        "Inherited Hermes USER",
+        "Inherited RedSight USER",
         root
         / "memories"
         / "USER.md",
@@ -2170,7 +2170,7 @@ def _redsight_heritage_messages(message):
 
         add(
             (
-                "Relevant inherited Hermes skill: "
+                "Relevant RED-SIGHT skill: "
                 + str(
                     item.get(
                         "Name",
@@ -2968,7 +2968,7 @@ def rag_post(
             collection,
 
         "project":
-            "hermes-heritage",
+            "redsight-heritage",
     }
 
     try:
@@ -3215,7 +3215,7 @@ def main():
         " REDSIGHT STAGE-7C-R3"
     )
     log(
-        " HERMES HERITAGE + UI REPAIR + RELAUNCH"
+        " REDSIGHT HERITAGE + UI REPAIR + RELAUNCH"
     )
     log(
         "===================================================================="
@@ -3268,18 +3268,18 @@ def main():
     ensure_docker()
 
     # ---------------------------------------------------------------
-    # Hermes
+    # RedSight
     # ---------------------------------------------------------------
 
-    hermes = discover_hermes()
+    redsight = discover_redsight()
 
     log(
-        "HERMES_HOME="
-        + str(hermes)
+        "REDSIGHT_HOME="
+        + str(redsight)
     )
 
     manifest, catalog = build_heritage(
-        hermes
+        redsight
     )
 
     # ---------------------------------------------------------------
@@ -3406,7 +3406,7 @@ def main():
             "-lc",
             (
                 "test -f "
-                "/heritage/hermes/heritage_manifest.json "
+                "/heritage/redsight/heritage_manifest.json "
                 "&& echo HERITAGE_MOUNT=PASS"
             ),
         ],
@@ -3532,7 +3532,7 @@ def main():
     ).exists():
 
         knowledge_paths.append(
-            "/heritage/hermes/SOUL.md"
+            "/heritage/redsight/SOUL.md"
         )
 
     if (
@@ -3541,7 +3541,7 @@ def main():
     ).exists():
 
         knowledge_paths.append(
-            "/heritage/hermes/context"
+            "/heritage/redsight/context"
         )
 
     rag_post(
@@ -3563,7 +3563,7 @@ def main():
 
             memory_paths.append(
                 (
-                    "/heritage/hermes/"
+                    "/heritage/redsight/"
                     + relative
                 )
             )
@@ -3575,7 +3575,7 @@ def main():
 
     skill_paths = [
         (
-            "/heritage/hermes/"
+            "/heritage/redsight/"
             + item[
                 "RelativePath"
             ]
@@ -3603,9 +3603,9 @@ def main():
     rag_post(
         "tool_catalog",
         [
-            "/heritage/hermes/MCP_SERVERS.md",
+            "/heritage/redsight/MCP_SERVERS.md",
             (
-                "/heritage/hermes/"
+                "/heritage/redsight/"
                 "mcp_servers_sanitized.json"
             ),
         ],
@@ -3679,7 +3679,7 @@ def main():
     )
 
     log(
-        "Hermes SOUL            : "
+        "RedSight SOUL            : "
         + str(
             manifest[
                 "soul_present"
@@ -3688,7 +3688,7 @@ def main():
     )
 
     log(
-        "Hermes MEMORY          : "
+        "RedSight MEMORY          : "
         + str(
             manifest[
                 "memory_present"
@@ -3697,7 +3697,7 @@ def main():
     )
 
     log(
-        "Hermes USER            : "
+        "RedSight USER            : "
         + str(
             manifest[
                 "user_present"
@@ -3706,7 +3706,7 @@ def main():
     )
 
     log(
-        "Hermes skills migrated : "
+        "RedSight skills migrated : "
         + str(
             manifest[
                 "skill_count"
@@ -3756,7 +3756,7 @@ def main():
     log("")
 
     log(
-        "Original Hermes files were NOT modified."
+        "Original RedSight files were NOT modified."
     )
 
     log(

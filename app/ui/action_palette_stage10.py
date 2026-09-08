@@ -534,7 +534,7 @@ async def handle_stage10_slash(window, command: str):
         text = str(result.get("help", ""))
         additions = (
             "\n/skillx SKILL | INSTRUCTION"
-            "\n    Execute an inherited Hermes skill through governed RedSight tools."
+            "\n    Execute a RED-SIGHT skill through governed RedSight tools."
         )
         if "/skillx " not in text:
             text += additions
@@ -606,7 +606,7 @@ def attach_action_palette(window, project_root):
 
     heritage = window.findChild(
         QDockWidget,
-        "RedSightHermesHeritageDock",
+        "RedSightHeritageDock",
     )
 
     if heritage is not None:

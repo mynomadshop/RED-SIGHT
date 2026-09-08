@@ -511,10 +511,11 @@ try {
 
     $prov = Get-Content -LiteralPath $provFile -Raw | ConvertFrom-Json
     Assert-Equal -Name 'active_provider recorded' -Expected 'openai' -Actual $prov.active_provider
-    Assert-Equal -Name 'schema version matches the app' -Expected 1 -Actual $prov.version
+    Assert-Equal -Name 'schema version matches the app' -Expected 2 -Actual $prov.version
     Assert-Equal -Name 'model recorded for the provider' -Expected 'gpt-5.6-terra' -Actual $prov.models.openai
     Assert-True  -Name 'defaults kept for other providers' -Condition ([bool]$prov.models.anthropic)
     Assert-True  -Name 'custom_base_url present' -Condition ($null -ne $prov.PSObject.Properties['custom_base_url'])
+    Assert-True  -Name 'provider base URLs are configurable' -Condition ([bool]$prov.base_urls.openai)
 
     # Switching provider must preserve the other providers' models.
     Set-RsProviderConfig -Provider 'anthropic' -Model 'claude-sonnet-5' | Out-Null
@@ -1160,7 +1161,7 @@ Assert-True -Name 'the forward-slash form is rewritten' `
             -Condition ($launcherText -match [regex]::Escape(($rwRoot -replace '\\', '/')))
 Assert-True -Name 'a bare build-user profile is normalized' `
             -Condition ($launcherText -notmatch 'builder\\Documents' -and $launcherText -match 'Documents')
-Assert-True -Name 'an inherited RedSight root is normalized too' `
+Assert-True -Name 'a RED-SIGHT root is normalized too' `
             -Condition ($launcherText -notmatch 'D:\\Tools\\RedSight')
 Assert-True -Name 'a longer directory beginning with RedSight is not a false match' `
             -Condition ($launcherText -match 'C:\\RedSightTest')

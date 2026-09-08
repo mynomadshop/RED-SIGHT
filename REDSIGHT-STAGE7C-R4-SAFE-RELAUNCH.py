@@ -21,7 +21,7 @@ OVERRIDE = ROOT / "docker-compose.override.yml"
 
 UI_PYTHON = ROOT / ".venv-ui" / "Scripts" / "python.exe"
 
-HERITAGE = ROOT / "data" / "heritage" / "hermes"
+HERITAGE = ROOT / "data" / "heritage" / "redsight"
 
 STAMP = time.strftime("%Y%m%d-%H%M%S")
 
@@ -333,12 +333,12 @@ else:
 
 
 # =====================================================================
-# 2. VERIFY ALREADY-MIGRATED HERMES HERITAGE
+# 2. VERIFY ALREADY-MIGRATED REDSIGHT HERITAGE
 # =====================================================================
 
 log("")
 log("====================================================================")
-log(" HERMES HERITAGE VALIDATION")
+log(" REDSIGHT HERITAGE VALIDATION")
 log("====================================================================")
 
 manifest_path = (
@@ -377,10 +377,10 @@ else:
     catalog = []
 
 log(
-    "HERMES_HOME="
+    "REDSIGHT_HOME="
     + str(
         manifest.get(
-            "hermes_home",
+            "redsight_home",
             "unknown",
         )
     )
@@ -435,7 +435,7 @@ log(
 
 
 # =====================================================================
-# 3. BUILD HERMES HERITAGE SIDE PANEL
+# 3. BUILD REDSIGHT HERITAGE SIDE PANEL
 #
 # This does NOT touch command_center.py.
 # =====================================================================
@@ -476,7 +476,7 @@ def _read(path: Path) -> str:
         )
 
 
-class HermesHeritageDock(QDockWidget):
+class RedSightHeritageDock(QDockWidget):
 
     def __init__(
         self,
@@ -484,7 +484,7 @@ class HermesHeritageDock(QDockWidget):
         parent=None,
     ):
         super().__init__(
-            "HERMES HERITAGE",
+            "REDSIGHT HERITAGE",
             parent,
         )
 
@@ -496,7 +496,7 @@ class HermesHeritageDock(QDockWidget):
         self.visible_skills = []
 
         self.setObjectName(
-            "RedSightHermesHeritageDock"
+            "RedSightHeritageDock"
         )
 
         self.setMinimumWidth(
@@ -617,7 +617,7 @@ class HermesHeritageDock(QDockWidget):
         self.search = QLineEdit()
 
         self.search.setPlaceholderText(
-            "Search inherited Hermes skills..."
+            "Search RED-SIGHT skills..."
         )
 
         splitter = QSplitter(
@@ -684,11 +684,11 @@ class HermesHeritageDock(QDockWidget):
         )
 
         self.overview.setPlainText(
-            "REDSIGHT HERMES HERITAGE\n\n"
-            + "Hermes source:\n"
+            "RED-SIGHT HERITAGE\n\n"
+            + "RedSight source:\n"
             + str(
                 manifest.get(
-                    "hermes_home",
+                    "redsight_home",
                     "unknown",
                 )
             )
@@ -738,7 +738,7 @@ class HermesHeritageDock(QDockWidget):
             )
             + "\n\n"
             + (
-                "Hermes Soul, Memory, USER profile, Skills and MCP "
+                "RedSight Soul, Memory, USER profile, Skills and MCP "
                 "definitions are preserved inside RedSight heritage."
             )
         )
@@ -1029,11 +1029,11 @@ def attach_heritage_ui(
     # HERITAGE SIDE PANEL
     # -------------------------------------------------------------
 
-    dock = HermesHeritageDock(
+    dock = RedSightHeritageDock(
         root
         / "data"
         / "heritage"
-        / "hermes",
+        / "redsight",
         window,
     )
 
@@ -1554,9 +1554,9 @@ run(
         "-lc",
         (
             "test -f "
-            "/heritage/hermes/heritage_manifest.json "
+            "/heritage/redsight/heritage_manifest.json "
             "&& test -f "
-            "/heritage/hermes/skills_catalog.json "
+            "/heritage/redsight/skills_catalog.json "
             "&& echo HERITAGE_MOUNT=PASS"
         ),
     ],
@@ -1697,7 +1697,7 @@ def rag(
             body={
                 "paths": paths,
                 "collection": collection,
-                "project": "hermes-heritage",
+                "project": "redsight-heritage",
             },
             timeout=300,
         )
@@ -1736,31 +1736,31 @@ def rag(
 rag(
     "knowledge_docs",
     [
-        "/heritage/hermes/SOUL.md",
-        "/heritage/hermes/context",
+        "/heritage/redsight/SOUL.md",
+        "/heritage/redsight/context",
     ],
 )
 
 rag(
     "episodic_memory",
     [
-        "/heritage/hermes/memories/MEMORY.md",
-        "/heritage/hermes/memories/USER.md",
+        "/heritage/redsight/memories/MEMORY.md",
+        "/heritage/redsight/memories/USER.md",
     ],
 )
 
 rag(
     "skills_index",
     [
-        "/heritage/hermes/skills",
+        "/heritage/redsight/skills",
     ],
 )
 
 rag(
     "tool_catalog",
     [
-        "/heritage/hermes/MCP_SERVERS.md",
-        "/heritage/hermes/mcp_servers_sanitized.json",
+        "/heritage/redsight/MCP_SERVERS.md",
+        "/heritage/redsight/mcp_servers_sanitized.json",
     ],
 )
 
@@ -1990,7 +1990,7 @@ log(
     "Dual GPU               : PASS"
 )
 log(
-    "Hermes Soul            : "
+    "RedSight Soul            : "
     + str(
         manifest.get(
             "soul_present",
@@ -1999,7 +1999,7 @@ log(
     )
 )
 log(
-    "Hermes Memory          : "
+    "RedSight Memory          : "
     + str(
         manifest.get(
             "memory_present",
@@ -2008,7 +2008,7 @@ log(
     )
 )
 log(
-    "Hermes USER            : "
+    "RedSight USER            : "
     + str(
         manifest.get(
             "user_present",
@@ -2017,7 +2017,7 @@ log(
     )
 )
 log(
-    "Hermes skills          : "
+    "RedSight skills          : "
     + str(
         len(catalog)
     )
@@ -2056,7 +2056,7 @@ log(
 
 log("")
 log(
-    "Original Hermes installation was NOT modified."
+    "Original RedSight installation was NOT modified."
 )
 log(
     "Qdrant volumes were NOT deleted."

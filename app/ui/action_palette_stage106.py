@@ -66,6 +66,12 @@ PROVIDER_LABELS: tuple[tuple[str, str], ...] = (
     ("Anthropic Claude", "anthropic"),
     ("Google Gemini", "gemini"),
     ("Grok (xAI)", "xai"),
+    ("OpenRouter", "openrouter"),
+    ("Groq", "groq"),
+    ("Mistral AI", "mistral"),
+    ("Together AI", "together"),
+    ("DeepSeek", "deepseek"),
+    ("Cerebras", "cerebras"),
     ("Custom OpenAI-compatible", "custom"),
 )
 PROVIDERS = tuple(slug for _, slug in PROVIDER_LABELS)
@@ -74,8 +80,14 @@ PROVIDER_DEFAULT_MODELS = {
     "lmstudio": "",
     "openai": "gpt-5.6-terra",
     "anthropic": "claude-sonnet-5",
-    "gemini": "gemini-3.7-flash",
+    "gemini": "gemini-3.8-flash",
     "xai": "grok-4.6",
+    "openrouter": "openai/gpt-4o-mini",
+    "groq": "llama-3.3-70b-versatile",
+    "mistral": "mistral-small-latest",
+    "together": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "deepseek": "deepseek-chat",
+    "cerebras": "llama-3.3-70b",
     "custom": "",
 }
 PROVIDER_BASE_URLS = {
@@ -83,12 +95,25 @@ PROVIDER_BASE_URLS = {
     "anthropic": "https://api.anthropic.com/v1",
     "gemini": "https://generativelanguage.googleapis.com/v1beta",
     "xai": "https://api.x.ai/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "together": "https://api.together.xyz/v1",
+    "deepseek": "https://api.deepseek.com",
+    "cerebras": "https://api.cerebras.ai/v1",
+    "custom": "",
 }
 PROVIDER_KEY_ENV = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GOOGLE_API_KEY",
     "xai": "XAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "together": "TOGETHER_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "cerebras": "CEREBRAS_API_KEY",
     "custom": "REDSIGHT_CUSTOM_API_KEY",
 }
 
@@ -124,9 +149,10 @@ def _normalise_url(value: str, label: str) -> str:
 
 def provider_defaults() -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": 2,
         "active_provider": "none",
         "models": dict(PROVIDER_DEFAULT_MODELS),
+        "base_urls": dict(PROVIDER_BASE_URLS),
         "custom_base_url": "",
     }
 
@@ -146,13 +172,27 @@ def load_provider_config(path: Path | str | None = None) -> dict[str, Any]:
             if models.get(provider) is not None:
                 result["models"][provider] = str(models[provider]).strip()
 
-    custom = str(stored.get("custom_base_url") or "").strip()
-    if custom:
+    stored_urls = stored.get("base_urls")
+    if isinstance(stored_urls, dict):
+        for provider in PROVIDER_BASE_URLS:
+            candidate = str(stored_urls.get(provider) or "").strip()
+            if candidate:
+                try:
+                    result["base_urls"][provider] = _normalise_url(
+                        candidate, f"{provider} provider URL"
+                    )
+                except ValueError:
+                    pass
+    # v1 compatibility: the custom URL lived at the top level.
+    legacy_custom = str(stored.get("custom_base_url") or "").strip()
+    if legacy_custom:
         try:
-            custom = _normalise_url(custom, "Custom provider URL")
+            result["base_urls"]["custom"] = _normalise_url(
+                legacy_custom, "Custom provider URL"
+            )
         except ValueError:
-            custom = ""
-    result["custom_base_url"] = custom
+            pass
+    result["custom_base_url"] = result["base_urls"].get("custom", "")
     return result
 
 
@@ -281,9 +321,22 @@ def save_provider_config(
             if supplied_models.get(provider) is not None:
                 normalised["models"][provider] = str(supplied_models[provider]).strip()
 
-    custom = str(config.get("custom_base_url") or "").strip()
+    supplied_urls = config.get("base_urls")
+    if isinstance(supplied_urls, dict):
+        for provider in PROVIDER_BASE_URLS:
+            candidate = str(supplied_urls.get(provider) or "").strip()
+            if candidate:
+                normalised["base_urls"][provider] = _normalise_url(
+                    candidate, f"{provider} provider URL"
+                )
+    custom = str(
+        normalised["base_urls"].get("custom")
+        or config.get("custom_base_url")
+        or ""
+    ).strip()
     if active == "custom" or custom:
         custom = _normalise_url(custom, "Custom provider URL")
+    normalised["base_urls"]["custom"] = custom
     normalised["custom_base_url"] = custom
     _atomic_json(target, normalised)
 
@@ -339,14 +392,17 @@ def apply_provider_environment(config: dict[str, Any] | None = None) -> dict[str
         "REDSIGHT_ACTIVE_PROVIDER": active,
         "REDSIGHT_PROVIDER_MODEL": model,
     }
-    if active in {"openai", "anthropic", "gemini", "xai", "custom"}:
+    if active in PROVIDER_KEY_ENV:
         applied["RED_SIGHT_PLATFORM__MODE"] = "cloud_allowed"
         applied["RED_SIGHT_ROUTING__CLOUD_FALLBACK"] = "true"
         key = configured_secret(active)
         if key:
             applied[PROVIDER_KEY_ENV[active]] = key
-    if active == "custom" and current.get("custom_base_url"):
-        applied["REDSIGHT_CUSTOM_BASE_URL"] = str(current["custom_base_url"])
+    base_url = str(current.get("base_urls", {}).get(active) or "").strip()
+    if base_url:
+        applied[f"REDSIGHT_{active.upper()}_BASE_URL"] = base_url
+        if active == "custom":
+            applied["REDSIGHT_CUSTOM_BASE_URL"] = base_url
     for key, value in applied.items():
         os.environ[key] = value
     return applied
@@ -357,11 +413,11 @@ def _lm_endpoint() -> str:
     return str(raw.get("base_url") or "http://127.0.0.1:1234/v1").rstrip("/")
 
 
-def _probe_url(provider: str, custom_base_url: str) -> str:
+def _probe_url(provider: str, configured_base_url: str) -> str:
     if provider == "lmstudio":
         base = _lm_endpoint()
-    elif provider == "custom":
-        base = _normalise_url(custom_base_url, "Custom provider URL")
+    elif configured_base_url:
+        base = _normalise_url(configured_base_url, f"{provider} provider URL")
     else:
         base = PROVIDER_BASE_URLS[provider]
     return base.rstrip("/") + "/models"
@@ -378,11 +434,11 @@ def probe_provider(
         return False, "No provider is selected. RedSight can still open and be configured later."
     if provider not in PROVIDERS:
         return False, "Unknown provider."
-    if provider in {"openai", "anthropic", "gemini", "xai"} and not api_key:
+    if provider in PROVIDER_KEY_ENV and provider != "custom" and not api_key:
         return False, "No API key is configured for this provider."
 
     headers = {"Accept": "application/json", "User-Agent": "RedSight/11.6"}
-    if provider in {"openai", "xai"} or (provider == "custom" and api_key):
+    if provider not in {"anthropic", "gemini", "none", "lmstudio"} and api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     elif provider == "anthropic":
         headers["x-api-key"] = api_key
@@ -434,6 +490,7 @@ class ProviderSettingsTab(QWidget):
         self._worker: _ProviderProbe | None = None
         self._config = load_provider_config()
         self._models = dict(self._config["models"])
+        self._base_urls = dict(self._config["base_urls"])
         self._current_provider = "none"
 
         layout = QVBoxLayout(self)
@@ -473,8 +530,8 @@ class ProviderSettingsTab(QWidget):
 
         self.custom_url_edit = QLineEdit()
         self.custom_url_edit.setClearButtonEnabled(True)
-        self.custom_url_edit.setPlaceholderText("https://server.example/v1")
-        form.addRow("Custom base URL", self.custom_url_edit)
+        self.custom_url_edit.setPlaceholderText("https://provider.example/v1")
+        form.addRow("Base URL", self.custom_url_edit)
         layout.addLayout(form)
 
         self.remove_key = QCheckBox("Remove the saved key for this provider")
@@ -492,7 +549,6 @@ class ProviderSettingsTab(QWidget):
         layout.addWidget(self.status)
         layout.addStretch(1)
 
-        self.custom_url_edit.setText(str(self._config.get("custom_base_url") or ""))
         selected = self.provider_combo.findData(self._config["active_provider"])
         self.provider_combo.setCurrentIndex(selected if selected >= 0 else 0)
         self.provider_combo.currentIndexChanged.connect(self._provider_changed)
@@ -504,19 +560,22 @@ class ProviderSettingsTab(QWidget):
         previous = self._current_provider
         if previous in self._models:
             self._models[previous] = self.model_edit.text().strip()
+        if previous in self._base_urls:
+            self._base_urls[previous] = self.custom_url_edit.text().strip()
 
         provider = str(self.provider_combo.currentData() or "none")
         self._current_provider = provider
         self.model_edit.setText(self._models.get(provider, ""))
+        self.custom_url_edit.setText(self._base_urls.get(provider, ""))
         supports_key = provider not in {"none", "lmstudio"}
-        requires_key = provider in {"openai", "anthropic", "gemini", "xai"}
+        requires_key = provider in PROVIDER_KEY_ENV and provider != "custom"
         configured = has_stored_secret(provider)
 
         self.model_edit.setEnabled(provider != "none")
         self.key_edit.setEnabled(supports_key)
         self.remove_key.setEnabled(supports_key and configured)
         self.remove_key.setChecked(False)
-        self.custom_url_edit.setEnabled(provider == "custom")
+        self.custom_url_edit.setEnabled(provider in PROVIDER_BASE_URLS)
         self.test_button.setEnabled(provider != "none")
         self.key_edit.clear()
         self.key_edit.setPlaceholderText(
@@ -554,7 +613,7 @@ class ProviderSettingsTab(QWidget):
         provider = self._current_provider
         key = self.key_edit.text().strip() or configured_secret(provider)
         custom_url = self.custom_url_edit.text().strip()
-        if provider == "custom":
+        if provider in PROVIDER_BASE_URLS:
             try:
                 _normalise_url(custom_url, "Custom provider URL")
             except ValueError as exc:
@@ -581,10 +640,13 @@ class ProviderSettingsTab(QWidget):
     def apply(self) -> Path:
         provider = self._current_provider
         self._models[provider] = self.model_edit.text().strip()
+        if provider in self._base_urls:
+            self._base_urls[provider] = self.custom_url_edit.text().strip()
         config = {
             "active_provider": provider,
             "models": self._models,
-            "custom_base_url": self.custom_url_edit.text().strip(),
+            "base_urls": self._base_urls,
+            "custom_base_url": self._base_urls.get("custom", ""),
         }
         typed_key = self.key_edit.text().strip()
         path = save_provider_config(

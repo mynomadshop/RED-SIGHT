@@ -38,7 +38,10 @@ param(
 
     # AI provider to preconfigure. The key is stored the same way the Settings
     # dialog stores it (Windows DPAPI, current user).
-    [ValidateSet('', 'lmstudio', 'openai', 'gemini', 'xai', 'anthropic', 'custom')]
+    [ValidateSet(
+        '', 'lmstudio', 'openai', 'gemini', 'xai', 'anthropic', 'openrouter',
+        'groq', 'mistral', 'together', 'deepseek', 'cerebras', 'custom'
+    )]
     [string]$ApiProvider = '',
     [string]$ApiKey = '',
     [string]$ApiModel = '',

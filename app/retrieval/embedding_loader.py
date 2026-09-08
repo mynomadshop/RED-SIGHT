@@ -11,8 +11,11 @@ Supports:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,16 @@ class EmbeddingModelLoader:
         self._lmstudio_url = lmstudio_url
         self._model = None
         self._backend = None  # "local", "lmstudio", or None
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(60.0, connect=3.0, pool=3.0),
+                limits=httpx.Limits(max_connections=6, max_keepalive_connections=3),
+                trust_env=False,
+            )
+        return self._client
 
     async def load(self) -> bool:
         """
@@ -92,44 +105,36 @@ class EmbeddingModelLoader:
     async def _load_lmstudio(self) -> bool:
         """Load an embedding model from LM Studio / OpenAI API."""
         try:
-            import httpx
-
             # Test connectivity
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(
-                    f"{self._lmstudio_url}/models",
-                )
-                resp.raise_for_status()
+            resp = await self._get_client().get(f"{self._lmstudio_url}/models")
+            resp.raise_for_status()
 
-                models_data = resp.json()
-                model_list = models_data.get("data", [])
+            models_data = resp.json()
+            model_list = models_data.get("data", [])
 
-                # Find an embedding model
-                embed_model = None
-                for m in model_list:
-                    mid = m.get("id", "")
-                    if "embed" in mid.lower() or "embedding" in mid.lower():
-                        embed_model = mid
-                        break
+            embed_model = next(
+                (
+                    str(model.get("id", ""))
+                    for model in model_list
+                    if "embed" in str(model.get("id", "")).lower()
+                    or "embedding" in str(model.get("id", "")).lower()
+                ),
+                "",
+            )
+            if not embed_model:
+                logger.warning("No embedding model found in LM Studio")
+                return False
 
-                if not embed_model and model_list:
-                    # Use first available model as fallback
-                    embed_model = model_list[0].get("id", "")
-
-                if not embed_model:
-                    logger.warning("No embedding model found in LM Studio")
-                    return False
-
-                self._model = {
-                    "base_url": self._lmstudio_url,
-                    "model_id": embed_model,
-                }
-                self._backend = "lmstudio"
-                logger.info(
-                    f"Using LM Studio embedding model: {embed_model} "
-                    f"({self._lmstudio_url})"
-                )
-                return True
+            self._model = {
+                "base_url": self._lmstudio_url,
+                "model_id": embed_model,
+            }
+            self._backend = "lmstudio"
+            logger.info(
+                f"Using LM Studio embedding model: {embed_model} "
+                f"({self._lmstudio_url})"
+            )
+            return True
 
         except ImportError:
             logger.info("httpx not installed, skipping LM Studio model")
@@ -154,6 +159,8 @@ class EmbeddingModelLoader:
 
         Returns list of embedding vectors.
         """
+        if not texts:
+            return []
         if not self._model:
             raise ValueError("No embedding model loaded")
 
@@ -168,7 +175,8 @@ class EmbeddingModelLoader:
         """Embed texts using local sentence-transformers."""
         import numpy as np
 
-        embeddings = self._model.encode(
+        embeddings = await asyncio.to_thread(
+            self._model.encode,
             texts,
             normalize_embeddings=True,
             show_progress_bar=False,
@@ -184,31 +192,45 @@ class EmbeddingModelLoader:
 
     async def _embed_lmstudio(self, texts: List[str]) -> List[List[float]]:
         """Embed texts using LM Studio / OpenAI API."""
-        import httpx
-
         base_url = self._model["base_url"]
         model_id = self._model["model_id"]
 
-        # Batch requests if needed
-        results = []
         batch_size = 10
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
-            async with httpx.AsyncClient(timeout=60) as batch_client:
-                resp = await batch_client.post(
+        semaphore = asyncio.Semaphore(3)
+
+        async def embed_batch(index: int, batch: List[str]) -> tuple[int, List[List[float]]]:
+            async with semaphore:
+                resp = await self._get_client().post(
                     f"{base_url}/embeddings",
-                    json={
-                        "model": model_id,
-                        "input": batch,
-                    },
+                    json={"model": model_id, "input": batch},
                 )
-                resp.raise_for_status()
-                data = resp.json()
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            if not isinstance(data, list):
+                raise ValueError("LM Studio returned an invalid embedding response")
+            ordered = sorted(
+                (item for item in data if isinstance(item, dict)),
+                key=lambda item: int(item.get("index", 0)),
+            )
+            vectors = [item.get("embedding", []) for item in ordered]
+            if len(vectors) != len(batch) or any(not isinstance(vector, list) for vector in vectors):
+                raise ValueError("LM Studio returned an incomplete embedding batch")
+            return index, vectors
 
-                for item in data.get("data", []):
-                    results.append(item.get("embedding", []))
-
+        batches = []
+        for index, start in enumerate(range(0, len(texts), batch_size)):
+            batch = texts[start : start + batch_size]
+            batches.append(embed_batch(index, batch))
+        completed = await asyncio.gather(*batches)
+        results: List[List[float]] = []
+        for _, vectors in sorted(completed):
+            results.extend(vectors)
         return results
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     def get_info(self) -> Dict[str, Any]:
         """Get model information."""

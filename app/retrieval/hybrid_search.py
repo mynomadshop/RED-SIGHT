@@ -14,6 +14,8 @@ SQLite metadata. Implements the retrieval pipeline from blueprint §4:
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import time
 from dataclasses import dataclass, field
@@ -165,15 +167,19 @@ class HybridSearchEngine:
         all_results: Dict[str, SearchResult] = {}
         search_start = time.time()
 
-        for coll in search_collections:
-            try:
-                coll_results = await self._search_collection(
-                    query_vector, coll, top_k=top_k, filters=filters
-                )
+        searches = await asyncio.gather(
+            *(
+                self._search_collection(query_vector, coll, top_k=top_k, filters=filters)
+                for coll in search_collections
+            ),
+            return_exceptions=True,
+        )
+        for coll, coll_results in zip(search_collections, searches):
+            if isinstance(coll_results, BaseException):
+                logger.warning("Collection '%s' search failed: %s", coll, coll_results)
+            else:
                 for r in coll_results:
                     all_results[r.chunk_id] = r
-            except Exception as e:
-                logger.warning(f"Collection '{coll}' search failed: {e}")
 
         search_time = time.time() - search_start
         logger.info(f"Search completed in {search_time:.2f}s across {len(search_collections)} collections, {len(all_results)} results")
@@ -221,6 +227,8 @@ class HybridSearchEngine:
             elif hasattr(self._embedding_model, "embed"):
                 # OpenAI/LM Studio style
                 result = self._embedding_model.embed([query])
+                if inspect.isawaitable(result):
+                    result = await result
                 return result[0] if result else None
             else:
                 logger.warning("Unknown embedding model interface")

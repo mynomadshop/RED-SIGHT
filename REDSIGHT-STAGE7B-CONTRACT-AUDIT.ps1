@@ -30,7 +30,7 @@ function Show-File {
 
     Write-Host "===================================================================="
     Write-Host " REDSIGHT STAGE-7B"
-    Write-Host " EXACT CONTRACT AUDIT BEFORE HERMES + C/D MIGRATION"
+    Write-Host " EXACT CONTRACT AUDIT BEFORE REDSIGHT + C/D MIGRATION"
     Write-Host " READ ONLY"
     Write-Host "===================================================================="
 
@@ -166,20 +166,20 @@ function Show-File {
         Line
 
     # ---------------------------------------------------------------
-    # Hermes custom skill roots
+    # RedSight custom skill roots
     # ---------------------------------------------------------------
 
     Write-Host ""
     Write-Host "===================================================================="
-    Write-Host " HERMES USER/CUSTOM SKILL INVENTORY"
+    Write-Host " REDSIGHT USER/CUSTOM SKILL INVENTORY"
     Write-Host "===================================================================="
 
-    $HermesUserRoots = @(
-        "$env:LOCALAPPDATA\hermes\skills",
-        "$env:USERPROFILE\.hermes\skills"
+    $RedSightUserRoots = @(
+        "$env:LOCALAPPDATA\redsight\skills",
+        "$env:USERPROFILE\.redsight\skills"
     )
 
-    foreach ($SkillRoot in $HermesUserRoots) {
+    foreach ($SkillRoot in $RedSightUserRoots) {
 
         Write-Host ""
         Write-Host "--- $SkillRoot ---"
@@ -216,39 +216,39 @@ function Show-File {
     }
 
     # ---------------------------------------------------------------
-    # Bundled Hermes skill roots for dedupe
+    # Bundled RedSight skill roots for dedupe
     # ---------------------------------------------------------------
 
     Write-Host ""
     Write-Host "===================================================================="
-    Write-Host " HERMES BUNDLED SKILL ROOTS"
+    Write-Host " REDSIGHT BUNDLED SKILL ROOTS"
     Write-Host "===================================================================="
 
-    $HermesAgent =
+    $RedSightAgent =
         Join-Path `
             $env:LOCALAPPDATA `
-            "hermes\hermes-agent"
+            "redsight\redsight-agent"
 
     foreach ($Path in @(
-        (Join-Path $HermesAgent "skills"),
-        (Join-Path $HermesAgent "optional-skills")
+        (Join-Path $RedSightAgent "skills"),
+        (Join-Path $RedSightAgent "optional-skills")
     )) {
 
         Write-Host "$Path exists=$(Test-Path $Path)"
     }
 
     # ---------------------------------------------------------------
-    # Hermes memories
+    # RedSight memories
     # ---------------------------------------------------------------
 
     Write-Host ""
     Write-Host "===================================================================="
-    Write-Host " HERMES MEMORY SOURCES"
+    Write-Host " REDSIGHT MEMORY SOURCES"
     Write-Host "===================================================================="
 
     foreach ($Path in @(
-        "$env:LOCALAPPDATA\hermes\memories\MEMORY.md",
-        "$env:LOCALAPPDATA\hermes\memories\USER.md"
+        "$env:LOCALAPPDATA\redsight\memories\MEMORY.md",
+        "$env:LOCALAPPDATA\redsight\memories\USER.md"
     )) {
 
         if (Test-Path $Path) {
@@ -297,7 +297,7 @@ Write-Host "====================================================================
 Write-Host ""
 Write-Host "NO FILES MODIFIED"
 Write-Host "NO QDRANT COLLECTIONS MODIFIED"
-Write-Host "NO HERMES SKILLS MODIFIED"
+Write-Host "NO REDSIGHT SKILLS MODIFIED"
 Write-Host "NO DRIVE DATA MODIFIED"
 Write-Host ""
 Write-Host "REPORT:"

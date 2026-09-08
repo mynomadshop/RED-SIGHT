@@ -23,7 +23,7 @@ New-Item `
 Write-Host ""
 Write-Host "===================================================================="
 Write-Host " REDSIGHT STAGE-7C-R2"
-Write-Host " SAFE HERMES HERITAGE MIGRATION + UI + RAG"
+Write-Host " SAFE REDSIGHT HERITAGE MIGRATION + UI + RAG"
 Write-Host "===================================================================="
 Write-Host ""
 
@@ -96,7 +96,7 @@ from pathlib import Path
 
 
 ROOT = Path(sys.argv[1]).resolve()
-HERITAGE = ROOT / "data" / "heritage" / "hermes"
+HERITAGE = ROOT / "data" / "heritage" / "redsight"
 PANEL = ROOT / "app" / "ui" / "heritage_panel.py"
 COMMAND_CENTER = ROOT / "app" / "ui" / "command_center.py"
 LAUNCHER = ROOT / "launch_redsight_command_center.py"
@@ -122,18 +122,18 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def discover_hermes_home() -> Path:
+def discover_redsight_home() -> Path:
     candidates = []
 
-    env_home = os.environ.get("HERMES_HOME")
+    env_home = os.environ.get("REDSIGHT_HOME")
     if env_home:
         candidates.append(Path(env_home))
 
     candidates.extend(
         [
-            LOCALAPPDATA / "hermes",
-            USERPROFILE / ".hermes",
-            APPDATA / "hermes",
+            LOCALAPPDATA / "redsight",
+            USERPROFILE / ".redsight",
+            APPDATA / "redsight",
         ]
     )
 
@@ -160,16 +160,16 @@ def discover_hermes_home() -> Path:
         ):
             return candidate
 
-    raise RuntimeError("Could not locate Hermes home")
+    raise RuntimeError("Could not locate RedSight home")
 
 
-HERMES_HOME = discover_hermes_home()
+REDSIGHT_HOME = discover_redsight_home()
 
-print("HERMES_HOME=" + str(HERMES_HOME))
+print("REDSIGHT_HOME=" + str(REDSIGHT_HOME))
 
 # ---------------------------------------------------------------------
 # Recreate derived RedSight heritage copy only.
-# Original Hermes is untouched.
+# Original RedSight is untouched.
 # ---------------------------------------------------------------------
 
 if HERITAGE.exists():
@@ -184,8 +184,8 @@ if HERITAGE.exists():
 # ---------------------------------------------------------------------
 
 soul_candidates = [
-    HERMES_HOME / "SOUL.md",
-    USERPROFILE / ".hermes" / "SOUL.md",
+    REDSIGHT_HOME / "SOUL.md",
+    USERPROFILE / ".redsight" / "SOUL.md",
 ]
 
 soul_source = next((p for p in soul_candidates if p.exists()), None)
@@ -194,7 +194,7 @@ if soul_source is None:
     try:
         soul_source = next(
             p
-            for p in HERMES_HOME.rglob("SOUL.md")
+            for p in REDSIGHT_HOME.rglob("SOUL.md")
             if ".archive" not in str(p).lower()
         )
     except StopIteration:
@@ -206,7 +206,7 @@ if soul_source:
 else:
     write_text(
         HERITAGE / "SOUL.md",
-        "# Hermes Soul\n\nNo SOUL.md was found during migration.\n",
+        "# RedSight Soul\n\nNo SOUL.md was found during migration.\n",
     )
     print("SOUL_SOURCE=NOT_FOUND")
 
@@ -216,9 +216,9 @@ else:
 
 for name in ("MEMORY.md", "USER.md"):
     candidates = [
-        HERMES_HOME / "memories" / name,
-        HERMES_HOME / name,
-        USERPROFILE / ".hermes" / "memories" / name,
+        REDSIGHT_HOME / "memories" / name,
+        REDSIGHT_HOME / name,
+        USERPROFILE / ".redsight" / "memories" / name,
     ]
 
     source = next((p for p in candidates if p.exists()), None)
@@ -235,11 +235,11 @@ for name in ("MEMORY.md", "USER.md"):
 
 for filename in (
     "AGENTS.md",
-    "HERMES.md",
-    ".hermes.md",
+    "REDSIGHT.md",
+    ".redsight.md",
     "CLAUDE.md",
 ):
-    for base in (HERMES_HOME, USERPROFILE, ROOT):
+    for base in (REDSIGHT_HOME, USERPROFILE, ROOT):
         candidate = base / filename
 
         if not candidate.exists():
@@ -260,12 +260,12 @@ for filename in (
         shutil.copy2(candidate, destination)
 
 # ---------------------------------------------------------------------
-# Local/self-taught Hermes skills.
+# Local/self-taught RedSight skills.
 # ---------------------------------------------------------------------
 
 skill_roots = [
-    ("hermes-home", HERMES_HOME / "skills"),
-    ("dot-hermes", USERPROFILE / ".hermes" / "skills"),
+    ("redsight-home", REDSIGHT_HOME / "skills"),
+    ("dot-redsight", USERPROFILE / ".redsight" / "skills"),
 ]
 
 ignore = shutil.ignore_patterns(
@@ -301,7 +301,7 @@ for label, source in skill_roots:
 # Cron / scheduled agent definitions.
 # ---------------------------------------------------------------------
 
-cron_source = HERMES_HOME / "cron"
+cron_source = REDSIGHT_HOME / "cron"
 
 if cron_source.exists():
     shutil.copytree(
@@ -315,25 +315,25 @@ else:
     print("CRON_MIGRATED=False")
 
 # ---------------------------------------------------------------------
-# Preserve complete Hermes config privately.
+# Preserve complete RedSight config privately.
 # Do NOT put secrets into RAG or visible UI.
 # ---------------------------------------------------------------------
 
-config_source = HERMES_HOME / "config.yaml"
-private_config = PRIVATE_ROOT / "hermes-config.yaml"
+config_source = REDSIGHT_HOME / "config.yaml"
+private_config = PRIVATE_ROOT / "redsight-config.yaml"
 
 if config_source.exists():
     shutil.copy2(config_source, private_config)
     print("PRIVATE_CONFIG=" + str(private_config))
 
 # ---------------------------------------------------------------------
-# Live Hermes inventories.
+# Live RedSight inventories.
 # ---------------------------------------------------------------------
 
-def run_hermes(*args: str) -> str:
+def run_redsight(*args: str) -> str:
     try:
         completed = subprocess.run(
-            ["hermes", *args],
+            ["redsight", *args],
             capture_output=True,
             text=True,
             errors="replace",
@@ -347,24 +347,24 @@ def run_hermes(*args: str) -> str:
 
         return output
     except Exception as exc:
-        return "Hermes command unavailable: " + repr(exc)
+        return "RedSight command unavailable: " + repr(exc)
 
 
-mcp_output = run_hermes("mcp", "list")
+mcp_output = run_redsight("mcp", "list")
 
 write_text(
     HERITAGE / "MCP_SERVERS.md",
     (
-        "# Migrated Hermes MCP Servers\n\n"
+        "# Migrated RedSight MCP Servers\n\n"
         "Source: "
-        + str(HERMES_HOME)
+        + str(REDSIGHT_HOME)
         + "\n\n```text\n"
         + mcp_output
         + "\n```\n"
     ),
 )
 
-skill_inventory = run_hermes("skills", "list")
+skill_inventory = run_redsight("skills", "list")
 
 write_text(
     HERITAGE / "INSTALLED_SKILLS.txt",
@@ -553,8 +553,8 @@ print("MIGRATED_SKILL_COUNT=" + str(len(catalog)))
 # ---------------------------------------------------------------------
 
 manifest = {
-    "source": "Hermes Agent",
-    "hermes_home": str(HERMES_HOME),
+    "source": "RedSight Agent",
+    "redsight_home": str(REDSIGHT_HOME),
     "soul_present": (HERITAGE / "SOUL.md").exists(),
     "memory_present": (
         HERITAGE / "memories" / "MEMORY.md"
@@ -655,14 +655,14 @@ def _redsight_heritage_messages(message):
         Path(__file__).resolve().parents[2]
         / "data"
         / "heritage"
-        / "hermes"
+        / "redsight"
     )
 
     parts = [
         (
             "You are RedSight. You have inherited selected identity, "
             "memory, user-profile and procedural knowledge from the "
-            "user's Hermes Agent. Use inherited material when relevant. "
+            "user's RedSight Agent. Use inherited material when relevant. "
             "Current user instructions have priority. SKILL.md files "
             "describe procedures; never claim a procedure or MCP tool "
             "was executed unless it actually was."
@@ -700,19 +700,19 @@ def _redsight_heritage_messages(message):
         used += len(part)
 
     add_file(
-        "Inherited Hermes SOUL",
+        "Inherited RedSight SOUL",
         root / "SOUL.md",
         4000,
     )
 
     add_file(
-        "Inherited Hermes MEMORY",
+        "Inherited RedSight MEMORY",
         root / "memories" / "MEMORY.md",
         5000,
     )
 
     add_file(
-        "Inherited Hermes USER profile",
+        "Inherited RedSight USER profile",
         root / "memories" / "USER.md",
         3000,
     )
@@ -763,7 +763,7 @@ def _redsight_heritage_messages(message):
             continue
 
         add_file(
-            "Relevant inherited Hermes skill: "
+            "Relevant RED-SIGHT skill: "
             + str(item.get("Name", "skill")),
             root / relative,
             3000,
@@ -942,7 +942,7 @@ write_text(
 print("COMMAND_CENTER_HERITAGE=PASS")
 
 # =====================================================================
-# HERMES HERITAGE SIDE PANEL + REDSIGHT BRAND
+# REDSIGHT HERITAGE SIDE PANEL + REDSIGHT BRAND
 # =====================================================================
 
 panel_source = r'''
@@ -980,14 +980,14 @@ def _read(path: Path) -> str:
         return "Unavailable: " + str(exc)
 
 
-class HermesHeritageDock(QDockWidget):
+class RedSightHeritageDock(QDockWidget):
     def __init__(
         self,
         root: Path,
         parent=None,
     ):
         super().__init__(
-            "HERMES HERITAGE",
+            "REDSIGHT HERITAGE",
             parent,
         )
 
@@ -996,7 +996,7 @@ class HermesHeritageDock(QDockWidget):
         self._visible_skills = []
 
         self.setObjectName(
-            "RedSightHermesHeritageDock"
+            "RedSightHeritageDock"
         )
 
         self.setMinimumWidth(430)
@@ -1103,7 +1103,7 @@ class HermesHeritageDock(QDockWidget):
         self.skill_search = QLineEdit()
 
         self.skill_search.setPlaceholderText(
-            "Search inherited Hermes skills..."
+            "Search RED-SIGHT skills..."
         )
 
         splitter = QSplitter(
@@ -1162,11 +1162,11 @@ class HermesHeritageDock(QDockWidget):
         )
 
         self.overview.setPlainText(
-            "REDSIGHT HERMES HERITAGE\n\n"
-            + "Hermes source: "
+            "RED-SIGHT HERITAGE\n\n"
+            + "RedSight source: "
             + str(
                 manifest.get(
-                    "hermes_home",
+                    "redsight_home",
                     "unknown",
                 )
             )
@@ -1396,7 +1396,7 @@ def attach_heritage_ui(
         root
         / "data"
         / "heritage"
-        / "hermes"
+        / "redsight"
     )
 
     toolbar = QToolBar(
@@ -1458,7 +1458,7 @@ def attach_heritage_ui(
         toolbar,
     )
 
-    dock = HermesHeritageDock(
+    dock = RedSightHeritageDock(
         heritage,
         window,
     )
@@ -1712,7 +1712,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 
 # =====================================================================
-# Secure the private Hermes configuration copy.
+# Secure the private RedSight configuration copy.
 # =====================================================================
 
 $PrivateRoot =
@@ -1900,7 +1900,7 @@ $ErrorActionPreference = "Continue"
 docker exec `
     redsight `
     sh -lc `
-    "test -f /heritage/hermes/heritage_manifest.json && echo HERITAGE_MOUNT=PASS"
+    "test -f /heritage/redsight/heritage_manifest.json && echo HERITAGE_MOUNT=PASS"
 
 $MountExit =
     $LASTEXITCODE
@@ -1923,7 +1923,7 @@ Write-Host ""
 # =====================================================================
 
 Write-Host "===================================================================="
-Write-Host " NON-DESTRUCTIVE HERMES RAG INGESTION"
+Write-Host " NON-DESTRUCTIVE REDSIGHT RAG INGESTION"
 Write-Host "===================================================================="
 
 function Invoke-RagBatch {
@@ -1941,7 +1941,7 @@ function Invoke-RagBatch {
         @{
             paths      = @($Paths)
             collection = $Collection
-            project    = "hermes-heritage"
+            project    = "redsight-heritage"
         } |
         ConvertTo-Json `
             -Depth 8
@@ -1987,7 +1987,7 @@ function Invoke-RagBatch {
 }
 
 $HeritageRoot =
-    Join-Path $Root "data\heritage\hermes"
+    Join-Path $Root "data\heritage\redsight"
 
 $KnowledgePaths =
     @()
@@ -2001,7 +2001,7 @@ foreach ($Path in @(
 
         $KnowledgePaths +=
             (
-                "/heritage/hermes/"
+                "/heritage/redsight/"
                 + $Path.Replace("\","/")
             )
     }
@@ -2023,7 +2023,7 @@ foreach ($Path in @(
 
         $MemoryPaths +=
             (
-                "/heritage/hermes/"
+                "/heritage/redsight/"
                 + $Path.Replace("\","/")
             )
     }
@@ -2049,7 +2049,7 @@ if (Test-Path $CatalogPath) {
             $Catalog |
             ForEach-Object {
 
-                "/heritage/hermes/" +
+                "/heritage/redsight/" +
                 (
                     $_.RelativePath.ToString().Replace("\","/")
                 )
@@ -2064,8 +2064,8 @@ if (Test-Path $CatalogPath) {
 Invoke-RagBatch `
     -Collection "tool_catalog" `
     -Paths @(
-        "/heritage/hermes/MCP_SERVERS.md",
-        "/heritage/hermes/mcp_servers_sanitized.json"
+        "/heritage/redsight/MCP_SERVERS.md",
+        "/heritage/redsight/mcp_servers_sanitized.json"
     )
 
 # =====================================================================
@@ -2246,8 +2246,8 @@ docker exec `
     nvidia-smi -L
 
 Write-Host ""
-Write-Host "Hermes home             : $($Manifest.hermes_home)"
-Write-Host "Hermes skills migrated  : $($Manifest.skill_count)"
+Write-Host "RedSight home             : $($Manifest.redsight_home)"
+Write-Host "RedSight skills migrated  : $($Manifest.skill_count)"
 Write-Host "SOUL migrated           : $($Manifest.soul_present)"
 Write-Host "MEMORY migrated         : $($Manifest.memory_present)"
 Write-Host "USER migrated           : $($Manifest.user_present)"
@@ -2259,7 +2259,7 @@ Write-Host "Command Center PID      : $($UiProcess.Id)"
 Write-Host ""
 Write-Host "UI:"
 Write-Host "  REDSIGHT bold red brand/logo"
-Write-Host "  HERMES HERITAGE side panel"
+Write-Host "  REDSIGHT HERITAGE side panel"
 Write-Host "  Overview"
 Write-Host "  Soul"
 Write-Host "  Memory / USER"
@@ -2272,7 +2272,7 @@ Write-Host "  episodic_memory"
 Write-Host "  skills_index"
 Write-Host "  tool_catalog"
 Write-Host ""
-Write-Host "Original Hermes installation was NOT modified."
+Write-Host "Original RedSight installation was NOT modified."
 Write-Host "Qdrant volumes were NOT deleted or recreated."
 Write-Host ""
 Write-Host "Backup:"

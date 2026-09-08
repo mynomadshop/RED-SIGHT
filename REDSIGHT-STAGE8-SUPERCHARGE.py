@@ -230,7 +230,7 @@ HERITAGE = (
     ROOT
     / "data"
     / "heritage"
-    / "hermes"
+    / "redsight"
 )
 
 SECRETS_FILE = (
@@ -374,7 +374,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 
     "skills.list": {
         "description":
-            "List inherited Hermes skills.",
+            "List RED-SIGHT skills.",
         "risk": "read",
         "approval": False,
         "agent": True,
@@ -384,7 +384,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 
     "skills.invoke": {
         "description":
-            "Load a migrated Hermes skill and use it as procedural "
+            "Load a configured RED-SIGHT skill and use it as procedural "
             "knowledge for a RedSight model request.",
         "risk": "model",
         "approval": False,
@@ -395,7 +395,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 
     "mcp.list": {
         "description":
-            "List migrated Hermes MCP server definitions.",
+            "List configured RED-SIGHT MCP server definitions.",
         "risk": "read",
         "approval": False,
         "agent": True,
@@ -405,7 +405,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 
     "mcp.test": {
         "description":
-            "Ask Hermes to test a configured MCP server connection.",
+            "Ask RedSight to test a configured MCP server connection.",
         "risk": "read",
         "approval": False,
         "agent": False,
@@ -1909,7 +1909,7 @@ def filesystem_write(
 
 
 # ====================================================================
-# HERMES SKILLS
+# REDSIGHT SKILLS
 # ====================================================================
 
 def load_skill_catalog():
@@ -2107,7 +2107,7 @@ async def skills_invoke(
     if not matches:
 
         raise ValueError(
-            "No migrated Hermes skill matched: "
+            "No configured RED-SIGHT skill matched: "
             + requested
         )
 
@@ -2138,7 +2138,7 @@ async def skills_invoke(
 
                 "content":
                     (
-                        "You are RedSight using an inherited Hermes "
+                        "You are RedSight using a RED-SIGHT "
                         "procedural skill. Follow the useful procedure "
                         "but do not claim external actions occurred "
                         "unless an actual tool result says they occurred.\n\n"
@@ -2252,7 +2252,7 @@ def mcp_test(
 
     result = subprocess.run(
         [
-            "hermes",
+            "redsight",
             "mcp",
             "test",
             name,
@@ -4601,7 +4601,7 @@ def _find_chat_input(
                 if (
                     "heritage"
                     in combined
-                    or "inherited hermes"
+                    or "inherited redsight"
                     in combined
                 ):
 
@@ -5233,11 +5233,11 @@ Writes require approval.
 
 There is intentionally no general delete tool.
 
-## Hermes Heritage
+## RedSight Heritage
 
 ### skills.list
 
-Search/list inherited Hermes skills.
+Search/list RED-SIGHT skills.
 
 ### skills.invoke
 
@@ -5255,7 +5255,7 @@ Show migrated MCP servers.
 
 ### mcp.test
 
-Test an MCP server through the Hermes MCP subsystem.
+Test an MCP server through the RedSight MCP subsystem.
 
 Migrated servers currently include:
 
@@ -5342,8 +5342,8 @@ manifest = {
         "Playwright browser automation",
         "PDF generation",
         "C/D filesystem tools",
-        "Hermes skill invocation",
-        "Hermes MCP inventory/testing",
+        "RedSight skill invocation",
+        "RedSight MCP inventory/testing",
         "persistent cron tasks",
         "agent planning/execution",
         "explicit PowerShell execution",

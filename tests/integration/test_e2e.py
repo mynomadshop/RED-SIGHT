@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.config.settings import get_settings, reset_settings
 from app.learning import ControlledLearning, SafetyBoundary, TrustLevel
+from app.security.local_api import auth_headers
 
 
 # ═══════════════════════════════════════════════════════════
@@ -37,7 +38,7 @@ class TestHealthEndpoints:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/health")
         assert resp.status_code == 200
@@ -51,7 +52,7 @@ class TestHealthEndpoints:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/status")
         assert resp.status_code == 200
@@ -65,7 +66,7 @@ class TestHealthEndpoints:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/gpu/health")
         assert resp.status_code == 200
@@ -78,7 +79,7 @@ class TestHealthEndpoints:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/gpu/status")
         assert resp.status_code == 200
@@ -89,7 +90,7 @@ class TestHealthEndpoints:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/gpu/summary")
         assert resp.status_code == 200
@@ -108,7 +109,7 @@ class TestKnowledgePipeline:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         # Search is POST-only
         resp = client.post("/api/v1/search", json={"query": "test", "limit": 5})
@@ -120,7 +121,7 @@ class TestKnowledgePipeline:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/collections")
         assert resp.status_code in (200, 503)
@@ -131,7 +132,7 @@ class TestKnowledgePipeline:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/bm25/stats")
         assert resp.status_code in (200, 503)
@@ -150,7 +151,7 @@ class TestGpuSchedulerE2E:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/gpu/status")
         assert resp.status_code == 200
@@ -161,7 +162,7 @@ class TestGpuSchedulerE2E:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/gpu/summary")
         assert resp.status_code == 200
@@ -172,7 +173,7 @@ class TestGpuSchedulerE2E:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.post("/api/v1/scheduler/jobs/submit", json={
             "job_type": "test",
@@ -186,7 +187,7 @@ class TestGpuSchedulerE2E:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/scheduler/jobs/queue-depth")
         assert resp.status_code in (200, 503)
@@ -205,7 +206,7 @@ class TestAgentToolsE2E:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         # Tools are initialized in lifespan, not in create_app()
         resp = client.get("/api/v1/tools")
@@ -217,7 +218,7 @@ class TestAgentToolsE2E:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         # Skills are initialized in lifespan, not in create_app()
         resp = client.get("/api/v1/skills")
@@ -229,7 +230,7 @@ class TestAgentToolsE2E:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         # Models are initialized in lifespan, not in create_app()
         resp = client.get("/api/v1/models")
@@ -241,7 +242,7 @@ class TestAgentToolsE2E:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.post("/api/v1/orchestrate", json={
             "query": "test query",
@@ -340,7 +341,7 @@ class TestProductionReadiness:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/nonexistent")
         assert resp.status_code == 404
@@ -351,7 +352,7 @@ class TestProductionReadiness:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.delete("/api/v1/health")
         assert resp.status_code == 405
@@ -362,7 +363,7 @@ class TestProductionReadiness:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/health")
         assert "application/json" in resp.headers.get("content-type", "")
@@ -388,7 +389,7 @@ class TestFullSystemIntegration:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/health")
         assert resp.status_code == 200
@@ -402,7 +403,7 @@ class TestFullSystemIntegration:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         # Get GPU status
         gpu_resp = client.get("/api/v1/gpu/status")
@@ -421,7 +422,7 @@ class TestFullSystemIntegration:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         # Get tools
         tools_resp = client.get("/api/v1/tools")
@@ -445,7 +446,7 @@ class TestJobLifecycleE2E:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         # Submit job
         resp = client.post("/api/v1/scheduler/jobs/submit", json={
@@ -464,7 +465,7 @@ class TestJobLifecycleE2E:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         # Cancel job (should return 200 or 503)
         resp = client.post("/api/v1/scheduler/jobs/cancel", json={
@@ -486,7 +487,7 @@ class TestAuditAndPerformance:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.post("/api/v1/audit/query", json={
             "limit": 10,
@@ -499,7 +500,7 @@ class TestAuditAndPerformance:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/audit/stats")
         assert resp.status_code in (200, 503)
@@ -510,7 +511,7 @@ class TestAuditAndPerformance:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         # Benchmark run exists but requires complex query params;
         # just verify the endpoint is reachable (any non-404 is fine)
@@ -523,7 +524,7 @@ class TestAuditAndPerformance:
         from app.server import create_app
         
         app = create_app()
-        client = TestClient(app)
+        client = TestClient(app, headers=auth_headers())
         
         resp = client.get("/api/v1/benchmarks/profiles")
         assert resp.status_code in (200, 503)

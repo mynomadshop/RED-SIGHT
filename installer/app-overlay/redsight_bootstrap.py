@@ -46,6 +46,8 @@ import ctypes
 import json
 import os
 import re
+import secrets
+import time
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any, Dict
@@ -55,6 +57,7 @@ __all__ = [
     "DEFAULT_BASE_URL",
     "PROVIDER_CONFIG_PATH",
     "PROVIDER_SECRETS_PATH",
+    "LOCAL_API_TOKEN_PATH",
     "apply_environment",
     "base_url",
     "load_config",
@@ -82,13 +85,23 @@ def _local_app_data() -> Path:
 CONFIG_PATH = _local_app_data() / "RedSight" / "settings" / "lmstudio.json"
 PROVIDER_CONFIG_PATH = CONFIG_PATH.with_name("provider.json")
 PROVIDER_SECRETS_PATH = CONFIG_PATH.with_name("provider-secrets.json")
+LOCAL_API_TOKEN_PATH = _local_app_data() / "RedSight" / "private" / "api-token"
 
-_PROVIDERS = {"none", "lmstudio", "openai", "anthropic", "gemini", "xai", "custom"}
+_PROVIDERS = {
+    "none", "lmstudio", "openai", "anthropic", "gemini", "xai",
+    "openrouter", "groq", "mistral", "together", "deepseek", "cerebras", "custom",
+}
 _PROVIDER_KEY_ENV = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GOOGLE_API_KEY",
     "xai": "XAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "together": "TOGETHER_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "cerebras": "CEREBRAS_API_KEY",
     "custom": "REDSIGHT_CUSTOM_API_KEY",
 }
 
@@ -180,11 +193,50 @@ def provider_environment(
     secret = _unprotect_secret(str(encrypted or ""))
     if secret:
         result[_PROVIDER_KEY_ENV[active]] = secret
-    if active == "custom":
-        custom_url = str(stored.get("custom_base_url") or "").strip().rstrip("/")
-        if custom_url:
-            result["REDSIGHT_CUSTOM_BASE_URL"] = custom_url
+    stored_urls = stored.get("base_urls")
+    configured_url = ""
+    if isinstance(stored_urls, dict):
+        configured_url = str(stored_urls.get(active) or "").strip().rstrip("/")
+    if active == "custom" and not configured_url:
+        configured_url = str(stored.get("custom_base_url") or "").strip().rstrip("/")
+    if configured_url:
+        result[f"REDSIGHT_{active.upper()}_BASE_URL"] = configured_url
+        if active == "custom":
+            result["REDSIGHT_CUSTOM_BASE_URL"] = configured_url
     return result
+
+
+def local_api_token(path: Path | str | None = None) -> str:
+    """Return the shared per-user token used by both local FastAPI services."""
+    explicit = str(os.environ.get("REDSIGHT_LOCAL_API_TOKEN") or "").strip()
+    if explicit:
+        return explicit
+    target = Path(path) if path else LOCAL_API_TOKEN_PATH
+    try:
+        value = target.read_text(encoding="utf-8").strip()
+        if value:
+            return value
+    except Exception:
+        pass
+    value = secrets.token_urlsafe(32)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(value + "\n")
+    except FileExistsError:
+        value = ""
+        for _ in range(20):
+            try:
+                value = target.read_text(encoding="utf-8").strip()
+            except OSError:
+                value = ""
+            if value:
+                break
+            time.sleep(0.05)
+        if not value:
+            raise RuntimeError("The local API token file exists but is empty")
+    return value
 
 
 def normalize_base_url(value: Any) -> str:
@@ -306,6 +358,7 @@ def environment(path: Path | str | None = None) -> Dict[str, str]:
         "LM_STUDIO_TIMEOUT": str(config["timeout_seconds"]),
         "RED_SIGHT_LMSTUDIO__BASE_URL": url,
         "RED_SIGHT_LMSTUDIO__TIMEOUT_SECONDS": str(config["timeout_seconds"]),
+        "REDSIGHT_LOCAL_API_TOKEN": local_api_token(),
     }
     if config["model"]:
         vars_["LM_STUDIO_MODEL"] = config["model"]

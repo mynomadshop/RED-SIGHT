@@ -115,13 +115,11 @@ class MultiDriveIndexer:
 
         logger.info(f"Indexing {len(files)} files across {len(by_collection)} collections")
 
-        # Process each collection
-        for collection, coll_files in by_collection.items():
-            logger.info(f"Processing collection '{collection}': {len(coll_files)} files")
+        semaphore = asyncio.Semaphore(max(1, self._max_concurrent))
 
-            for discovered in coll_files:
+        async def process_file(discovered: DiscoveredFile) -> None:
+            async with semaphore:
                 try:
-                    # Check if file is indexable
                     if discovered.is_large:
                         result.skipped += 1
                         result.per_file.append({
@@ -129,15 +127,13 @@ class MultiDriveIndexer:
                             "status": "skipped_large",
                             "reason": f"File too large ({discovered.size_bytes / 1024:.0f}KB)",
                         })
-                        continue
+                        return
 
-                    # Create and run indexing job
                     job_id = await self._indexer.create_job(
                         source_path=discovered.path,
                         collection=discovered.collection,
                         project=discovered.project_hint,
                     )
-
                     job_result = await self._indexer.process_job(job_id)
 
                     if job_result["status"] == "complete":
@@ -167,16 +163,20 @@ class MultiDriveIndexer:
                             "status": "failed",
                             "error": error_msg,
                         })
-
-                except Exception as e:
+                except Exception as exc:
                     result.failed += 1
-                    error_msg = str(e)
+                    error_msg = str(exc)
                     result.errors.append(f"{discovered.path}: {error_msg}")
                     result.per_file.append({
                         "path": discovered.path,
                         "status": "failed",
                         "error": error_msg,
                     })
+
+        # Process each collection
+        for collection, coll_files in by_collection.items():
+            logger.info(f"Processing collection '{collection}': {len(coll_files)} files")
+            await asyncio.gather(*(process_file(discovered) for discovered in coll_files))
 
         result.end_time = time.time()
         logger.info(

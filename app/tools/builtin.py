@@ -789,15 +789,18 @@ def _is_safe_environment_name(name: str) -> bool:
 def _handle_list_skills(params: Dict, contract: ToolContract) -> Dict:
     """List available skills."""
     try:
-        from app.server import skill_registry
-        if skill_registry:
-            skills = skill_registry.list_all()
+        # Discovery exposes a synchronous snapshot. SkillRegistry.list_all is
+        # asynchronous, so calling it from this synchronous built-in returned
+        # a coroutine instead of skills.
+        from app.server import skill_discovery
+        if skill_discovery:
+            skills = skill_discovery.list_all()
             return {
                 "skills": [s.to_dict() for s in skills],
                 "count": len(skills),
                 "success": True,
             }
-        return {"error": "Skill registry not initialized", "success": False}
+        return {"error": "Skill discovery not initialized", "success": False}
     except Exception as e:
         return {"error": str(e), "success": False}
 

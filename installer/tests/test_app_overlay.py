@@ -115,6 +115,26 @@ def _stage106_settings_checks() -> None:
         print("\n== Stage 10.6: provider-optional startup ==")
         missing = settings.load_provider_config(root / "missing.json")
         check("a missing provider file is a valid state", missing["active_provider"] == "none")
+        expected_cloud = {
+            "openai", "anthropic", "gemini", "xai", "openrouter", "groq",
+            "mistral", "together", "deepseek", "cerebras", "custom",
+        }
+        check(
+            "every listed cloud provider is configurable",
+            expected_cloud <= set(settings.PROVIDERS),
+        )
+        check(
+            "every listed cloud provider has a key mapping",
+            expected_cloud <= set(settings.PROVIDER_KEY_ENV),
+        )
+        check(
+            "every listed provider has an editable endpoint",
+            expected_cloud <= set(settings.PROVIDER_BASE_URLS),
+        )
+        check(
+            "every listed provider has an independent model setting",
+            expected_cloud <= set(missing["models"]),
+        )
         check("no provider probe touches the network", settings.probe_provider("none")[0] is False)
         applied = settings.apply_provider_environment(missing)
         check("an unconfigured provider is exported without a key", applied == {
@@ -444,7 +464,7 @@ def main() -> int:
     flat = {"demo": {"url": "http://localhost:40404/mcp"}}
     check("flat {name: {...}} form", mcp._server_map(flat) == flat)
     check(
-        "mcpServers wrapper (Claude/Hermes style)",
+        "mcpServers wrapper (Claude/RedSight style)",
         mcp._server_map({"mcpServers": flat}) == flat,
     )
     check("mcp_servers wrapper", mcp._server_map({"mcp_servers": flat}) == flat)

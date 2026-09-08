@@ -188,11 +188,8 @@ class BaseMemoryStore:
         # Remove lowest relevance entries
         to_remove = len(entries) - self.config.max_entries
         entries.sort(key=lambda e: e.relevance_score)
-        removed = 0
-        for entry in entries[:to_remove]:
-            if await self.remove(entry.id):
-                removed += 1
-        return removed
+        outcomes = await asyncio.gather(*(self.remove(entry.id) for entry in entries[:to_remove]))
+        return sum(bool(outcome) for outcome in outcomes)
 
     async def clear(self):
         """Clear all entries."""
@@ -626,12 +623,8 @@ class MemoryStore:
         if memory_type:
             store = self._stores[memory_type]
             return await store.get(entry_id)
-        # Search all stores
-        for store in self._stores.values():
-            entry = await store.get(entry_id)
-            if entry:
-                return entry
-        return None
+        entries = await asyncio.gather(*(store.get(entry_id) for store in self._stores.values()))
+        return next((entry for entry in entries if entry is not None), None)
 
     async def search(
         self,
@@ -642,28 +635,24 @@ class MemoryStore:
         """Search across all memory types."""
         if memory_types is None:
             memory_types = list(self._stores.keys())
-        results = []
-        for mtype in memory_types:
-            store = self._stores[mtype]
-            entries = await store.search(query, limit=limit)
-            results.extend(entries)
+        batches = await asyncio.gather(
+            *(self._stores[mtype].search(query, limit=limit) for mtype in memory_types)
+        )
+        results = [entry for entries in batches for entry in entries]
         # Sort by relevance
         results.sort(key=lambda e: e.relevance_score, reverse=True)
         return results[:limit]
 
     async def get_stats(self) -> Dict[str, Any]:
         """Get statistics for all memory stores."""
-        return {
-            mtype.value: await store.get_stats()
-            for mtype, store in self._stores.items()
-        }
+        stores = list(self._stores.items())
+        stats = await asyncio.gather(*(store.get_stats() for _, store in stores))
+        return {mtype.value: value for (mtype, _), value in zip(stores, stats)}
 
     async def prune_all(self):
         """Prune all memory stores."""
-        for store in self._stores.values():
-            await store.prune()
+        await asyncio.gather(*(store.prune() for store in self._stores.values()))
 
     async def clear_all(self):
         """Clear all memory stores."""
-        for store in self._stores.values():
-            await store.clear()
+        await asyncio.gather(*(store.clear() for store in self._stores.values()))

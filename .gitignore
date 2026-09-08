@@ -57,7 +57,7 @@ qdrant-data/
 storage/
 
 # ------------------------------------------------------------
-# Personal RedSight/Hermes runtime heritage
+# Personal RED-SIGHT runtime data
 # ------------------------------------------------------------
 data/heritage/
 data/memory/

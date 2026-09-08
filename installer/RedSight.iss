@@ -253,7 +253,13 @@ begin
     2: Result := 'anthropic';
     3: Result := 'gemini';
     4: Result := 'xai';
-    5: Result := 'custom';
+    5: Result := 'openrouter';
+    6: Result := 'groq';
+    7: Result := 'mistral';
+    8: Result := 'together';
+    9: Result := 'deepseek';
+    10: Result := 'cerebras';
+    11: Result := 'custom';
   else
     Result := 'lmstudio';
   end;
@@ -494,6 +500,12 @@ begin
   ProviderPage.Add('Anthropic Claude');
   ProviderPage.Add('Google Gemini');
   ProviderPage.Add('Grok (xAI)');
+  ProviderPage.Add('OpenRouter');
+  ProviderPage.Add('Groq');
+  ProviderPage.Add('Mistral AI');
+  ProviderPage.Add('Together AI');
+  ProviderPage.Add('DeepSeek');
+  ProviderPage.Add('Cerebras');
   ProviderPage.Add('Custom OpenAI-compatible endpoint');
   ProviderPage.Values[1] := True;
 
@@ -504,7 +516,7 @@ begin
     'The key is stored encrypted for your Windows account (DPAPI), the same way the Settings dialog stores it. Leave blank to add it later in Settings.');
   ApiPage.Add('API key:', True);
   ApiPage.Add('Model (optional - leave blank for the default):', False);
-  ApiPage.Add('Base URL (only for a custom OpenAI-compatible endpoint):', False);
+  ApiPage.Add('Base URL (optional - override the selected provider endpoint):', False);
 
   { --- LM Studio: the local model server ----------------------------------
     Shown whenever RedSight will use a local model - the CUDA profile always,

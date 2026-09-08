@@ -10,7 +10,7 @@ $StderrLog = "C:\Users\walim\RedSight\redsight-ui.stderr.log"
 
 Set-Location $Root
 
-# Isolate from Hermes/global Python variables
+# Isolate from RedSight/global Python variables
 $env:PYTHONPATH = $null
 $env:PYTHONHOME = $null
 $env:PYTHONNOUSERSITE = "1"

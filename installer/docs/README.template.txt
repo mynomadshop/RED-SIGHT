@@ -54,6 +54,23 @@ Everything is idempotent: re-running setup repairs a broken install
 instead of starting over.
 
 
+AI PROVIDERS, TOOLS AND LOCAL API SECURITY
+------------------------------------------
+The laptop/PC setup profile can configure LM Studio, OpenAI, Anthropic,
+Google Gemini, xAI, OpenRouter, Groq, Mistral, Together, DeepSeek,
+Cerebras or a custom OpenAI-compatible endpoint. Every provider's model,
+base URL and credential can be changed later under Settings -> AI Provider.
+Cloud keys are encrypted for the current Windows account with DPAPI; they
+are never written into the installation or placed on a command line.
+
+RedSight now creates a random per-user token for its local API and action
+gateway. The launcher supplies it to the desktop and container processes,
+while CORS and host checks restrict browser access. Keep this generated token
+private. Skills discovered from configured SKILL.md folders and explicitly
+configured MCP servers are available to governed agent plans; any action that
+can change local or external state still requires approval.
+
+
 FIXED IN {{VERSION}} — LM STUDIO, MEMORY AND A RESPONSIVE UI
 ------------------------------------------------------------
 Four faults reported against the previous release are fixed. All four

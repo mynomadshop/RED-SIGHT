@@ -214,6 +214,22 @@ def full_scan(params: dict[str, Any]):
             """
         )
 
+        file_upsert = """
+            INSERT INTO files(
+                path, scan_id, root, size, modified, extension, knowledge_candidate
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path)
+            DO UPDATE SET
+                scan_id=excluded.scan_id,
+                root=excluded.root,
+                size=excluded.size,
+                modified=excluded.modified,
+                extension=excluded.extension,
+                knowledge_candidate=excluded.knowledge_candidate
+        """
+        pending_rows = []
+
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS scan_runs (
@@ -326,27 +342,7 @@ def full_scan(params: dict[str, Any]):
                                 str(path)
                             )
 
-                    db.execute(
-                        """
-                        INSERT INTO files(
-                            path,
-                            scan_id,
-                            root,
-                            size,
-                            modified,
-                            extension,
-                            knowledge_candidate
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(path)
-                        DO UPDATE SET
-                            scan_id=excluded.scan_id,
-                            root=excluded.root,
-                            size=excluded.size,
-                            modified=excluded.modified,
-                            extension=excluded.extension,
-                            knowledge_candidate=excluded.knowledge_candidate
-                        """,
+                    pending_rows.append(
                         (
                             str(path),
                             scan_id,
@@ -355,7 +351,7 @@ def full_scan(params: dict[str, Any]):
                             float(stat.st_mtime),
                             extension,
                             1 if candidate else 0,
-                        ),
+                        )
                     )
 
                     if files_seen % 500 == 0:
@@ -369,6 +365,8 @@ def full_scan(params: dict[str, Any]):
                         )
 
                     if files_seen % 5000 == 0:
+                        db.executemany(file_upsert, pending_rows)
+                        pending_rows.clear()
                         db.commit()
 
                 if not complete:
@@ -376,6 +374,9 @@ def full_scan(params: dict[str, Any]):
 
             if not complete:
                 break
+
+        if pending_rows:
+            db.executemany(file_upsert, pending_rows)
 
         elapsed = (
             time.monotonic()

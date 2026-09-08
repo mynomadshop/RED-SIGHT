@@ -13,9 +13,12 @@ Supports:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,16 @@ class CrossEncoderReranker:
         self._max_batch_size = max_batch_size
         self._model = None
         self._backend = None  # "local", "lmstudio", "keyword"
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(60.0, connect=3.0, pool=3.0),
+                limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
+                trust_env=False,
+            )
+        return self._client
 
     async def load(self) -> bool:
         """Load the reranker model."""
@@ -106,37 +119,33 @@ class CrossEncoderReranker:
     async def _load_lmstudio(self) -> bool:
         """Load reranker from LM Studio API."""
         try:
-            import httpx
+            client = self._get_client()
+            resp = await client.get(f"{self._lmstudio_url}/models")
+            resp.raise_for_status()
 
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(f"{self._lmstudio_url}/models")
-                resp.raise_for_status()
+            models_data = resp.json()
+            model_list = models_data.get("data", [])
 
-                models_data = resp.json()
-                model_list = models_data.get("data", [])
+            rerank_model = next(
+                (
+                    str(model.get("id", ""))
+                    for model in model_list
+                    if "rerank" in str(model.get("id", "")).lower()
+                    or "cross" in str(model.get("id", "")).lower()
+                ),
+                "",
+            )
 
-                # Find a model suitable for reranking
-                rerank_model = None
-                for m in model_list:
-                    mid = m.get("id", "")
-                    if "rerank" in mid.lower() or "cross" in mid.lower():
-                        rerank_model = mid
-                        break
+            if not rerank_model:
+                return False
 
-                if not rerank_model and model_list:
-                    rerank_model = model_list[0].get("id", "")
-
-                if not rerank_model:
-                    return False
-
-                self._model = {
-                    "client": client,
-                    "base_url": self._lmstudio_url,
-                    "model_id": rerank_model,
-                }
-                self._backend = "lmstudio"
-                logger.info(f"Using LM Studio reranker: {rerank_model}")
-                return True
+            self._model = {
+                "base_url": self._lmstudio_url,
+                "model_id": rerank_model,
+            }
+            self._backend = "lmstudio"
+            logger.info(f"Using LM Studio reranker: {rerank_model}")
+            return True
 
         except ImportError:
             return False
@@ -167,12 +176,18 @@ class CrossEncoderReranker:
         if self._backend == "keyword":
             return self._rerank_keyword(query, candidates, top_k)
 
-        # Batch process
-        all_results = []
-        for i in range(0, len(candidates), self._max_batch_size):
-            batch = candidates[i : i + self._max_batch_size]
-            batch_results = await self._rerank_batch(query, batch)
-            all_results.extend(batch_results)
+        batches = [
+            candidates[start : start + self._max_batch_size]
+            for start in range(0, len(candidates), self._max_batch_size)
+        ]
+        semaphore = asyncio.Semaphore(3)
+
+        async def run_batch(batch: List[Dict[str, Any]]) -> List[RerankResult]:
+            async with semaphore:
+                return await self._rerank_batch(query, batch)
+
+        batch_results = await asyncio.gather(*(run_batch(batch) for batch in batches))
+        all_results = [item for result in batch_results for item in result]
 
         # Sort by rerank score
         all_results.sort(key=lambda r: r.rerank_score, reverse=True)
@@ -204,7 +219,11 @@ class CrossEncoderReranker:
         pairs = [(query, c.get("content", "")) for c in candidates]
 
         try:
-            scores = self._model.predict(pairs, show_progress_bar=False)
+            scores = await asyncio.to_thread(
+                self._model.predict,
+                pairs,
+                show_progress_bar=False,
+            )
 
             if hasattr(scores, "tolist"):
                 scores = scores.tolist()
@@ -232,40 +251,52 @@ class CrossEncoderReranker:
         candidates: List[Dict[str, Any]],
     ) -> List[RerankResult]:
         """Re-rank using LM Studio API."""
-        import httpx
-
-        client = self._model["client"]
+        client = self._get_client()
         base_url = self._model["base_url"]
         model_id = self._model["model_id"]
 
-        all_results = []
-        for i in range(0, len(candidates), self._max_batch_size):
-            batch = candidates[i : i + self._max_batch_size]
-            pairs = [{"query": query, "text": c.get("content", "")} for c in batch]
+        try:
+            resp = await client.post(
+                f"{base_url}/rerank",
+                json={
+                    "model": model_id,
+                    "query": query,
+                    "documents": [candidate.get("content", "") for candidate in candidates],
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json().get("results", [])
+            if not isinstance(data, list):
+                raise ValueError("invalid reranker response")
 
-            try:
-                resp = await client.post(
-                    f"{base_url}/rerank",
-                    json={"model": model_id, "query": query, "documents": [c.get("content", "") for c in batch]},
+            results = []
+            for fallback_index, item in enumerate(data):
+                if not isinstance(item, dict):
+                    continue
+                index = int(item.get("index", fallback_index))
+                if not 0 <= index < len(candidates):
+                    continue
+                candidate = candidates[index]
+                results.append(
+                    RerankResult(
+                        doc_id=candidate["doc_id"],
+                        original_score=candidate.get("score", 0),
+                        rerank_score=float(item.get("relevance_score", item.get("score", 0))),
+                        content=candidate.get("content", ""),
+                        metadata=candidate.get("metadata", {}),
+                    )
                 )
-                resp.raise_for_status()
-                data = resp.json()
+            if len(results) != len(candidates):
+                raise ValueError("incomplete reranker response")
+            return results
+        except Exception as exc:
+            logger.warning("LM Studio reranking failed; using keyword fallback: %s", exc)
+            return self._rerank_keyword(query, candidates)
 
-                for j, item in enumerate(data.get("results", [])):
-                    idx = i + j
-                    if idx < len(candidates):
-                        all_results.append(RerankResult(
-                            doc_id=candidates[idx]["doc_id"],
-                            original_score=candidates[idx].get("score", 0),
-                            rerank_score=float(item.get("score", 0)),
-                            content=candidates[idx].get("content", ""),
-                            metadata=candidates[idx].get("metadata", {}),
-                        ))
-
-            except Exception as e:
-                logger.warning(f"LM Studio reranking batch failed: {e}")
-
-        return all_results
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     def _rerank_keyword(
         self,

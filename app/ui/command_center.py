@@ -17,6 +17,8 @@ import sys
 import logging
 from typing import Optional
 
+from app.security.local_api import auth_headers
+
 # PySide6 imports
 try:
     from PySide6.QtWidgets import (
@@ -355,14 +357,14 @@ def _redsight_stage10_set_original_message(message):
 
 
 def _redsight_heritage_messages(message):
-    """Build bounded, read-only Hermes heritage context when it is present."""
+    """Build bounded, read-only RedSight heritage context when it is present."""
     import json
     import re
     from pathlib import Path
 
-    root = Path(__file__).resolve().parents[2] / "data" / "heritage" / "hermes"
+    root = Path(__file__).resolve().parents[2] / "data" / "heritage" / "redsight"
     parts = [
-        "You are RedSight. Use inherited Hermes identity, memory, user-profile, "
+        "You are RedSight. Use RED-SIGHT identity, memory, user-profile, "
         "and procedural knowledge only when relevant. Current user instructions "
         "have priority. Never claim that a skill or tool ran unless it actually ran."
     ]
@@ -382,9 +384,9 @@ def _redsight_heritage_messages(message):
             parts.append(part)
             remaining -= len(part)
 
-    add_file("Inherited Hermes SOUL", root / "SOUL.md", 4_000)
-    add_file("Inherited Hermes MEMORY", root / "memories" / "MEMORY.md", 5_000)
-    add_file("Inherited Hermes USER profile", root / "memories" / "USER.md", 3_000)
+    add_file("Inherited RedSight SOUL", root / "SOUL.md", 4_000)
+    add_file("Inherited RedSight MEMORY", root / "memories" / "MEMORY.md", 5_000)
+    add_file("Inherited RedSight USER profile", root / "memories" / "USER.md", 3_000)
 
     try:
         catalog = json.loads((root / "skills_catalog.json").read_text(encoding="utf-8-sig"))
@@ -408,7 +410,7 @@ def _redsight_heritage_messages(message):
             ranked.append((score, item, candidate))
 
     for _, item, candidate in sorted(ranked, key=lambda row: row[0], reverse=True)[:2]:
-        add_file(f"Relevant inherited Hermes skill: {item.get('Name', 'skill')}", candidate, 3_000)
+        add_file(f"Relevant RED-SIGHT skill: {item.get('Name', 'skill')}", candidate, 3_000)
 
     add_file("Migrated MCP inventory", root / "MCP_SERVERS.md", 1_500)
     return [
@@ -426,7 +428,7 @@ def _redsight_stage10_json_request(path, body, timeout=8):
     request = urllib.request.Request(
         "http://127.0.0.1:8765" + path,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **auth_headers()},
         method="POST",
     )
 
@@ -667,7 +669,7 @@ class CommandCenterMainWindow(QMainWindow):
         """Send message to API and display response."""
         try:
             import httpx
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, headers=auth_headers(), trust_env=False) as client:
                 resp = await client.post(
                     f"{self._api_base_url}/api/v1/chat",
                     json={"messages": _redsight_stage10_messages(message), "stream": False},
@@ -706,7 +708,7 @@ class CommandCenterMainWindow(QMainWindow):
         """Update dashboard with latest data."""
         try:
             import httpx
-            with httpx.Client(timeout=5.0) as client:
+            with httpx.Client(timeout=5.0, headers=auth_headers(), trust_env=False) as client:
                 # Get health
                 resp = client.get(f"{self._api_base_url}/api/v1/health")
                 if resp.status_code == 200:

@@ -8,6 +8,7 @@ and hybrid search with dense + sparse vectors.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -190,11 +191,14 @@ class QdrantClientWrapper:
 
     async def ensure_collections(self) -> List[str]:
         """Ensure all known knowledge collections exist. Returns created list."""
-        created = []
-        for coll in KNOWLEDGE_COLLECTIONS:
-            if await self.create_collection(coll):
-                created.append(coll)
-        return created
+        outcomes = await asyncio.gather(
+            *(self.create_collection(collection) for collection in KNOWLEDGE_COLLECTIONS)
+        )
+        return [
+            collection
+            for collection, succeeded in zip(KNOWLEDGE_COLLECTIONS, outcomes)
+            if succeeded
+        ]
 
     async def delete_collection(self, name: str) -> bool:
         """Delete a collection and all its data."""

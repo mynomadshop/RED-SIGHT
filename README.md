@@ -87,6 +87,28 @@ RED_SIGHT_RETRIEVAL__VECTOR_BACKEND_EMBEDDED=false
 RED_SIGHT_ROUTING__VRAM_HEADROOM_GB_PER_GPU=3.0
 ```
 
+The Windows installer and desktop Settings dialog can configure LM Studio,
+OpenAI, Anthropic, Google Gemini, xAI, OpenRouter, Groq, Mistral, Together,
+DeepSeek, Cerebras, or a custom OpenAI-compatible endpoint. Each provider has
+its own editable model and base URL. Cloud keys are encrypted for the current
+Windows user with DPAPI; they are not stored in the repository or passed on a
+command line. A provider is optional, so the UI remains usable before a key or
+local model is available.
+
+For a source or headless install, copy the provider variables you need from
+`.env.example`. Set `REDSIGHT_ACTIVE_PROVIDER`, `REDSIGHT_PROVIDER_MODEL`, and
+the matching API-key variable; cloud providers also require
+`RED_SIGHT_PLATFORM__MODE=cloud_allowed`. The default remains local-first.
+
+### Local API security
+
+All API and action-gateway routes except their health endpoints require a
+per-installation `X-RedSight-Token`. The Windows launcher creates and shares
+this token automatically. For a manual or Docker launch, set one strong random
+`REDSIGHT_LOCAL_API_TOKEN` value in the environment used by the API, gateway,
+and trusted clients. Browser access is restricted to loopback origins unless
+additional exact origins are explicitly configured.
+
 ### Running
 
 ```bash
@@ -102,6 +124,11 @@ redsight-index --path ./projects/bluesight --collection project_code
 # Run benchmarks
 redsight-benchmark --profile local_llm
 ```
+
+In the desktop app, use `/agent GOAL` for a governed tool plan, `/skill NAME |
+INSTRUCTION` to apply a discovered `SKILL.md`, and `/mcp-test SERVER` to verify
+an explicitly configured MCP server. State-changing tool and MCP calls still
+require user approval.
 
 ## Project Structure
 

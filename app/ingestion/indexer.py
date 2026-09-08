@@ -16,7 +16,9 @@ Full ingestion pipeline (blueprint §4):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import inspect
 import logging
 import time
 import uuid
@@ -76,6 +78,7 @@ class Indexer:
         bm25_index: Optional[Any] = None,
         chunk_size: int = 512,
         chunk_overlap: int = 64,
+        max_concurrent: int = 3,
     ):
         self._qdrant = qdrant
         self._metadata = metadata_db
@@ -84,6 +87,9 @@ class Indexer:
         self._parser = DocumentParser(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         self._jobs: Dict[str, IndexJob] = {}
         self._index_version_counter = 0
+        # Shared across every batch request so concurrent API callers cannot
+        # multiply the intended indexing parallelism.
+        self._index_semaphore = asyncio.Semaphore(max(1, min(int(max_concurrent), 32)))
 
     # ── Job Management ──────────────────────────────────────────
 
@@ -277,18 +283,26 @@ class Indexer:
 
             # Persist to SQLite metadata
             if self._metadata:
-                for ec in valid_chunks:
-                    await self._metadata.upsert_chunk(
-                        chunk_id=ec.chunk.chunk_id,
-                        source_file_id=source_file_id or 0,
-                        collection=job.collection,
-                        content=ec.chunk.content,
-                        page_number=ec.chunk.page_number,
-                        heading=ec.chunk.heading,
-                        chunk_index=ec.chunk.chunk_index,
-                        embedding_version=ec.embedding_version,
-                        parser_version=ec.parser_version,
-                    )
+                persisted = await self._metadata.bulk_upsert_chunks(
+                    [
+                        {
+                            "chunk_id": ec.chunk.chunk_id,
+                            "source_file_id": source_file_id or 0,
+                            "collection": job.collection,
+                            "content": ec.chunk.content,
+                            "page_number": ec.chunk.page_number,
+                            "heading": ec.chunk.heading,
+                            "chunk_index": ec.chunk.chunk_index,
+                            "embedding_version": ec.embedding_version,
+                            "parser_version": ec.parser_version,
+                            "offset_start": getattr(ec.chunk, "offset_start", None),
+                            "offset_end": getattr(ec.chunk, "offset_end", None),
+                        }
+                        for ec in valid_chunks
+                    ]
+                )
+                if not persisted:
+                    raise RuntimeError("SQLite chunk batch could not be committed")
 
             # Create index version record
             if self._metadata:
@@ -296,8 +310,8 @@ class Indexer:
                 await self._metadata.create_index_version(
                     collection=job.collection,
                     parser_version="1.0.0",
-                    embedding_model=ec.embedding_model if hasattr(ec, 'embedding_model') else "unknown",
-                    embedding_version=ec.embedding_version,
+                    embedding_model=valid_chunks[0].embedding_model,
+                    embedding_version=valid_chunks[0].embedding_version,
                     points_count=len(valid_chunks),
                 )
                 job.index_version = self._index_version_counter
@@ -408,14 +422,23 @@ class Indexer:
             # Try OpenAI/LM Studio interface
             elif hasattr(self._embedding_model, "embed"):
                 result = self._embedding_model.embed(texts)
+                if inspect.isawaitable(result):
+                    result = await result
                 if result:
                     embeddings = result
                 else:
                     raise ValueError("Embedding model returned empty result")
 
                 embedding_version = "openai_api"
-                embedding_model_name = getattr(
-                    self._embedding_model, "model", "openai-embeddings"
+                info = (
+                    self._embedding_model.get_info()
+                    if hasattr(self._embedding_model, "get_info")
+                    else {}
+                )
+                embedding_model_name = str(
+                    info.get("model_id")
+                    or info.get("model_name")
+                    or "openai-embeddings"
                 )
 
             else:
@@ -452,18 +475,18 @@ class Indexer:
         project: str,
     ) -> List[Dict[str, Any]]:
         """
-        Index multiple files in sequence.
+        Index multiple files with bounded concurrency.
 
         Returns list of job results.
         """
-        results = []
-        for path in file_paths:
-            job_id = await self.create_job(path, collection, project)
-            result = await self.process_job(job_id)
-            results.append(result)
+        async def index_one(path: str) -> Dict[str, Any]:
+            async with self._index_semaphore:
+                job_id = await self.create_job(path, collection, project)
+                result = await self.process_job(job_id)
             logger.info(f"Indexed {path}: {result['status']} ({result['chunks_created']} chunks)")
+            return result
 
-        return results
+        return list(await asyncio.gather(*(index_one(path) for path in file_paths)))
 
 
 # ─── Data Classes ─────────────────────────────────────────────────

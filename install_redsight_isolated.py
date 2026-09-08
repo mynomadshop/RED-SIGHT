@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """
 RedSight Isolated Installer
-Strips hermes-agent paths from sys.path and PYTHONPATH before installing.
+Installs without inherited PYTHONPATH entries.
 """
 import sys
 import os
 import subprocess
-
-# Strip hermes-agent paths from sys.path
-sys.path = [
-    p for p in sys.path
-    if 'hermes' not in p
-]
 
 # Clear PYTHONPATH to prevent re-import
 os.environ.pop('PYTHONPATH', None)

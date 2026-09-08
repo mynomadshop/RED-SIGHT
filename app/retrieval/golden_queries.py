@@ -10,7 +10,7 @@ Sourced from:
 - C:/Users/walim/BrightDataMCP/ — extraction code
 - C:/Users/walim/ComfyUI/ — AI workflows
 - C:/Users/walim/PSX/ — trading platform
-- C:/Users/walim/Hermes/ — agent system
+- C:/Users/walim/RedSight/ — agent system
 - C:/Users/walim/DailyReports/ — BK reports
 """
 
@@ -181,28 +181,28 @@ def create_golden_queries() -> GoldenSet:
         task_type="general",
     ))
 
-    # ── Hermes Agent System Queries ──────────────────────────────
+    # ── RedSight Agent System Queries ──────────────────────────────
     gs.add_query(GoldenQuery(
         query_id="hr_001",
-        query_text="How does Hermes Agent manage skills and memory?",
+        query_text="How does RedSight Agent manage skills and memory?",
         category="docs",
         expected_chunk_ids=["skills", "memory"],
-        expected_source_paths=["Hermes/**/*.md", ".hermes/**/*.md"],
+        expected_source_paths=["RedSight/**/*.md", ".redsight/**/*.md"],
         expected_collections=["knowledge_docs"],
         difficulty="medium",
-        description="Query about Hermes skill and memory system",
+        description="Query about RedSight skill and memory system",
         task_type="general",
     ))
 
     gs.add_query(GoldenQuery(
         query_id="hr_002",
-        query_text="What cron job patterns does Hermes support?",
+        query_text="What cron job patterns does RedSight support?",
         category="docs",
         expected_chunk_ids=["cron", "scheduling"],
-        expected_source_paths=["Hermes/**/*.md"],
+        expected_source_paths=["RedSight/**/*.md"],
         expected_collections=["knowledge_docs"],
         difficulty="medium",
-        description="Query about Hermes scheduling system",
+        description="Query about RedSight scheduling system",
         task_type="general",
     ))
 

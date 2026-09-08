@@ -13,9 +13,9 @@ Provides REST endpoints for the advanced memory system:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from app.memory.memory_store import (
     MemoryStore, MemoryType, MemoryEntry, MemoryPriority,
@@ -250,7 +250,9 @@ async def get_memory_stats():
 # ─── Clear Endpoints ─────────────────────────────────────────────────
 
 @router.delete("/memory/working")
-async def clear_working_memory():
+async def clear_working_memory(
+    confirm: Literal["CLEAR"] = Query(..., description="Explicit destructive-action confirmation"),
+):
     """Clear all working memory."""
     if not memory_store:
         raise HTTPException(status_code=503, detail="Memory store not initialized")
@@ -260,7 +262,9 @@ async def clear_working_memory():
 
 
 @router.delete("/memory/episodic")
-async def clear_episodic_memory():
+async def clear_episodic_memory(
+    confirm: Literal["CLEAR"] = Query(..., description="Explicit destructive-action confirmation"),
+):
     """Clear all episodic memory."""
     if not memory_store:
         raise HTTPException(status_code=503, detail="Memory store not initialized")
@@ -270,7 +274,9 @@ async def clear_episodic_memory():
 
 
 @router.delete("/memory/semantic")
-async def clear_semantic_memory():
+async def clear_semantic_memory(
+    confirm: Literal["CLEAR"] = Query(..., description="Explicit destructive-action confirmation"),
+):
     """Clear all semantic memory."""
     if not memory_store:
         raise HTTPException(status_code=503, detail="Memory store not initialized")
@@ -280,7 +286,9 @@ async def clear_semantic_memory():
 
 
 @router.delete("/memory/procedural")
-async def clear_procedural_memory():
+async def clear_procedural_memory(
+    confirm: Literal["CLEAR"] = Query(..., description="Explicit destructive-action confirmation"),
+):
     """Clear all procedural memory."""
     if not memory_store:
         raise HTTPException(status_code=503, detail="Memory store not initialized")
@@ -290,7 +298,9 @@ async def clear_procedural_memory():
 
 
 @router.delete("/memory")
-async def clear_all_memory():
+async def clear_all_memory(
+    confirm: Literal["CLEAR"] = Query(..., description="Explicit destructive-action confirmation"),
+):
     """Clear all memory types."""
     if not memory_store:
         raise HTTPException(status_code=503, detail="Memory store not initialized")

@@ -37,6 +37,8 @@ class LmStudioProvider:
         self.timeout = float(timeout or settings.timeout_seconds)
         self.max_retries = max(1, int(settings.max_retries))
         self.retry_delay = max(0.0, float(settings.retry_delay_seconds))
+        self.connect_timeout = float(settings.connect_timeout_seconds)
+        self.keepalive_connections = int(settings.keepalive_connections)
         self._client: httpx.AsyncClient | None = None
         self._resolved_model = ""
 
@@ -44,7 +46,17 @@ class LmStudioProvider:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
-                timeout=httpx.Timeout(self.timeout),
+                timeout=httpx.Timeout(
+                    self.timeout,
+                    connect=self.connect_timeout,
+                    pool=self.connect_timeout,
+                    write=min(self.timeout, 30.0),
+                ),
+                limits=httpx.Limits(
+                    max_connections=max(20, self.keepalive_connections),
+                    max_keepalive_connections=self.keepalive_connections,
+                    keepalive_expiry=30.0,
+                ),
                 headers={"Accept": "application/json"},
                 trust_env=False,
             )
@@ -69,6 +81,12 @@ class LmStudioProvider:
                     503,
                     504,
                 }
+                # Replaying a completion after a read timeout can duplicate a
+                # long generation. Retry POST only when no connection was made.
+                if method.upper() not in {"GET", "HEAD"} and not isinstance(
+                    exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+                ):
+                    retryable = False
                 if not retryable or attempt + 1 >= self.max_retries:
                     break
                 await asyncio.sleep(self.retry_delay * (2**attempt))
@@ -139,7 +157,7 @@ class LmStudioProvider:
         messages: list[dict[str, Any]],
         model_id: str | None = None,
         stream: bool = False,
-        temperature: float = 0.7,
+        temperature: float | None = None,
         max_tokens: int | None = None,
         tools: list[dict[str, Any]] | None = None,
         **kwargs: Any,
@@ -151,8 +169,9 @@ class LmStudioProvider:
             "model": await self._resolve_model_id(model_id),
             "messages": messages,
             "stream": stream,
-            "temperature": temperature,
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         if tools:
@@ -265,6 +284,14 @@ class LmStudioProvider:
             raise RuntimeError("LM Studio returned no chat completion")
         first = choices[0]
         message = first.get("message")
+        if isinstance(message, dict) and isinstance(message.get("tool_calls"), list):
+            tool_calls = message["tool_calls"]
+            if tool_calls:
+                payload: dict[str, Any] = {"tool_calls": tool_calls}
+                content = message.get("content")
+                if isinstance(content, str) and content:
+                    payload["content"] = content
+                return json.dumps(payload, ensure_ascii=False)
         if isinstance(message, dict) and isinstance(message.get("content"), str):
             return message["content"]
         if isinstance(first.get("text"), str):

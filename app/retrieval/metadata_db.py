@@ -29,6 +29,7 @@ from sqlalchemy import (
     create_engine,
     func,
 )
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -247,41 +248,53 @@ class MetadataDB:
                            parser_version: str = "unknown",
                            offset_start: Optional[int] = None,
                            offset_end: Optional[int] = None) -> bool:
-        """Insert or update a chunk record."""
+        """Insert or update one chunk through the batch implementation."""
+        return await self.bulk_upsert_chunks(
+            [
+                {
+                    "chunk_id": chunk_id,
+                    "source_file_id": source_file_id,
+                    "collection": collection,
+                    "content": content,
+                    "page_number": page_number,
+                    "heading": heading,
+                    "chunk_index": chunk_index,
+                    "embedding_version": embedding_version,
+                    "parser_version": parser_version,
+                    "offset_start": offset_start,
+                    "offset_end": offset_end,
+                }
+            ]
+        )
+
+    async def bulk_upsert_chunks(self, records: List[Dict[str, Any]]) -> bool:
+        """Upsert a chunk batch with one executemany statement and commit."""
+        if not records:
+            return True
         session = self._session()
         try:
-            existing = session.query(Chunk).filter_by(chunk_id=chunk_id).first()
-            if existing:
-                # Update existing
-                existing.content = content
-                existing.page_number = page_number
-                existing.heading = heading
-                existing.chunk_index = chunk_index
-                existing.embedding_version = embedding_version
-                existing.parser_version = parser_version
-                existing.offset_start = offset_start
-                existing.offset_end = offset_end
-            else:
-                chunk = Chunk(
-                    chunk_id=chunk_id,
-                    source_file_id=source_file_id,
-                    collection=collection,
-                    content=content,
-                    page_number=page_number,
-                    heading=heading,
-                    chunk_index=chunk_index,
-                    embedding_version=embedding_version,
-                    parser_version=parser_version,
-                    offset_start=offset_start,
-                    offset_end=offset_end,
-                )
-                session.add(chunk)
-
+            statement = sqlite_insert(Chunk)
+            statement = statement.on_conflict_do_update(
+                index_elements=[Chunk.chunk_id],
+                set_={
+                    "source_file_id": statement.excluded.source_file_id,
+                    "collection": statement.excluded.collection,
+                    "content": statement.excluded.content,
+                    "page_number": statement.excluded.page_number,
+                    "heading": statement.excluded.heading,
+                    "chunk_index": statement.excluded.chunk_index,
+                    "embedding_version": statement.excluded.embedding_version,
+                    "parser_version": statement.excluded.parser_version,
+                    "offset_start": statement.excluded.offset_start,
+                    "offset_end": statement.excluded.offset_end,
+                },
+            )
+            session.execute(statement, records)
             session.commit()
             return True
         except Exception as e:
             session.rollback()
-            logger.error(f"Failed to upsert chunk {chunk_id}: {e}")
+            logger.error("Failed to bulk upsert %d chunks: %s", len(records), e)
             return False
         finally:
             session.close()
