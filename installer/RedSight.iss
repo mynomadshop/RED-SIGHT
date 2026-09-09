@@ -67,14 +67,15 @@ UninstallDisplayIcon={app}\assets\redsight.ico
 SetupIconFile={#IconFile}
 #endif
 
-; RedSight needs 64-bit Windows 10/11: the Docker WSL2 backend and the
-; PySide6/torch wheels are x64-only.
+; RedSight needs 64-bit Windows 10/11 because the PySide6/torch wheels are
+; x64-only. Optional Docker support has a stricter OS floor enforced by the
+; hardware scan, while native mode remains available here.
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.19041
 
-; Setup provisions Docker Desktop, enables Windows features and writes to
-; Program Files, all of which require elevation. There is no non-admin mode.
+; Setup writes the private runtime to Program Files and can optionally provision
+; Docker/Windows features, so it requires elevation. There is no non-admin mode.
 PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=
 
@@ -97,16 +98,16 @@ SetupMutex=RedSightSetup,Global\RedSightSetup
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Types]
-Name: "full";   Description: "Full installation (recommended)"
+Name: "full";   Description: "Recommended installation (native backend, no Docker required)"
 Name: "custom"; Description: "Custom installation"; Flags: iscustom
 
 [Components]
 Name: "core";     Description: "RedSight application and private Python 3.12 runtime"; \
                   Types: full custom; Flags: fixed
-Name: "docker";   Description: "Docker Desktop + WSL2 backend (required to run the RedSight services)"; \
-                  Types: full
-Name: "images";   Description: "Build the RedSight container images during setup"; \
-                  Types: full
+Name: "docker";   Description: "Optional container backend (Docker Desktop + WSL2); native mode works without it"; \
+                  Types: custom
+Name: "images";   Description: "Build container images during setup (requires the optional Docker component)"; \
+                  Types: custom
 Name: "node";     Description: "Node.js LTS (only for the WhatsApp remote utility)"; \
                   Types: custom
 
@@ -157,7 +158,7 @@ Name: "{group}\Diagnose RedSight"; \
     WorkingDir: "{app}"; Comment: "Find and repair what is stopping RedSight from launching"
 Name: "{group}\Repair RedSight setup"; \
     Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
-    Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\windows\Bootstrap-RedSight.ps1"" -InstallDocker -EnableWsl"; \
+    Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\windows\Bootstrap-RedSight.ps1"" -ProjectRoot ""{app}"""; \
     WorkingDir: "{app}"; Comment: "Re-run RedSight dependency setup"
 Name: "{group}\Uninstall RedSight"; Filename: "{uninstallexe}"
 
@@ -173,7 +174,7 @@ Name: "{group}\Uninstall RedSight"; Filename: "{uninstallexe}"
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
     Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\windows\Bootstrap-RedSight.ps1"" -ProjectRoot ""{app}"" {code:GetBootstrapArgs}"; \
     WorkingDir: "{app}"; \
-    StatusMsg: "Installing dependencies (Python, virtual environments, Docker) - this can take a while..."; \
+    StatusMsg: "Installing RedSight and the dependencies for the selected profile - this can take a while..."; \
     Flags: runascurrentuser waituntilterminated; \
     Components: core
 
@@ -204,7 +205,7 @@ Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\__pycache__"
 
 [Messages]
-WelcomeLabel2=This will install [name/ver] on your computer.%n%nSetup checks for everything RedSight needs - Python 3.12, its virtual environments, WSL2 and Docker Desktop - and installs and configures whatever is missing. A private Python 3.12 runtime is included, so no separate Python installation is required.%n%nAn internet connection is needed unless you are installing from a prepared offline bundle.
+WelcomeLabel2=This will install [name/ver] on your computer.%n%nSetup detects whether this is a laptop/API or NVIDIA CUDA installation, then installs the matching Python environment. The recommended native backend needs no Docker or WSL2. A private Python 3.12 runtime is included, so no separate Python installation is required.%n%nDocker remains available as an optional custom component. An internet connection is needed unless you are installing from a prepared offline bundle.
 
 [Code]
 const
@@ -864,8 +865,8 @@ begin
   begin
     if not WizardSilent then
       MsgBox('RedSight setup must be run as Administrator.' + #13#10#13#10 +
-             'It installs Docker Desktop, enables the WSL2 Windows features and ' +
-             'writes to Program Files. Right-click the installer and choose ' +
+             'It installs the private runtime under Program Files and can optionally ' +
+             'enable WSL2 and Docker Desktop. Right-click the installer and choose ' +
              '"Run as administrator".', mbCriticalError, MB_OK)
     else
       Log('silent setup: administrator privileges are required; aborting');
@@ -884,8 +885,8 @@ begin
         Exit;
       end;
       if MsgBox('Only ' + IntToStr(FreeMB) + ' MB is free on the system drive.' + #13#10#13#10 +
-                'RedSight needs roughly 8 GB once its Python packages and Docker ' +
-                'images are installed. Continue anyway?',
+                'Allow at least 8 GB for RedSight and its Python environment; optional ' +
+                'Docker images require additional space. Continue anyway?',
                 mbConfirmation, MB_YESNO) <> IDYES then
       begin
         Result := False;

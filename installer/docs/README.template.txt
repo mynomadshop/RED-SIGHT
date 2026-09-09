@@ -7,11 +7,11 @@ SHA256:  {{SHA256}}
 Built:   {{BUILD_DATE}}
 
 
-WHAT'S NEW IN {{VERSION}} — FULLY AUTOMATIC SETUP
---------------------------------------------------
-Previous releases checked for Python and Docker and, if they were
-missing, stopped and told you to go install them yourself. This release
-installs and configures everything for you.
+WHAT'S NEW IN {{VERSION}} — EASY LAPTOP AND CUDA SETUP
+-------------------------------------------------------
+The same installer now has two clear profiles and a native backend that
+does not require Docker or WSL2. Docker remains an optional custom
+component for users who specifically want containers.
 
 Extract the zip, right-click {{SETUP_EXE}} and choose "Run as
 administrator". Setup then checks every dependency and provisions
@@ -31,17 +31,22 @@ whatever is absent:
     .venv-actions (the action/memory gateway) are created and their
     dependencies installed, with automatic retries on network errors.
 
-  * WSL2 — the Microsoft-Windows-Subsystem-Linux and
-    VirtualMachinePlatform Windows features are enabled and the WSL2
-    kernel is updated. If Windows asks for a restart, setup says so and
-    resumes by itself the next time you sign in.
+  * Laptop / API profile — CPU-only PyTorch and ONNX Runtime are used;
+    NVIDIA, LM Studio, Docker and WSL2 are not required. The provider and
+    key can be chosen in setup or configured later in Settings.
 
-  * Docker Desktop — downloaded from Docker's official site and
-    installed silently, your account is added to the docker-users
-    group, and the engine is started and waited for.
+  * NVIDIA CUDA profile — setup detects all NVIDIA GPUs, selects the
+    matching PyTorch wheel, and runs a real CUDA allocation on each one.
+    RTX 50-series/Blackwell devices receive CUDA 12.8 / sm_120 support.
 
-  * Docker images — the redsight and qdrant images are built during
-    setup if you leave that component selected.
+  * Native backend — the recommended default runs RedSight directly in
+    its private Python environment with an embedded vector store. It
+    needs no container engine and does not produce Docker pipe errors.
+
+  * Optional Docker/WSL2 — when selected under Custom installation,
+    setup enables WSL2, installs Docker Desktop, starts its engine and
+    can build the RedSight/Qdrant images. If Windows needs a restart,
+    setup resumes automatically at the next sign-in.
 
   * Node.js — optional, and only if you select it. It is needed solely
     for the WhatsApp remote utility.
@@ -285,10 +290,10 @@ REQUIREMENTS
 ------------
   * Windows 10 version 2004 (build 19041) or newer, 64-bit, or
     Windows 11.
-  * Administrator rights. Setup enables Windows features and installs
-    Docker Desktop, so it cannot run unelevated.
-  * About 8 GB of free disk space once the Python packages and Docker
-    images are in place.
+  * Administrator rights. Setup installs the private runtime under
+    Program Files and can optionally enable Windows features.
+  * At least 8 GB of free disk space for RedSight and its Python
+    environment. Optional Docker images require additional space.
   * An internet connection, unless you are installing from a prepared
     full offline bundle. The bundled Python runtime itself never needs
     the network.
@@ -301,21 +306,24 @@ INSTALLING
 ----------
   1. Extract this zip anywhere.
   2. Right-click {{SETUP_EXE}} → "Run as administrator".
-  3. On the setup options page, choose the components you want. The
-     defaults install everything, including Docker Desktop and the
-     container images.
-  4. Let setup run. Installing Docker Desktop and building the images
-     takes a while — progress is shown, and everything is written to
-     the log (see TROUBLESHOOTING).
-  5. If setup reports that a restart is needed, restart. Setup resumes
-     automatically when you sign back in.
-  6. Use the "RedSight" shortcut on your Desktop or in the Start Menu.
+  3. Choose one setup type:
+       - Laptop or PC / cloud API: CPU-only, native, no Docker.
+       - NVIDIA GPU / CUDA: GPU wheels plus LM Studio, still native by
+         default and compatible with dual-GPU desktops.
+  4. Keep Recommended installation for the simplest native setup. Use
+     Custom installation only if you want Docker/WSL2 containers or the
+     optional WhatsApp/Node.js utility.
+  5. Let setup run. Progress and complete details are written to the
+     log (see TROUBLESHOOTING).
+  6. If optional container setup reports that a restart is needed,
+     restart. Setup resumes automatically when you sign back in.
+  7. Use the "RedSight" shortcut on your Desktop or in the Start Menu.
 
 Silent / unattended install:
 
     {{SETUP_EXE}} /VERYSILENT /SUPPRESSMSGBOXES
 
-Core only, without Docker (useful for CI or a first look):
+Explicit native/core install without Docker:
 
     {{SETUP_EXE}} /VERYSILENT /COMPONENTS="core"
 
@@ -347,9 +355,9 @@ FIRST LAUNCH
 -------------
 The "RedSight" shortcut picks the right launcher for how setup
 configured this machine, and will:
-  1. Start Docker Desktop and the Qdrant/RedSight containers, or, in
-     native mode, start the backend in-process with an embedded vector
-     store and no containers at all.
+  1. In the recommended native mode, start the backend in-process with
+     an embedded vector store and no containers. In optional container
+     mode, start Docker Desktop and the Qdrant/RedSight containers.
   2. Start the action/memory gateway on 127.0.0.1:8765 and wait until it
      answers. The UI needs it for memory and for chat, so a failure here
      is reported rather than passed over.
@@ -364,8 +372,8 @@ reinstall needed. To point RedSight at a different address or pick a
 different model, use Settings ▸ LM Studio, which tests the endpoint and
 lists the models it actually has.
 
-If the Docker images were not built during setup, the first launch
-builds them, which takes several minutes once.
+In optional container mode, the first launch builds missing Docker
+images, which can take several minutes once.
 
 
 TROUBLESHOOTING
@@ -399,7 +407,7 @@ entry "Repair RedSight setup", or run:
 
     powershell -ExecutionPolicy Bypass -File ^
       "C:\Program Files\RedSight\scripts\windows\Bootstrap-RedSight.ps1" ^
-      -InstallDocker -EnableWsl
+      -ProjectRoot "C:\Program Files\RedSight"
 
 Setup exit codes:
     0  everything requested succeeded
@@ -416,7 +424,8 @@ network access. For a machine with no internet at all:
   * Tick "Offline install — never download" on the setup options page
     (or pass -OfflineOnly to Bootstrap-RedSight.ps1). Setup will then
     fail loudly rather than silently trying to reach the network.
-  * Place a copy of Docker Desktop's installer, named
+  * If optional container mode is selected, place a copy of Docker
+    Desktop's installer, named
     DockerDesktopInstaller.exe, in the install directory's
     runtime\bundle folder, or in %ProgramData%\RedSight\downloads,
     before running setup.

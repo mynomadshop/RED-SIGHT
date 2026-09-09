@@ -410,7 +410,7 @@ if ($requiredFailed.Count) {
     Write-RsLog 'Then apply the repairs it found:' -Level INFO
     Write-RsLog "  powershell -ExecutionPolicy Bypass -File `"$ProjectRoot\scripts\windows\Repair-RedSight.ps1`" -Fix" -Level INFO
     Write-RsLog 'Or re-run dependency setup from scratch:' -Level INFO
-    Write-RsLog "  powershell -ExecutionPolicy Bypass -File `"$ProjectRoot\scripts\windows\Bootstrap-RedSight.ps1`" -InstallDocker -EnableWsl" -Level INFO
+    Write-RsLog "  powershell -ExecutionPolicy Bypass -File `"$ProjectRoot\scripts\windows\Bootstrap-RedSight.ps1`" -ProjectRoot `"$ProjectRoot`"" -Level INFO
 } else {
     Write-RsLog 'RedSight is ready to launch.' -Level OK
 }

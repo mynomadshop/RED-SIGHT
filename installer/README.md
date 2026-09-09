@@ -7,6 +7,27 @@ The design goal for this generation of the installer: **after running
 `RedSight-Setup-<version>.exe` as Administrator, RedSight launches and works.**
 Setup never stops to tell the user to go and install a dependency by hand.
 
+## Install the release build
+
+Download the `RedSightDesktopWindows-11.6.0` artifact from a successful
+**Build Windows installer** run, extract it, then run
+`RedSight-Setup-11.6.0.exe` as Administrator.
+
+- **Laptop / API:** choose *Laptop or PC - cloud AI providers using an API
+  key* and keep the recommended native installation. It uses CPU-only wheels,
+  does not touch Docker or WSL2, and can be completed without entering a key.
+  Configure or change the provider later under **Settings -> AI Provider**.
+- **NVIDIA CUDA desktop:** confirm `nvidia-smi` responds, choose *NVIDIA GPU -
+  local inference with CUDA acceleration*, and keep the recommended native
+  installation. RTX 50-series cards receive the CUDA 12.8/`sm_120` PyTorch
+  build. Start a model in LM Studio at the endpoint shown by setup.
+- **Container mode:** choose *Custom installation* and select Docker only when
+  containers are specifically wanted. CUDA acceleration and LM Studio do not
+  require Docker.
+
+The final setup page can run the health check. A native installation reports
+Docker and WSL2 as *not needed*, not as failures.
+
 ## Layout
 
 ```
@@ -46,7 +67,7 @@ installer/
 
 ## Setup options
 
-The wizard asks two things before installing anything, both informed by a
+The wizard collects four choices before installing anything, informed by a
 hardware scan that runs first:
 
 1. **Setup type** - *NVIDIA GPU (CUDA local inference)* or *Laptop / PC (cloud
@@ -54,12 +75,12 @@ hardware scan that runs first:
    recommendation is preselected, and choosing CUDA without a responding NVIDIA
    driver warns before continuing.
 2. **AI provider and key** (API profile only) - LM Studio, OpenAI, Anthropic,
-   Gemini, xAI or a custom OpenAI-compatible endpoint.
+   Gemini, xAI, OpenRouter, Groq, Mistral, Together, DeepSeek, Cerebras, or a
+   custom OpenAI-compatible endpoint. A key can be added later in Settings.
 3. **LM Studio endpoint** (whenever a local model will be used) - the address of
    the local server, an optional model, and whether to reduce desktop animation.
-
-It then asks for the **working folder**, which setup creates and wires into
-`.env`.
+4. **Working folder** - a writable location that setup creates and wires into
+   `.env`.
 
 Only one RedSight installation can exist on a device: when setup finds one
 recorded in the registry it installs over it and skips the directory page, so a
@@ -69,8 +90,9 @@ second copy cannot be created by changing the path.
 
 | | CUDA profile | API / laptop profile |
 | --- | --- | --- |
-| PyTorch | `--index-url .../whl/cu124`, ~2.5 GB | `--index-url .../whl/cpu`, ~200 MB |
+| PyTorch | CUDA 12.8 for Blackwell/RTX 50-series; CUDA 12.4 for earlier supported GPUs | CPU-only index |
 | ONNX Runtime | `onnxruntime-gpu` | `onnxruntime` |
+| Default backend | Native, no Docker/WSL2 | Native, no Docker/WSL2 |
 
 On a machine with no working NVIDIA driver the CUDA build is not merely wasted
 download - it fails to load. `PreInstalls` are installed before anything else so
@@ -292,15 +314,14 @@ favour of `<UserProfile>\RedSight-Data`, with its existing contents untouched.
 | Backend | `docker compose` (redsight + qdrant) | `scripts/start.py` in `.venv-ui` |
 | Vector store | Qdrant container | Qdrant embedded, in-process |
 | Requires | WSL2 + Docker Desktop | nothing beyond Python |
-| Chosen when | firmware virtualization is available | it is not, or Docker is skipped |
+| Chosen when | the optional Docker component is selected and WSL2 is available | recommended default, or Docker is skipped/unavailable |
 
-Native mode exists because of a real failure: setup used to enable the WSL2
-features and install Docker on laptops whose firmware has virtualization
-switched off, leaving a machine that reboots and still cannot start the engine.
-Setup now refuses that path up front, explains how to enable virtualization in
-the firmware, and runs RedSight without containers instead - which works because
-the application's vector store already supports `QdrantClient(path=...)` and
-falls back to it when no server answers.
+Native mode is the recommended default because it removes Docker, WSL2, nested
+virtualization, an extra daemon, and a possible reboot from the normal install.
+Container mode remains available when deliberately selected. If it is requested
+on a machine that cannot run WSL2, setup explains the blocker and safely uses
+native mode instead. The application's vector store supports
+`QdrantClient(path=...)`, so local persistence works without a Qdrant container.
 
 ## What setup provisions
 
@@ -309,10 +330,10 @@ falls back to it when no server answers.
 | Python 3.12 | `runtime\python`, then `py -3.12`, `python3.12`, `python`, then standard install dirs — version-gated to `3.12 <= v < 3.14` and required to import `venv`, `ensurepip`, `ssl`, `sqlite3`, `ctypes` | expanding the **bundled** official CPython (offline), else the python.org installer |
 | pip / setuptools / wheel | `python -m pip` | the bundled wheelhouse (`--find-links`), offline-capable |
 | `.venv-ui`, `.venv-actions` | `Scripts\python.exe` plus a real import check | `python -m venv` + `pip install` with retries |
-| WSL2 | `Get-WindowsOptionalFeature` / `dism`, `wsl --status` | `dism /enable-feature`, `wsl --install --no-distribution`, `wsl --set-default-version 2` |
-| Docker Desktop | `docker` on PATH, `%ProgramFiles%\Docker\Docker\Docker Desktop.exe` | downloaded from docker.com, `install --quiet --accept-license --backend=wsl-2`, user added to `docker-users` |
-| Docker engine running | `docker info` | starts Docker Desktop and polls with a timeout |
-| Docker images | `docker images` | `docker compose build` |
+| WSL2 (optional container mode) | `Get-WindowsOptionalFeature` / `dism`, `wsl --status` | `dism /enable-feature`, `wsl --install --no-distribution`, `wsl --set-default-version 2` |
+| Docker Desktop (optional) | `docker` on PATH, `%ProgramFiles%\Docker\Docker\Docker Desktop.exe` | downloaded from docker.com, `install --quiet --accept-license --backend=wsl-2`, user added to `docker-users` |
+| Docker engine (optional) | `docker info` | starts Docker Desktop and polls with a timeout |
+| Docker images (optional) | `docker images` | `docker compose build` |
 | Node.js (optional) | `node --version` | latest LTS MSI from the nodejs.org dist index |
 | `.env` | file exists | copied from `.env.example` |
 | Install paths | scan for `<drive>:\...\RedSight` | rewritten to the real install directory |

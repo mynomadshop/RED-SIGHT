@@ -299,6 +299,9 @@ jobs:
             & $uiPy -c "import PySide6, qasync, httpx, pydantic; print('imports ok')"
             Check '.venv-ui imports PySide6/qasync/httpx/pydantic' ($LASTEXITCODE -eq 0)
 
+            $torchRuntime = & $uiPy -c "import torch; print(torch.version.cuda or 'cpu')"
+            Check 'laptop/API profile installs CPU-only PyTorch' ($torchRuntime -eq 'cpu') "(got $torchRuntime)"
+
             # Prove the real installed widgets construct without a provider
             # file, API key, or LM Studio configuration. This catches missing
             # overlay bases that compile cleanly but silently remove Settings.
@@ -339,12 +342,15 @@ jobs:
             $s = Get-Content "$env:LOCALAPPDATA\RedSight\setup-summary.json" -Raw | ConvertFrom-Json
             Write-Host "  summary: python=$($s.pythonVersion) rewritten=$($s.pathsRewritten)"
             Check 'summary records a python version' ([bool]$s.pythonVersion)
+            Check 'hardware selected the laptop/API dependency profile' ($s.setupProfile -eq 'api') "(got $($s.setupProfile))"
+            Check 'recommended install selected the native backend' ($s.runtimeMode -eq 'native') "(got $($s.runtimeMode))"
+            Check 'native install did not touch the Docker engine' (-not $s.PSObject.Properties['dockerRunning'])
           }
 
           # The health check must run and classify Docker's absence, not crash.
           & powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
               -File "$dest\scripts\windows\Verify-RedSightSetup.ps1"
-          Write-Host "health check exit code: $LASTEXITCODE (1 is expected here: no Docker on the runner)"
+          Write-Host "health check exit code: $LASTEXITCODE (Docker is not required in native mode)"
           Check 'health check ran to completion' ($LASTEXITCODE -in @(0, 1))
 
           if ($fail) { throw "$fail install verification check(s) failed" }
@@ -354,14 +360,23 @@ jobs:
       - name: Verify idempotent re-run
         shell: pwsh
         run: |
-          # Re-running setup must repair rather than duplicate or break.
+          # No runtime flags: this is the same route as the Start Menu repair
+          # shortcut. It must preserve native mode rather than introducing
+          # Docker on a laptop/API installation.
           & powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
               -File 'C:\RedSightTest\scripts\windows\Bootstrap-RedSight.ps1' `
-              -ProjectRoot 'C:\RedSightTest' -SkipDocker -SkipShortcut
+              -ProjectRoot 'C:\RedSightTest' -SkipShortcut
           Write-Host "second run exit code: $LASTEXITCODE"
           if ($LASTEXITCODE -notin @(0, 2)) { throw "re-run returned $LASTEXITCODE" }
           if (-not (Test-Path 'C:\RedSightTest\.venv-ui\Scripts\python.exe')) {
             throw '.venv-ui disappeared on re-run'
+          }
+          $s = Get-Content "$env:LOCALAPPDATA\RedSight\setup-summary.json" -Raw | ConvertFrom-Json
+          if ($s.runtimeMode -ne 'native') {
+            throw "repair changed the runtime mode to $($s.runtimeMode)"
+          }
+          if ($s.PSObject.Properties['dockerRunning']) {
+            throw 'repair touched Docker on a native installation'
           }
           # powershell.exe returned the accepted warning code 2. GitHub's pwsh
           # wrapper otherwise converts that stale native exit code into a failed
@@ -434,7 +449,8 @@ jobs:
           $tag = "v${{ env.RS_VERSION }}"
           $zip = (Get-ChildItem dist -Filter '*.zip' | Select-Object -First 1).FullName
           $notes = "Automated build of the RedSight Windows installer $tag.`n`n" +
-                   "Setup provisions Python 3.12 (bundled), pip, the virtual environments, " +
-                   "WSL2, Docker Desktop and the container images automatically. " +
+                   "Setup provisions Python 3.12 (bundled), the matching laptop/API or " +
+                   "NVIDIA CUDA environment, and a native backend that needs no Docker. " +
+                   "Docker/WSL2 container mode remains an optional custom component. " +
                    "See README.txt inside the zip for details."
           gh release create $tag $zip --title "RedSight Desktop $tag" --notes $notes

@@ -39,14 +39,55 @@ RedSight is a local-first AI intelligence platform that turns your projects, doc
 
 ## Quick Start
 
-### Prerequisites
+### Windows installer (recommended)
+
+The CI-verified installer supports two deliberate paths from the same setup file.
+Python 3.12 is bundled, and the recommended native backend does not require
+Docker or WSL2.
+
+Download the `RedSightDesktopWindows-11.6.0` artifact from the latest successful
+[Build Windows installer](https://github.com/mynomadshop/RED-SIGHT/actions/workflows/build-windows-installer.yml)
+run, extract it, and run `RedSight-Setup-11.6.0.exe` as Administrator.
+
+#### Laptop / API installation
+
+1. Choose **Laptop or PC - cloud AI providers using an API key**.
+2. Keep **Recommended installation (native backend)** selected. This installs
+   CPU-only PyTorch and does not install or start Docker.
+3. Select OpenAI, Anthropic, Gemini, xAI, OpenRouter, Groq, Mistral, Together,
+   DeepSeek, Cerebras, or a custom OpenAI-compatible provider. The key is
+   optional during setup and can be added later from **Settings -> AI Provider**.
+4. Complete setup and open the RedSight shortcut. No NVIDIA GPU or LM Studio is
+   required for this profile.
+
+#### NVIDIA CUDA desktop installation
+
+1. Install a current NVIDIA driver and confirm `nvidia-smi` responds.
+2. Choose **NVIDIA GPU - local inference with CUDA acceleration**. The hardware
+   scan detects every NVIDIA GPU and selects the compatible PyTorch build;
+   RTX 50-series/Blackwell devices receive the CUDA 12.8 wheel with `sm_120`
+   support.
+3. Keep the recommended native backend for the shortest and most reliable
+   setup. Docker/WSL2 container mode remains available under **Custom
+   installation**, but is not required for CUDA acceleration or LM Studio.
+4. In LM Studio, load a model and enable its local server. The default endpoint
+   is `http://127.0.0.1:1234/v1`; it can be changed later from
+   **Settings -> LM Studio**.
+
+Setup runs a real CUDA allocation check on each detected GPU before reporting
+GPU acceleration as ready. Re-running the installer repairs the recorded
+installation instead of creating a second copy.
+
+### Source installation
+
+#### Prerequisites
 
 - Python 3.12+
 - Windows 11
-- NVIDIA GPU(s) with CUDA 12.x drivers
-- LM Studio (running on http://127.0.0.1:1234)
+- NVIDIA GPU and LM Studio are optional; cloud-provider and CPU-only operation
+  are supported
 
-### Installation
+#### Installation
 
 ```bash
 # Clone the repository

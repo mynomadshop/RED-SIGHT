@@ -6,8 +6,8 @@
 
       * Is there an NVIDIA GPU worth installing CUDA wheels for?
       * Is this a laptop?
-      * Can this machine actually run WSL2 and Docker, or is hardware
-        virtualization switched off in the firmware?
+      * Does this Windows build meet Docker's supported WSL2 floor, and is
+        hardware virtualization available for the optional container mode?
       * Is there enough RAM and disk?
 
     Deliberately STANDALONE - no dot-sourcing, no dependencies on the other
@@ -341,13 +341,17 @@ if ($wslExe) {
     } catch { }
 }
 
-# WSL2 needs Windows 10 2004 (build 19041) or newer AND working virtualization.
-$buildOk = ($osBuild -ge 19041)
+# RedSight native mode supports Windows 10 build 19041+, but the optional
+# Docker Desktop WSL2 backend has a newer support floor: Windows 10 22H2
+# (19045) or Windows 11 23H2 (22631). Do not advertise container mode on an OS
+# Docker itself no longer supports.
+$buildOk = if ($osBuild -ge 22000) { $osBuild -ge 22631 } else { $osBuild -ge 19045 }
 $wsl2Capable = [bool]($buildOk -and $virtualizationAvailable)
 
 $wsl2Blocker = ''
 if (-not $buildOk) {
-    $wsl2Blocker = "Windows build $osBuild is older than 19041 (Windows 10 version 2004), which WSL2 requires."
+    $requiredBuild = if ($osBuild -ge 22000) { '22631 (Windows 11 23H2)' } else { '19045 (Windows 10 22H2)' }
+    $wsl2Blocker = "Windows build $osBuild is below Docker Desktop's supported WSL2 minimum of $requiredBuild. Native RedSight remains available."
 } elseif (-not $virtualizationAvailable) {
     $wsl2Blocker = 'Hardware virtualization is not available. It is switched off in this computer''s firmware (BIOS/UEFI), so WSL2 and Docker Desktop cannot run.'
 }
@@ -376,7 +380,10 @@ try {
 # driver is pure waste, so anything without a working driver gets 'api'.
 $recommendedProfile = if ($cudaCapable -and $maxVramGB -ge 4) { 'cuda' } else { 'api' }
 
-$recommendedRuntime = if ($wsl2Capable) { 'container' } else { 'native' }
+# Native is the reliable default on both laptops and CUDA workstations. The
+# installer still reports whether container mode is available, but only chooses
+# it when the optional Docker component is selected.
+$recommendedRuntime = 'native'
 
 $warnings = New-Object System.Collections.Generic.List[string]
 if (-not $virtualizationAvailable) {

@@ -272,14 +272,17 @@ foreach ($pre in $plan.PreInstalls) { Write-RsLog "    will install: $($pre.Labe
 Set-RsSummary -Key 'setupProfile' -Value $plan.Profile
 Set-RsSummary -Key 'setupProfileReason' -Value $plan.Reason
 
-# Container mode needs WSL2. Anything that rules WSL2 out forces native mode -
-# this is what stops setup from installing Docker on a machine whose firmware
-# has virtualization disabled and then failing to start the engine.
+# Native mode is the no-surprises default: the backend and embedded vector store
+# run directly in RedSight's private Python environment. Container mode is only
+# selected when the user explicitly requests Docker or an existing installation
+# already records it. This keeps a laptop/API install away from WSL2 and Docker,
+# and it also prevents a repair run from silently changing runtime modes.
 $wsl2Capable = $true
+$wslBlocker = ''
 $nativeReason = ''
 if ($hw) {
     $wsl2Capable = [bool]$hw.virtualization.wsl2Capable
-    if (-not $wsl2Capable) { $nativeReason = [string]$hw.virtualization.wsl2Blocker }
+    if (-not $wsl2Capable) { $wslBlocker = [string]$hw.virtualization.wsl2Blocker }
 }
 
 $effectiveRuntime = $RuntimeMode
@@ -287,19 +290,48 @@ if ($RuntimeMode -eq 'auto') {
     if ($SkipDocker) {
         $effectiveRuntime = 'native'
         $nativeReason = 'Docker setup was skipped'
-    } elseif (-not $wsl2Capable) {
-        $effectiveRuntime = 'native'
+    } elseif ($InstallDocker -or $EnableWsl -or $BuildImages) {
+        if ($wsl2Capable) {
+            $effectiveRuntime = 'container'
+        } else {
+            $effectiveRuntime = 'native'
+            $nativeReason = $wslBlocker
+            $warnings.Add("Docker was requested but this machine cannot run WSL2: $wslBlocker")
+        }
     } else {
-        $effectiveRuntime = 'container'
+        $savedRuntime = ''
+        try {
+            $savedConfig = Read-RsLmStudioConfig
+            $candidate = "$($savedConfig['runtime_mode'])".Trim().ToLowerInvariant()
+            if ($candidate -in @('native', 'container')) { $savedRuntime = $candidate }
+        } catch {
+            Write-RsLog "could not read the saved runtime mode: $($_.Exception.Message)" -Level WARN
+        }
+
+        if ($savedRuntime) {
+            $effectiveRuntime = $savedRuntime
+            $nativeReason = if ($savedRuntime -eq 'native') { 'preserving the installed native runtime' } else { '' }
+            if ($savedRuntime -eq 'container') {
+                # A dependency repair for an existing container installation is
+                # expected to restore Docker if it was removed.
+                $InstallDocker = $true
+                $EnableWsl = $true
+            }
+        } else {
+            $effectiveRuntime = 'native'
+            $nativeReason = 'recommended default; Docker was not requested'
+        }
     }
-} elseif ($RuntimeMode -eq 'container' -and -not $wsl2Capable) {
+}
+if ($effectiveRuntime -eq 'container' -and -not $wsl2Capable) {
     Write-RsLog 'container mode was requested but this machine cannot run WSL2; falling back to native mode' -Level WARN
-    $warnings.Add("Containerized backend was requested but is not possible: $nativeReason")
+    $warnings.Add("Containerized backend was requested but is not possible: $wslBlocker")
     $effectiveRuntime = 'native'
+    $nativeReason = $wslBlocker
 }
 
 if ($effectiveRuntime -eq 'native') {
-    Write-RsLog "runtime mode: NATIVE$(if ($nativeReason) { " ($nativeReason)" })" -Level WARN
+    Write-RsLog "runtime mode: NATIVE$(if ($nativeReason) { " ($nativeReason)" })" -Level OK
     # Nothing Docker-related may run in native mode.
     $SkipDocker = $true
     $InstallDocker = $false
@@ -603,9 +635,6 @@ Invoke-RsStep -Name 'Installing WhatsApp bridge Node dependencies' -Action {
 
 if ($effectiveRuntime -eq 'native') {
     Write-RsLog 'Native runtime mode: WSL2 and Docker are not needed and will not be touched.' -Level INFO
-    if ($nativeReason) {
-        $warnings.Add("Running natively rather than in containers: $nativeReason")
-    }
 } elseif ($SkipDocker) {
     Write-RsLog 'Skipping all Docker setup (-SkipDocker).' -Level INFO
 } else {

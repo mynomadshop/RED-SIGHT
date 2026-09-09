@@ -109,12 +109,12 @@ foreach ($directive in @('AppName', 'AppVersion', 'DefaultDirName', 'OutputBaseF
 }
 
 # Elevation and platform gating are load-bearing for this installer: setup
-# installs Docker Desktop and enables Windows features.
+# writes a private runtime to Program Files and can optionally provision Docker.
 Assert-True -Name '[Setup] requires administrator privileges' `
             -Condition ($setupText -match '(?m)^\s*PrivilegesRequired\s*=\s*admin')
 Assert-True -Name '[Setup] restricts to x64' `
             -Condition ($setupText -match '(?m)^\s*ArchitecturesAllowed\s*=')
-Assert-True -Name '[Setup] sets a MinVersion for the WSL2 floor' `
+Assert-True -Name '[Setup] sets the native Windows support floor' `
             -Condition ($setupText -match '(?m)^\s*MinVersion\s*=')
 
 # --------------------------------------------------------------------------
@@ -168,6 +168,19 @@ foreach ($m in [regex]::Matches($codeText, "WizardIsComponentSelected\('([^']+)'
 }
 Assert-True -Name 'WizardIsComponentSelected only names declared components' `
             -Condition ($badComponentRefs.Count -eq 0) -Detail "(bad: $($badComponentRefs -join ', '))"
+
+# Accepting every default must produce the low-friction native installation.
+# Docker remains selectable under Custom installation, but is never implicit.
+$dockerEntry = $bySection['Components'] | Where-Object { $_ -match '(?i)Name:\s*"docker"' } | Select-Object -First 1
+$imagesEntry = $bySection['Components'] | Where-Object { $_ -match '(?i)Name:\s*"images"' } | Select-Object -First 1
+Assert-True -Name 'Docker is an optional custom component' `
+            -Condition ($dockerEntry -and $dockerEntry -match '(?i)Types:\s*custom' -and $dockerEntry -notmatch '(?i)Types:\s*full')
+Assert-True -Name 'container image building is not selected by default' `
+            -Condition ($imagesEntry -and $imagesEntry -match '(?i)Types:\s*custom' -and $imagesEntry -notmatch '(?i)Types:\s*full')
+
+$repairEntry = $bySection['Icons'] | Where-Object { $_ -match '(?i)Repair RedSight setup' } | Select-Object -First 1
+Assert-True -Name 'the setup repair shortcut never forces Docker onto native installs' `
+            -Condition ($repairEntry -and $repairEntry -notmatch '(?i)-InstallDocker|-EnableWsl' -and $repairEntry -match '(?i)-ProjectRoot')
 
 $badTaskRefs = New-Object System.Collections.Generic.List[string]
 foreach ($m in [regex]::Matches($codeText, "WizardIsTaskSelected\('([^']+)'\)")) {

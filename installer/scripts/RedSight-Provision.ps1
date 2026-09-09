@@ -8,8 +8,8 @@
         providers), which decide the Python wheels that get downloaded
       * the RedSight working directory, created and wired into .env
       * the AI provider and its API key, written where the Settings dialog reads
-      * runtime mode - containers when the machine can run WSL2/Docker, native
-        (embedded Qdrant, backend in-process) when it cannot
+      * runtime mode - native by default (embedded Qdrant, backend in-process),
+        with containers only when Docker/WSL2 is explicitly selected
       * MCP server registration from a directory or config file
       * the runtime configuration module, copied into each virtualenv so every
         RedSight process reads the same LM Studio endpoint

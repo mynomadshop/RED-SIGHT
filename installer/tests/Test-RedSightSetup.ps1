@@ -598,6 +598,11 @@ Write-Host "`n== RedSight-Hardware.ps1 ==" -ForegroundColor Cyan
 # the Windows APIs it queries exist - it runs before anything is installed.
 $hwScript = Join-Path $scripts 'RedSight-Hardware.ps1'
 Assert-True -Name 'hardware scanner is present' -Condition (Test-Path -LiteralPath $hwScript)
+$hwScriptText = Get-Content -LiteralPath $hwScript -Raw
+Assert-True -Name 'Docker gating follows the current Windows 10 support floor' `
+            -Condition ($hwScriptText -match '19045')
+Assert-True -Name 'Docker gating follows the current Windows 11 support floor' `
+            -Condition ($hwScriptText -match '22631')
 
 $hwOut = Join-Path $tmpRoot 'hw.json'
 $pwshExe = (Get-Process -Id $PID).Path
@@ -614,8 +619,8 @@ if (Test-Path -LiteralPath $hwOut) {
     }
     Assert-True -Name 'recommends a known setup profile' `
                 -Condition ($hwJson.recommend.setupProfile -in @('cuda', 'api'))
-    Assert-True -Name 'recommends a known runtime mode' `
-                -Condition ($hwJson.recommend.runtimeMode -in @('container', 'native'))
+    Assert-Equal -Name 'recommends the low-friction native runtime' -Expected 'native' `
+                 -Actual $hwJson.recommend.runtimeMode
     Assert-True -Name 'reports a wsl2Capable verdict' `
                 -Condition ($hwJson.virtualization.PSObject.Properties['wsl2Capable'] -ne $null)
     foreach ($gk in @('nvidiaGpuCount', 'totalVramGB', 'names', 'nvidia')) {
