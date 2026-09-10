@@ -302,7 +302,7 @@ class TestMultiAgentOrchestrator:
     
     def test_register_agent(self):
         """Test registering agents."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(executor=AsyncMock(return_value="Test agent completed"))
         
         orchestrator.register_agent(
             agent_id="researcher1",
@@ -320,7 +320,7 @@ class TestMultiAgentOrchestrator:
     
     def test_get_agent_status(self):
         """Test getting agent status."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(executor=AsyncMock(return_value="Test agent completed"))
         orchestrator.register_agent("a1", AgentRole.RESEARCHER, [])
         
         status = orchestrator.get_agent_status("a1")
@@ -330,7 +330,7 @@ class TestMultiAgentOrchestrator:
     
     def test_get_task_status(self):
         """Test getting task status."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(executor=AsyncMock(return_value="Test agent completed"))
         orchestrator.register_agent("a1", AgentRole.RESEARCHER, [])
         
         status = orchestrator.get_task_status()
@@ -338,7 +338,7 @@ class TestMultiAgentOrchestrator:
     
     def test_orchestration_with_single_task(self):
         """Test orchestration with a single task."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(executor=AsyncMock(return_value="Test agent completed"))
         orchestrator.register_agent("r1", AgentRole.RESEARCHER, [])
         
         tasks = [
@@ -360,7 +360,7 @@ class TestMultiAgentOrchestrator:
     
     def test_orchestration_with_multiple_tasks(self):
         """Test orchestration with multiple tasks."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(executor=AsyncMock(return_value="Test agent completed"))
         orchestrator.register_agent("r1", AgentRole.RESEARCHER, [])
         orchestrator.register_agent("c1", AgentRole.CODER, [])
         
@@ -380,7 +380,7 @@ class TestMultiAgentOrchestrator:
     
     def test_orchestration_with_dependencies(self):
         """Test orchestration with task dependencies."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(executor=AsyncMock(return_value="Test agent completed"))
         orchestrator.register_agent("r1", AgentRole.RESEARCHER, [])
         orchestrator.register_agent("c1", AgentRole.CODER, [])
         
@@ -403,7 +403,7 @@ class TestMultiAgentOrchestrator:
     
     def test_orchestration_with_unregistered_agent(self):
         """Test orchestration fails with unregistered agent."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(executor=AsyncMock(return_value="Test agent completed"))
         
         tasks = [{"description": "Test", "role": "researcher"}]
         
@@ -418,7 +418,7 @@ class TestMultiAgentOrchestrator:
     
     def test_get_messages(self):
         """Test getting messages."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(executor=AsyncMock(return_value="Test agent completed"))
         orchestrator.register_agent("a1", AgentRole.RESEARCHER, [])
         
         msg = AgentMessage(
@@ -434,7 +434,7 @@ class TestMultiAgentOrchestrator:
     
     def test_get_orchestration_history(self):
         """Test getting orchestration history."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(executor=AsyncMock(return_value="Test agent completed"))
         orchestrator.register_agent("a1", AgentRole.RESEARCHER, [])
         
         # Run an orchestration
@@ -446,7 +446,7 @@ class TestMultiAgentOrchestrator:
     
     def test_reset(self):
         """Test resetting orchestrator state."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(executor=AsyncMock(return_value="Test agent completed"))
         orchestrator.register_agent("a1", AgentRole.RESEARCHER, [])
         
         tasks = [{"description": "Test", "role": "researcher"}]
@@ -867,7 +867,7 @@ class TestMultiAgentIntegration:
     
     def test_full_workflow(self):
         """Test full multi-agent workflow."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(executor=AsyncMock(return_value="Test agent completed"))
         
         # Register agents
         orchestrator.register_agent("r1", AgentRole.RESEARCHER, ["web_search"])
@@ -894,7 +894,7 @@ class TestMultiAgentIntegration:
     
     def test_agent_communication(self):
         """Test inter-agent communication."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(executor=AsyncMock(return_value="Test agent completed"))
         orchestrator.register_agent("a1", AgentRole.RESEARCHER, [])
         
         # Add messages

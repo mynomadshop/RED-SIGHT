@@ -856,7 +856,11 @@ Assert-True -Name 'the gateway is served by uvicorn' `
 Assert-True -Name 'the gateway is never run as a plain script' `
             -Condition ($nativeText -notmatch "ArgumentList @\(\`$Gateway\)")
 Assert-True -Name 'the launcher waits for the gateway to answer' `
-            -Condition ($nativeText -match '/memory/status')
+            -Condition ($nativeText -match '\$GatewayPort/health' -and $nativeText -match 'Wait-Endpoint -Url \$GatewayHealth')
+Assert-True -Name 'the launcher allocates available ports before starting services' `
+            -Condition ($nativeText -match '-m app.runtime_profile' -and $nativeText -match 'NativeProfile.environment')
+Assert-True -Name 'health checks require the expected service and installation identity' `
+            -Condition ($nativeText -match 'body.service -eq' -and $nativeText -match 'body.instance_id -eq')
 Assert-True -Name 'a gateway failure is explained in terms of the symptom' `
             -Condition ($nativeText -match 'memory will show as missing')
 Assert-True -Name 'the LM Studio endpoint is exported into the environment' `

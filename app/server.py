@@ -90,6 +90,11 @@ plugin_manager: Optional["PluginManager"] = None
 event_bus: Optional["PluginEventBus"] = None
 
 
+from app.models.provider_settings import SavedProviderSelection
+
+saved_provider_selection = SavedProviderSelection()
+
+
 def get_chat_provider() -> tuple[Any | None, str | None, str]:
     """Return the provider selected in Settings, its model, and its slug.
 
@@ -97,6 +102,14 @@ def get_chat_provider() -> tuple[Any | None, str | None, str]:
     local-first behaviour. An explicit ``none`` is different: it is the valid
     provider-free startup state exposed by the restored Settings dialog.
     """
+    saved = saved_provider_selection.get()
+    if saved is not None:
+        provider, model, active = saved
+        if active == "lmstudio":
+            return lmstudio_provider, model, active
+        if provider is not None and cloud_providers is not None:
+            cloud_providers.register(provider)
+        return saved
     active = os.getenv("REDSIGHT_ACTIVE_PROVIDER", "").strip().lower()
     model = os.getenv("REDSIGHT_PROVIDER_MODEL", "").strip() or None
     if not active or active == "lmstudio":
@@ -821,6 +834,7 @@ async def lifespan(app: FastAPI):
         await shutdown_ws_hub()
         if cloud_providers:
             await cloud_providers.close()
+        await saved_provider_selection.close()
         if gpu_telemetry:
             gpu_telemetry.shutdown()
         if lmstudio_provider:

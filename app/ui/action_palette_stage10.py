@@ -489,31 +489,23 @@ async def _handle_skill_command(window, command: str):
         },
         timeout=1800,
     )
-    if result.get("requires_approval"):
+    return await _resume_approved_run(window, result)
+
+
+async def _resume_approved_run(window, result):
+    while result.get("requires_approval") and result.get("run_id"):
         if window is None:
             return result
         if not s91.s9.base._confirmation(
-            window,
-            "Approve skill-guided actions",
-            (
-                "This inherited skill wants to execute one or more "
-                "state-changing RedSight tools.\n\n"
-                + s91.s9.base._pretty(result.get("plan", []))[:7000]
-                + "\n\nProceed?"
-            ),
+            window, "Approve next agent actions",
+            s91.s9.base._pretty(result.get("plan", []))[:7000] + "\n\nProceed?",
         ):
-            return {"ok": False, "cancelled": True, "plan": result.get("plan")}
+            return {**result, "cancelled": True}
         result = await s91.s9.base._request_async(
-            "/tool/execute",
-            body={
-                "tool": "skills.execute",
-                "params": {
-                    "skill": skill.strip(),
-                    "instruction": instruction.strip(),
-                },
-                "approved": True,
-            },
-            timeout=1800,
+            "/agent/execute",
+            body={"goal": result["goal"], "plan": result["plan"],
+                  "run_id": result["run_id"], "approved": True},
+            timeout=600,
         )
     return result
 
@@ -541,7 +533,8 @@ async def handle_stage10_slash(window, command: str):
         result["help"] = text
         return result
 
-    return await OLD_HANDLE(window, command)
+    result = await OLD_HANDLE(window, command)
+    return await _resume_approved_run(window, result)
 
 
 s91.s9._handle_stage9_slash = handle_stage10_slash

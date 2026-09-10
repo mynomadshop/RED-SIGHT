@@ -459,3 +459,6 @@ WHAT'S IN THIS ZIP
 SUPPORT / MORE INFO
 --------------------
 https://redsight.ai
+
+LAPTOP/API RUNTIME
+The native launcher automatically chooses available backend and action gateway ports and sizes CPU workers to available memory. Settings > AI Provider > Test connection discovers model IDs; Apply activates saved API settings for the next request. Agents use actual tool results for dependent steps and resume reviewed actions without replaying completed work. See docs/LAPTOP_API_RUNTIME.md in the source repository for details.

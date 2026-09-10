@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -71,7 +72,7 @@ def ensure_gateway_stage9(
                 "--host",
                 "127.0.0.1",
                 "--port",
-                "8765",
+                os.environ.get("REDSIGHT_GATEWAY_PORT", "8765"),
                 "--log-level",
                 "warning",
             ],

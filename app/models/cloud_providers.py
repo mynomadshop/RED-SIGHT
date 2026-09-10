@@ -116,6 +116,8 @@ def _openai_message_text(message: Any) -> str:
         payload: dict[str, Any] = {"tool_calls": tool_calls}
         if isinstance(content, str) and content:
             payload["content"] = content
+        if isinstance(message.get("reasoning_content"), str):
+            payload["reasoning_content"] = message["reasoning_content"]
         return json.dumps(payload, ensure_ascii=False)
     return content if isinstance(content, str) else ""
 
@@ -193,7 +195,8 @@ class OpenAIProvider(_BaseProvider):
     ) -> AsyncIterator[str] | str:
         payload = {
             "model": model_id or self.models[0].id,
-            "messages": messages,
+            "messages": [{key: value for key, value in item.items() if key != "provider_content"}
+                         for item in messages],
             **{key: value for key, value in kwargs.items() if value is not None},
         }
         response = await _maybe_await(self._get_client().post("/chat/completions", json=payload))
@@ -347,6 +350,10 @@ class AnthropicProvider(_BaseProvider):
             role = item.get("role")
             if role == "system":
                 continue
+            original = (item.get("provider_content") or {}).get("anthropic_blocks")
+            if role == "assistant" and isinstance(original, list):
+                append_message("assistant", original)
+                continue
             if role == "tool":
                 append_message(
                     "user",
@@ -431,7 +438,8 @@ class AnthropicProvider(_BaseProvider):
             if isinstance(block, dict) and block.get("type") == "tool_use"
         ]
         if tool_calls:
-            payload: dict[str, Any] = {"tool_calls": tool_calls}
+            payload: dict[str, Any] = {"tool_calls": tool_calls,
+                                       "provider_content": {"anthropic_blocks": blocks}}
             if text:
                 payload["content"] = text
             text = json.dumps(payload, ensure_ascii=False)
@@ -499,6 +507,10 @@ class GoogleGeminiProvider(_BaseProvider):
         for item in messages:
             role = item.get("role")
             if role == "system":
+                continue
+            original = (item.get("provider_content") or {}).get("google_parts")
+            if role == "assistant" and isinstance(original, list):
+                append_content("model", original)
                 continue
             if role == "tool":
                 append_content(
@@ -575,7 +587,8 @@ class GoogleGeminiProvider(_BaseProvider):
         response.raise_for_status()
         candidates = response.json().get("candidates", [])
         parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-        text = "".join(part.get("text", "") for part in parts if isinstance(part, dict))
+        text = "".join(part.get("text", "") for part in parts
+                       if isinstance(part, dict) and not part.get("thought"))
         tool_calls = [
             {
                 "type": "function",
@@ -590,7 +603,8 @@ class GoogleGeminiProvider(_BaseProvider):
             if isinstance(part, dict) and isinstance(part.get("functionCall"), dict)
         ]
         if tool_calls:
-            payload: dict[str, Any] = {"tool_calls": tool_calls}
+            payload: dict[str, Any] = {"tool_calls": tool_calls,
+                                       "provider_content": {"google_parts": parts}}
             if text:
                 payload["content"] = text
             text = json.dumps(payload, ensure_ascii=False)

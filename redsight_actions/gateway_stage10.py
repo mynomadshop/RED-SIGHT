@@ -1399,67 +1399,25 @@ async def skill_execute_stage10(params: dict[str, Any], approved: bool) -> dict[
                     "requires_approval": base.tool_requires_approval(tool),
                 }
             )
-    if any(step["requires_approval"] for step in steps) and not approved:
-        return {
-            "ok": False,
-            "requires_approval": True,
-            "skill": item.get("Name"),
-            "plan": steps,
-            "summary": parsed.get("summary", ""),
-        }
-    results = []
-    for number, step in enumerate(steps, start=1):
-        result = await base.execute_tool_core(
-            step["tool"],
-            step["params"],
-            approved=approved if step["requires_approval"] else False,
-        )
-        results.append(
-            {
-                "step": number,
-                "tool": step["tool"],
-                "reason": step["reason"],
-                "result": result,
-            }
-        )
-        if not result.get("ok", False):
-            break
-    synthesis = await base.redsight_chat(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "Use this RED-SIGHT skill as procedural guidance. "
-                    "Describe only actions supported by the supplied tool results. "
-                    "If no tools ran, answer as skill-guided reasoning.\n\n"
-                    + skill_text
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    instruction
-                    + "\n\nACTUAL REDSIGHT TOOL RESULTS:\n"
-                    + json.dumps(results, indent=2, ensure_ascii=False)[:22000]
-                ),
-            },
-        ]
+    result = await base.AGENT_RUNTIME.run(
+        instruction, steps, approved=approved, guidance=skill_text,
+        exclude={"skills.invoke", "skills.execute"},
+        metadata={"skill": item.get("Name"), "execution_mode": "skill_guided_allowlisted_tools"},
     )
-    add_memory(
-        "procedural",
-        f"Skill {item.get('Name')} used for: {instruction[:1000]}",
-        source_session_id=ensure_active_session(),
-        confidence=0.8,
-        metadata={"skill": item.get("Name"), "tool_steps": [s["tool"] for s in steps]},
-    )
-    return {
-        "ok": True,
-        "skill": item.get("Name"),
-        "execution_mode": "skill_guided_allowlisted_tools",
-        "plan": steps,
-        "results": results,
-        "response": synthesis,
-    }
+    if result.get("ok"):
+        add_memory(
+            "procedural", f"Skill {item.get('Name')} used for: {instruction[:1000]}",
+            source_session_id=ensure_active_session(), confidence=0.8,
+            metadata={"skill": item.get("Name"),
+                      "tool_steps": [entry["tool"] for entry in result.get("results", [])]},
+        )
+    return result
+
+
+base.TOOL_SPECS["skills.read"] = {
+    "description": "Read a configured skill's full procedural guidance before taking its actions.",
+    "approval": False, "agent": True, "risk": "low", "params": "skill:str",
+}
 
 
 base.TOOL_SPECS["skills.execute"] = {
@@ -1476,6 +1434,9 @@ base.TOOL_SPECS["skills.execute"] = {
 
 async def execute_tool_stage10(tool: str, params: dict[str, Any],
                                *, approved: bool = False):
+    if tool == "skills.read":
+        item, content = _find_skill(str(params.get("skill", "")))
+        return {"ok": True, "skill": item.get("Name"), "guidance": content}
     if tool == "skills.list":
         return skills_list_stage10(params)
     if tool == "rag.index":
@@ -1513,7 +1474,7 @@ async def create_plan_stage10(goal: str):
     )
     if relevant_skills:
         effective_goal += (
-            "\n\nRELEVANT INHERITED RED-SIGHT SKILLS AVAILABLE FOR skills.execute:\n"
+            "\n\nRELEVANT INHERITED RED-SIGHT SKILLS AVAILABLE FOR skills.read:\n"
             + "\n".join(
                 f"- {item.get('Name')}: {item.get('Description','')}"
                 for item in relevant_skills
@@ -1535,7 +1496,7 @@ base.create_agent_plan = create_plan_stage10
 
 
 async def execute_plan_stage10(goal: str, plan: list[dict[str, Any]],
-                               *, approved: bool):
+                               *, approved: bool, run_id: str | None = None):
     sid = ensure_active_session()
     if not get_active_task(sid):
         set_active_task(goal, sid)
@@ -1545,7 +1506,7 @@ async def execute_plan_stage10(goal: str, plan: list[dict[str, Any]],
         status="running",
         approved=approved,
     )
-    result = await OLD_EXEC_PLAN(goal, plan, approved=approved)
+    result = await OLD_EXEC_PLAN(goal, plan, approved=approved, run_id=run_id)
     completed = 0
     if isinstance(result, dict):
         completed = len(result.get("results", []) or result.get("completed", []) or [])
@@ -1553,7 +1514,7 @@ async def execute_plan_stage10(goal: str, plan: list[dict[str, Any]],
         sid,
         results_json=result,
         current_step=completed,
-        status="active" if isinstance(result, dict) and result.get("ok", False) else "blocked",
+        status="completed" if isinstance(result, dict) and result.get("ok", False) else "blocked",
         approved=approved,
     )
     add_event(sid, "agent_execution", {"goal": goal, "plan": plan, "result": result})

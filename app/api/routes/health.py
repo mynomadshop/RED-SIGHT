@@ -5,6 +5,8 @@ API Routes - Health Check
 Basic health and status endpoints.
 """
 
+import os
+
 from fastapi import APIRouter
 
 from app.config.settings import get_settings
@@ -19,6 +21,8 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "redsight",
+        "instance_id": os.environ.get("REDSIGHT_INSTANCE_ID", ""),
+        "pid": os.getpid(),
         "version": settings.platform.version,
     }
 

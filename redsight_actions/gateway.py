@@ -129,7 +129,7 @@ logger = logging.getLogger(
 
 
 REDSIGHT_URL = (
-    "http://127.0.0.1:8000"
+    os.environ.get("REDSIGHT_API_BASE_URL", "http://127.0.0.1:8000")
 )
 
 BRAVE_URL = (
@@ -261,7 +261,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
             "Test a configured MCP server and list its tools.",
         "risk": "read",
         "approval": False,
-        "agent": False,
+        "agent": True,
         "params":
             "name:str",
     },
@@ -271,7 +271,7 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
             "Test a configured native MCP server and list its tools.",
         "risk": "read",
         "approval": False,
-        "agent": False,
+        "agent": True,
         "params":
             "name:str",
     },
@@ -340,6 +340,8 @@ class AgentPlanRequest(GatewayRequest):
 
 
 class AgentExecuteRequest(GatewayRequest):
+
+    run_id: str | None = Field(default=None, max_length=64)
 
     goal: str = Field(min_length=1, max_length=20_000)
 
@@ -2947,7 +2949,8 @@ async def create_agent_plan(
     goal: str,
 ):
 
-    catalog = agent_tool_catalog()
+    catalog = {name: spec for name, spec in agent_tool_catalog().items()
+               if name not in {"skills.invoke", "skills.execute"}}
 
     system_prompt = (
         "You are the RedSight local action planner. "
@@ -2985,11 +2988,11 @@ async def create_agent_plan(
                     goal,
             },
         ],
-        tools=agent_tool_schemas(),
+        tools=agent_tool_schemas(exclude={"skills.invoke", "skills.execute"}),
         tool_choice="auto",
     )
 
-    native = native_tool_steps(raw)
+    native = native_tool_steps(raw, exclude={"skills.invoke", "skills.execute"})
     if native is not None:
         steps, summary = native
         return {
@@ -3139,129 +3142,32 @@ async def create_agent_plan(
     }
 
 
-async def execute_agent_plan(
-    goal: str,
-    plan: list[dict[str, Any]],
-    *,
-    approved: bool,
-):
+async def _runtime_chat(messages, **kwargs):
+    return await redsight_chat(messages, **kwargs)
 
-    results = []
 
-    for number, step in enumerate(
-        plan[:8],
-        start=1,
-    ):
+async def _runtime_execute(tool, params, **kwargs):
+    # Look up at execution time so the Stage 10 skills/MCP overlay is included.
+    return await execute_tool_core(tool, params, **kwargs)
 
-        tool = str(
-            step.get(
-                "tool",
-                ""
-            )
-        )
 
-        params = step.get(
-            "params",
-            {}
-        )
+from redsight_actions.agent_runtime import AgentRuntime
 
-        if not tool_agent_allowed(
-            tool
-        ):
+AGENT_RUNTIME = AgentRuntime(
+    chat=_runtime_chat,
+    execute=_runtime_execute,
+    tool_specs=lambda: TOOL_SPECS,
+    allowed=tool_agent_allowed,
+    requires_approval=tool_requires_approval,
+    max_steps=int(os.environ.get("REDSIGHT_AGENT_MAX_STEPS", "16")),
+    concurrency=int(os.environ.get("REDSIGHT_AGENT_CONCURRENCY", "2")),
+)
 
-            results.append(
-                {
-                    "step":
-                        number,
 
-                    "tool":
-                        tool,
-
-                    "ok":
-                        False,
-
-                    "error":
-                        "Tool is not agent-allowed.",
-                }
-            )
-
-            continue
-
-        if (
-            tool_requires_approval(
-                tool
-            )
-            and not approved
-        ):
-
-            return {
-                "ok":
-                    False,
-
-                "requires_approval":
-                    True,
-
-                "goal":
-                    goal,
-
-                "plan":
-                    plan,
-
-                "completed":
-                    results,
-
-                "pending_step":
-                    number,
-            }
-
-        result = await execute_tool_core(
-            tool,
-            params,
-            approved=(
-                approved
-                if tool_requires_approval(
-                    tool
-                )
-                else False
-            ),
-        )
-
-        results.append(
-            {
-                "step":
-                    number,
-
-                "tool":
-                    tool,
-
-                "reason":
-                    step.get(
-                        "reason",
-                        ""
-                    ),
-
-                "result":
-                    result,
-            }
-        )
-
-        if not result.get(
-            "ok",
-            False,
-        ):
-
-            break
-
-    return {
-        "ok":
-            True,
-
-        "goal":
-            goal,
-
-        "results":
-            results,
-    }
+async def execute_agent_plan(goal: str, plan: list[dict[str, Any]], *, approved: bool,
+                             run_id: str | None = None):
+    return await AGENT_RUNTIME.run(goal, plan, approved=approved, run_id=run_id,
+                                   exclude={"skills.invoke", "skills.execute"})
 
 
 # ====================================================================
@@ -3317,6 +3223,8 @@ async def health():
 
         "service":
             "redsight-action-gateway",
+        "instance_id": os.environ.get("REDSIGHT_INSTANCE_ID", ""),
+        "pid": os.getpid(),
 
         "brave_configured":
             brave_key()
@@ -3450,6 +3358,7 @@ async def agent_execute(
         request.goal,
         request.plan,
         approved=request.approved,
+        run_id=request.run_id,
     )
 
 

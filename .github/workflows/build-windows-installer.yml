@@ -51,6 +51,12 @@ on:
       - 'installer/**'
       - 'scripts/windows/**'
       - '.github/workflows/build-windows-installer.yml'
+      - 'app/**'
+      - 'redsight/**'
+      - 'redsight_actions/**'
+      - 'ui/**'
+      - 'launch_redsight*.py'
+      - 'pyproject.toml'
 
 permissions:
   contents: write
@@ -356,6 +362,13 @@ jobs:
           if ($fail) { throw "$fail install verification check(s) failed" }
           Write-Host 'all install verification checks passed' -ForegroundColor Green
           exit 0
+
+      - name: Verify native laptop startup and dependent agent actions
+        shell: pwsh
+        run: |
+          & 'C:\RedSightTest\.venv-ui\Scripts\python.exe' `
+            (Resolve-Path 'installer/tests/Test-NativeRuntime.py').Path --root 'C:\RedSightTest'
+          if ($LASTEXITCODE -ne 0) { throw 'Native laptop and agent smoke test failed' }
 
       - name: Verify idempotent re-run
         shell: pwsh

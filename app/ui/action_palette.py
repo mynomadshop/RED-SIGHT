@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 import subprocess
 import time
@@ -29,7 +30,7 @@ from PySide6.QtWidgets import QWidget
 
 
 GATEWAY = (
-    "http://127.0.0.1:8765"
+    os.environ.get("REDSIGHT_GATEWAY_URL", "http://127.0.0.1:8765")
 )
 
 
@@ -217,7 +218,7 @@ def ensure_gateway(
                 "--host",
                 "127.0.0.1",
                 "--port",
-                "8765",
+                os.environ.get("REDSIGHT_GATEWAY_PORT", "8765"),
             ],
             cwd=str(
                 root

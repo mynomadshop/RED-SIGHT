@@ -543,6 +543,10 @@ function Initialize-RsVenv {
         Write-RsLog "    installed $($install.Label)" -Level OK
     }
 
+    $check = Invoke-RsProcess -FilePath $venvPython -Arguments @('-m', 'pip', 'check') -TimeoutSeconds 120 -Quiet
+    if ($check.ExitCode -ne 0) {
+        throw "Dependency conflicts in ${Description}: $($check.StdOut) $($check.StdErr)"
+    }
     return $venvPython
 }
 

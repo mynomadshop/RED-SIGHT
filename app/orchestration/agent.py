@@ -162,6 +162,7 @@ class AgentOrchestrator:
 
             else:
                 result.error = "No suitable skill or tool found for query"
+                result.success = False
 
         except Exception as e:
             result.error = str(e)

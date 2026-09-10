@@ -379,6 +379,18 @@ def environment(path: Path | str | None = None) -> Dict[str, str]:
         vars_["VECTOR_BACKEND_HOST"] = "127.0.0.1"
         vars_.setdefault("VECTOR_BACKEND_URL", "")
     vars_.update(provider_environment())
+    if config["runtime_mode"] == "native":
+        native = _read_object(CONFIG_PATH.with_name("native-runtime.json"))
+        recorded = native.get("environment", {})
+        allowed = {
+            "REDSIGHT_API_URL", "REDSIGHT_API_BASE_URL", "API_BASE_URL",
+            "REDSIGHT_GATEWAY_URL", "REDSIGHT_GATEWAY_PORT", "REDSIGHT_INSTANCE_ID",
+            "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+            "TOKENIZERS_PARALLELISM", "RED_SIGHT_ROUTING__MAX_CONCURRENT_JOBS",
+            "REDSIGHT_AGENT_CONCURRENCY",
+        }
+        if isinstance(recorded, dict):
+            vars_.update({key: str(value) for key, value in recorded.items() if key in allowed})
     return vars_
 
 

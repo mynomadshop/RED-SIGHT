@@ -428,6 +428,7 @@ def probe_provider(
     api_key: str = "",
     custom_base_url: str = "",
     timeout: float = 10.0,
+    models_out: list[str] | None = None,
 ) -> tuple[bool, str]:
     """Perform a bounded, read-only provider connection test."""
     if provider == "none":
@@ -455,6 +456,14 @@ def probe_provider(
         entries = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(entries, list) and isinstance(payload, dict):
             entries = payload.get("models")
+        if models_out is not None and isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                model = str(entry.get("id") or entry.get("name") or "").removeprefix("models/")
+                methods = entry.get("supportedGenerationMethods", [])
+                if model and (provider != "gemini" or not methods or "generateContent" in methods):
+                    models_out.append(model)
         count = len(entries) if isinstance(entries, list) else 0
         return True, f"Connected successfully; {count} model(s) reported."
     except urllib.error.HTTPError as exc:
@@ -477,10 +486,11 @@ class _ProviderProbe(QThread):
         self.provider = provider
         self.api_key = api_key
         self.custom_base_url = custom_base_url
+        self.models: list[str] = []
 
     def run(self) -> None:  # pragma: no cover - exercised through the desktop
         self.completed.emit(
-            *probe_provider(self.provider, self.api_key, self.custom_base_url)
+            *probe_provider(self.provider, self.api_key, self.custom_base_url, models_out=self.models)
         )
 
 
@@ -518,9 +528,9 @@ class ProviderSettingsTab(QWidget):
             self.provider_combo.addItem(label, slug)
         form.addRow("Provider", self.provider_combo)
 
-        self.model_edit = QLineEdit()
-        self.model_edit.setClearButtonEnabled(True)
-        self.model_edit.setPlaceholderText("Provider default")
+        self.model_edit = QComboBox()
+        self.model_edit.setEditable(True)
+        self.model_edit.lineEdit().setPlaceholderText("Test connection to discover models, or enter an ID")
         form.addRow("Model", self.model_edit)
 
         self.key_edit = QLineEdit()
@@ -559,13 +569,14 @@ class ProviderSettingsTab(QWidget):
     def _provider_changed(self, *_args: Any) -> None:
         previous = self._current_provider
         if previous in self._models:
-            self._models[previous] = self.model_edit.text().strip()
+            self._models[previous] = self.model_edit.currentText().strip()
         if previous in self._base_urls:
             self._base_urls[previous] = self.custom_url_edit.text().strip()
 
         provider = str(self.provider_combo.currentData() or "none")
         self._current_provider = provider
-        self.model_edit.setText(self._models.get(provider, ""))
+        self.model_edit.clear()
+        self.model_edit.setCurrentText(self._models.get(provider, ""))
         self.custom_url_edit.setText(self._base_urls.get(provider, ""))
         supports_key = provider not in {"none", "lmstudio"}
         requires_key = provider in PROVIDER_KEY_ENV and provider != "custom"
@@ -629,7 +640,20 @@ class ProviderSettingsTab(QWidget):
         worker.start()
 
     def _test_finished(self, ok: bool, message: str) -> None:
+        worker = self._worker
         self._worker = None
+        if worker is not None and worker.provider != self._current_provider:
+            self.test_button.setEnabled(self._current_provider != "none")
+            return
+        if ok and worker is not None and worker.models:
+            selected = self.model_edit.currentText().strip()
+            self.model_edit.clear()
+            self.model_edit.addItems(sorted(set(worker.models)))
+            if selected:
+                self.model_edit.setCurrentText(selected)
+            if selected and selected not in worker.models:
+                message += " The selected model was not listed; choose an available model or verify its ID."
+
         self.test_button.setEnabled(self._current_provider != "none")
         colour = "#57D68D" if ok else "#FF8A80"
         self.status.setStyleSheet(f"color:{colour};")
@@ -639,7 +663,7 @@ class ProviderSettingsTab(QWidget):
 
     def apply(self) -> Path:
         provider = self._current_provider
-        self._models[provider] = self.model_edit.text().strip()
+        self._models[provider] = self.model_edit.currentText().strip()
         if provider in self._base_urls:
             self._base_urls[provider] = self.custom_url_edit.text().strip()
         config = {
@@ -851,7 +875,7 @@ class AdvancedSettingsDialog(QDialog):
         QMessageBox.information(
             self,
             "RedSight Settings",
-            "Settings saved. Restart RedSight to apply provider or runtime changes to the backend.",
+            "Settings saved. AI provider changes apply to the next request. Restart RedSight for runtime changes.",
         )
         self.accept()
 

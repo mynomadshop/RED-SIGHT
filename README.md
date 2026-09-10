@@ -1,5 +1,7 @@
 # RedSight - High-Performance Local AI Intelligence Platform
 
+For laptop CPU/API setup, automatic port/resource allocation, live provider configuration, and verified multi-step agents, see [Laptop API runtime](docs/LAPTOP_API_RUNTIME.md).
+
 ## Overview
 
 RedSight is a local-first AI intelligence platform that turns your projects, documents, and operational knowledge into a governed retrieval + agent system. It routes each task to the fastest suitable local or cloud model while continuously measuring performance and learning from validated outcomes.

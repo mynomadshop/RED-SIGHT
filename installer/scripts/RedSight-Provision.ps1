@@ -649,7 +649,7 @@ function New-RsNativeLauncher {
 #>
 
 [CmdletBinding()]
-param([switch]$NoUi, [int]$Port = 8000, [int]$GatewayPort = 8765)
+param([switch]$NoUi, [int]$Port = 0, [int]$GatewayPort = 0)
 
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
@@ -670,9 +670,11 @@ function Test-Endpoint {
         $req.Timeout = $TimeoutSeconds * 1000
         $req.Proxy = $null
         $resp = $req.GetResponse()
-        $code = [int]$resp.StatusCode
+        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        try { $body = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
         $resp.Dispose()
-        return ($code -ge 200 -and $code -lt 500)
+        $service = if ($Url -match '/api/v1/health$') { 'redsight' } else { 'redsight-action-gateway' }
+        return ($body.service -eq $service -and $body.instance_id -eq $env:REDSIGHT_INSTANCE_ID)
     } catch {
         return $false
     }
@@ -712,9 +714,6 @@ if (-not (Test-Path -LiteralPath $Python)) {
 $env:PYTHONPATH = $null
 $env:PYTHONHOME = $null
 $env:PYTHONNOUSERSITE = '1'
-$env:REDSIGHT_API_URL = "http://127.0.0.1:$Port"
-$env:REDSIGHT_API_BASE_URL = $env:REDSIGHT_API_URL
-$env:API_BASE_URL = $env:REDSIGHT_API_URL
 $env:REDSIGHT_RUNTIME_MODE = 'native'
 
 # Qt: PassThrough rounding keeps text crisp on fractional scaling instead of
@@ -742,6 +741,16 @@ if ($LASTEXITCODE -eq 0 -and $Applied) {
 # ---------------------------------------------------------------------------
 # Backend
 # ---------------------------------------------------------------------------
+
+$ProfileJson = & $Python -m app.runtime_profile --root $Root --backend-port $Port --gateway-port $GatewayPort
+if ($LASTEXITCODE -ne 0) { throw 'Could not allocate the native runtime. See the startup log.' }
+$NativeProfile = $ProfileJson | ConvertFrom-Json
+$Port = [int]$NativeProfile.backend_port
+$GatewayPort = [int]$NativeProfile.gateway_port
+foreach ($entry in $NativeProfile.environment.PSObject.Properties) {
+    Set-Item -Path ("Env:" + $entry.Name) -Value ([string]$entry.Value)
+}
+Write-Line "CPU workers: $($NativeProfile.resources.worker_threads); available RAM: $($NativeProfile.resources.available_memory_gb) GB; API: $Port; gateway: $GatewayPort"
 
 if (Test-Endpoint -Url "http://127.0.0.1:$Port/api/v1/health") {
     Write-Line "the backend is already running on port $Port"
@@ -773,7 +782,7 @@ if (Test-Endpoint -Url "http://127.0.0.1:$Port/api/v1/health") {
 $GatewayPython = Join-Path $Root '.venv-actions\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $GatewayPython)) { $GatewayPython = $Python }
 $GatewayModule = Join-Path $Root 'redsight_actions\gateway_stage10.py'
-$GatewayHealth = "http://127.0.0.1:$GatewayPort/memory/status"
+$GatewayHealth = "http://127.0.0.1:$GatewayPort/health"
 
 if (Test-Endpoint -Url $GatewayHealth) {
     Write-Line "the action/memory gateway is already running on port $GatewayPort"

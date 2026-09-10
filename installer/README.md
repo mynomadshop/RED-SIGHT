@@ -492,3 +492,7 @@ options, but `modern` is still an accepted value, so the directive compiles on
   install in place rather than appearing as a second product.
 - Setup requires elevation (`PrivilegesRequired=admin`) and Windows 10 2004+
   (`MinVersion=10.0.19041`), which is the floor for the WSL2 backend.
+
+## Laptop API runtime checks
+
+The native launcher now selects available backend/gateway ports and CPU/memory budgets. Provider keys and model selections apply on the next request. See [Laptop API runtime](../docs/LAPTOP_API_RUNTIME.md) for setup, agent approvals/resume, diagnostics, and the Windows service smoke test.

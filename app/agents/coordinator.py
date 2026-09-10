@@ -103,7 +103,10 @@ class CoordinatorAgent:
     and maintains task state.
     """
     
-    def __init__(self):
+    def __init__(self, tool_executor=None):
+        from app.agents.runtime_bridge import execute_tool
+
+        self._tool_executor = tool_executor or execute_tool
         self._tasks: Dict[str, AgentTask] = {}
         self._max_steps = 50
     
@@ -175,13 +178,17 @@ class CoordinatorAgent:
             )
             tc.started_at = time.time()
             
-            # TODO: Actually execute the tool
-            # For now, simulate
-            tc.result = {"status": "simulated", "tool": tool_call["name"]}
+            try:
+                tc.result = await self._tool_executor(tc.tool_name, tc.parameters)
+            except Exception as exc:
+                tc.result = {"ok": False, "error": f"Tool execution failed ({type(exc).__name__})"}
             tc.completed_at = time.time()
-            tc.error = None
+            tc.error = None if tc.result.get("ok", False) else tc.result.get("error", "Tool requires approval")
             
             task.tool_calls.append(tc)
+            if tc.error:
+                task.state = AgentState.FAILED
+                return {"step_number": step_num, "status": "failed", "result": tc.result, "error": tc.error}
         
         return {"step_number": step_num, "status": "completed"}
     

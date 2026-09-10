@@ -28,6 +28,9 @@ class ChatMessage(BaseModel):
     name: str | None = Field(default=None, max_length=128)
     tool_call_id: str | None = Field(default=None, max_length=256)
     tool_calls: list[dict[str, Any]] | None = Field(default=None, max_length=128)
+    # Opaque provider response blocks must survive a multi-step tool round trip.
+    provider_content: dict[str, Any] | None = None
+    reasoning_content: str | None = None
 
     @field_validator("content")
     @classmethod
@@ -122,7 +125,8 @@ async def _provider_chat(provider: Any, arguments: dict[str, Any]) -> Any:
     except Exception as exc:
         if (
             arguments.get("tools")
-            and arguments.get("tool_choice") in {None, "auto"}
+            and arguments.get("tool_choice") in (None, "auto")
+            and not any(message.get("role") == "tool" for message in arguments.get("messages", []))
             and _upstream_status(exc) in {400, 422}
         ):
             logger.info("Provider rejected optional native tools; retrying text-only planning")
@@ -222,7 +226,7 @@ async def chat_stream(request: ChatRequest):
         request.stream = True
     model_id = request.model or configured_model
     try:
-        response = await provider.chat(**_provider_arguments(request, configured_model))
+        response = await _provider_chat(provider, _provider_arguments(request, configured_model))
 
         async def events():
             try:

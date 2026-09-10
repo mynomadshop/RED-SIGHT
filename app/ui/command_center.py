@@ -14,6 +14,7 @@ A professional desktop application for interacting with the RedSight platform:
 from __future__ import annotations
 
 import sys
+import os
 import logging
 from typing import Optional
 
@@ -426,7 +427,7 @@ def _redsight_stage10_json_request(path, body, timeout=8):
     data = json.dumps(body).encode("utf-8")
 
     request = urllib.request.Request(
-        "http://127.0.0.1:8765" + path,
+        os.environ.get("REDSIGHT_GATEWAY_URL", "http://127.0.0.1:8765") + path,
         data=data,
         headers={"Content-Type": "application/json", **auth_headers()},
         method="POST",

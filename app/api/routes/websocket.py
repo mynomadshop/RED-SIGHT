@@ -217,7 +217,8 @@ async def websocket_agents(websocket: WebSocket):
                         "type": "result",
                         "data": {
                             "success": result.success,
-                            "result": result.result,
+                            "result": result.final_output,
+                            "tasks": result.tasks,
                             "error": result.error,
                             "agent_count": result.agent_count,
                             "task_count": result.task_count,

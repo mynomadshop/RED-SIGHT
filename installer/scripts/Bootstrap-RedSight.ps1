@@ -507,7 +507,7 @@ if (-not $python) {
             Invoke-RsStep -Name 'Verifying the native backend environment' -Action {
                 # Native mode runs the FastAPI app and the embedded vector store
                 # in this same environment, so both must import.
-                $modules = @('fastapi', 'uvicorn', 'qdrant_client')
+                $modules = @('fastapi', 'uvicorn', 'qdrant_client', 'psutil')
                 if (-not (Test-RsVenvImports -VenvPython $uiPython -Modules $modules)) {
                     throw "native mode needs $($modules -join ', ') in .venv-ui"
                 }
@@ -518,10 +518,10 @@ if (-not $python) {
     # ----------------------------------------------------------------------
     # 6. Action/memory gateway environment
     # ----------------------------------------------------------------------
-    Invoke-RsStep -Name 'Setting up the action gateway environment (.venv-actions)' -Action {
+    Invoke-RsStep -Name 'Setting up the action gateway environment (.venv-actions)' -Required -Action {
         $venv = Join-Path $ProjectRoot '.venv-actions'
         $p = Initialize-RsVenv -PythonExe $python -VenvPath $venv -Description '.venv-actions' `
-                               -Packages @('fastapi', 'uvicorn[standard]', 'httpx', 'pydantic', 'apscheduler',
+                               -Packages @('fastapi', 'uvicorn[standard]', 'httpx', 'pydantic', 'apscheduler>=3.11.3,<4',
                                            'sqlalchemy', 'reportlab', 'tzlocal', 'playwright',
                                            'nvidia-ml-py>=13.580,<14') `
                                -RequirementFiles @((Join-Path $ProjectRoot 'requirements-stage111-actions.txt')) `

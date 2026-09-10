@@ -43,8 +43,8 @@ LOG_DIR = LOCALAPPDATA / "RedSight" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 CHAT_LOG = LOG_DIR / "chat-ui-stage101.log"
 
-BACKEND_URL = "http://127.0.0.1:8000"
-GATEWAY_URL = "http://127.0.0.1:8765"
+BACKEND_URL = os.environ.get("REDSIGHT_API_BASE_URL", "http://127.0.0.1:8000")
+GATEWAY_URL = os.environ.get("REDSIGHT_GATEWAY_URL", "http://127.0.0.1:8765")
 _BACKEND_CLIENT: httpx.AsyncClient | None = None
 
 
