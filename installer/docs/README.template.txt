@@ -37,7 +37,10 @@ whatever is absent:
 
   * NVIDIA CUDA profile — setup detects all NVIDIA GPUs, selects the
     matching PyTorch wheel, and runs a real CUDA allocation on each one.
-    RTX 50-series/Blackwell devices receive CUDA 12.8 / sm_120 support.
+    Current drivers and Turing-or-newer GPUs use CUDA 13.0. CUDA 12
+    compatibility builds remain available, including Blackwell/sm_120.
+    ONNX Runtime is matched to the same CUDA major; CPU/GPU packages
+    replace each other cleanly when changing the setup profile.
 
   * Native backend — the recommended default runs RedSight directly in
     its private Python environment with an embedded vector store. It
@@ -67,6 +70,20 @@ Cerebras or a custom OpenAI-compatible endpoint. Every provider's model,
 base URL and credential can be changed later under Settings -> AI Provider.
 Cloud keys are encrypted for the current Windows account with DPAPI; they
 are never written into the installation or placed on a command line.
+
+Enter the key, use Refresh models, choose a model, and click Test response
+& tools. This performs real inference and may use a small amount of API
+credit. The result distinguishes chat support from verified native tools.
+Click Apply & Restart to save the configuration and restart RedSight.
+Wait for any active task to finish first. Restart diagnostics are saved in
+%LOCALAPPDATA%\RedSight\logs\restart.log.
+
+Settings -> Skills contains twelve bundled procedures with editable
+example requests. They cover documents, spreadsheets, CSV consolidation,
+research, reports, knowledge indexing, Windows/CUDA health, project review,
+and workflow planning. Document/data dependencies are installed in both
+the desktop and action environments. A failed read can be corrected by
+the agent; failed writes stop without automatic replay.
 
 RedSight now creates a random per-user token for its local API and action
 gateway. The launcher supplies it to the desktop and container processes,

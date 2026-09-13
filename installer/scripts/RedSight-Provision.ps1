@@ -234,9 +234,9 @@ function Initialize-RsWorkspace {
 # "no kernel image is available for execution on the device", not a fallback.
 # Blackwell support arrived in PyTorch 2.7 on the CUDA 12.8 index.
 $script:RsTorchIndexes = @(
-    @{ MinCap = 12.0; Index = 'https://download.pytorch.org/whl/cu128'; Spec = 'torch>=2.7'
+    @{ MinCap = 12.0; Index = 'https://download.pytorch.org/whl/cu128'; Spec = 'torch>=2.7,<2.12'; Runtime = '12.8'; Onnx = 'onnxruntime-gpu>=1.21,<1.27'
        Label = 'PyTorch (CUDA 12.8 build, Blackwell/sm_120 kernels)' }
-    @{ MinCap = 0.0;  Index = 'https://download.pytorch.org/whl/cu124'; Spec = 'torch'
+    @{ MinCap = 0.0;  Index = 'https://download.pytorch.org/whl/cu124'; Spec = 'torch>=2.5,<2.7'; Runtime = '12.4'; Onnx = 'onnxruntime-gpu>=1.20,<1.27'
        Label = 'PyTorch (CUDA 12.4 build)' }
 )
 
@@ -244,13 +244,12 @@ function Get-RsTorchPlan {
     <#
         The PyTorch wheel index for a GPU compute capability.
 
-        An unknown capability keeps the long-standing cu124 default: it covers
-        every NVIDIA generation from Maxwell to Hopper, and guessing the newer
-        index for a card that does not need it would download a larger payload
-        for no gain.
+        Match the driver and architecture, keeping CUDA 12 compatibility builds
+        when CUDA 13 kernels cannot run on the detected device. Unknown driver
+        versions retain the conservative architecture-based defaults.
     #>
     [CmdletBinding()]
-    param([string]$ComputeCapability = '')
+    param([string]$ComputeCapability = '', [string]$DriverCuda = '')
 
     # The single-argument TryParse overload parses in the current culture. On a
     # machine set to a comma-decimal locale (de-DE, fr-FR, pt-BR) the dot is a
@@ -264,6 +263,21 @@ function Get-RsTorchPlan {
                              [System.Globalization.CultureInfo]::InvariantCulture,
                              [ref]$cap)
 
+    $driver = 0.0
+    [void][double]::TryParse("$DriverCuda", [System.Globalization.NumberStyles]::Float,
+                             [System.Globalization.CultureInfo]::InvariantCulture, [ref]$driver)
+    # PyTorch 2.12 uses CUDA 13.0 on current drivers. Keep CUDA 12 builds for
+    # older drivers and architectures (including mixed-generation systems).
+    if ($cap -ge 7.5 -and $driver -ge 13.0) {
+        return [pscustomobject]@{ MinCap = 7.5; Index = 'https://download.pytorch.org/whl/cu130';
+            Spec = 'torch>=2.12,<3'; Runtime = '13.0'; Onnx = 'onnxruntime-gpu>=1.27,<2';
+            Label = 'PyTorch (CUDA 13.0 build)' }
+    }
+    if ($cap -lt 12.0 -and $driver -ge 12.6) {
+        return [pscustomobject]@{ MinCap = 0.0; Index = 'https://download.pytorch.org/whl/cu126';
+            Spec = 'torch>=2.6,<3'; Runtime = '12.6'; Onnx = 'onnxruntime-gpu>=1.21,<1.27';
+            Label = 'PyTorch (CUDA 12.6 compatibility build)' }
+    }
     foreach ($entry in $script:RsTorchIndexes) {
         if ($cap -ge [double]$entry.MinCap) { return [pscustomobject]$entry }
     }
@@ -296,11 +310,23 @@ function Get-RsDependencyPlan {
     $cudaCapable = $false
     $vram = 0.0
     $computeCap = ''
+    $driverCuda = ''
+    $minComputeCap = ''
     if ($Hardware) {
         $cudaCapable = [bool]$Hardware.gpu.cudaCapable
         $vram = [double]$Hardware.gpu.maxVramGB
         if ($Hardware.gpu.PSObject.Properties['maxComputeCap']) {
             $computeCap = "$($Hardware.gpu.maxComputeCap)"
+        }
+        if ($Hardware.gpu.PSObject.Properties['cudaVersion']) { $driverCuda = "$($Hardware.gpu.cudaVersion)" }
+        if ($Hardware.gpu.PSObject.Properties['nvidia']) {
+            $caps = @($Hardware.gpu.nvidia | ForEach-Object {
+                $parsed = 0.0
+                if ($_.PSObject.Properties['computeCap'] -and [double]::TryParse("$($_.computeCap)",
+                    [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture,
+                    [ref]$parsed) -and $parsed -gt 0) { $parsed }
+            })
+            if ($caps.Count) { $minComputeCap = ($caps | Measure-Object -Minimum).Minimum.ToString([System.Globalization.CultureInfo]::InvariantCulture) }
         }
     }
 
@@ -326,7 +352,13 @@ function Get-RsDependencyPlan {
     $preInstalls = New-Object System.Collections.Generic.List[object]
     $torch = $null
     if ($effective -eq 'cuda') {
-        $torch = Get-RsTorchPlan -ComputeCapability $computeCap
+        $torch = Get-RsTorchPlan -ComputeCapability $computeCap -DriverCuda $driverCuda
+        if ($minComputeCap -and [double]::Parse($minComputeCap, [System.Globalization.CultureInfo]::InvariantCulture) -lt 7.5 -and $torch.Runtime -eq '13.0') {
+            if ([double]::Parse($computeCap, [System.Globalization.CultureInfo]::InvariantCulture) -ge 12.0) {
+                throw 'This mixed GPU configuration needs incompatible PyTorch builds. Use separate environments for Blackwell and pre-Turing GPUs.'
+            }
+            $torch = Get-RsTorchPlan -ComputeCapability $minComputeCap -DriverCuda '12.6'
+        }
         # The documented PyTorch install form: its wheel index also carries the
         # transitive dependencies, so --index-url alone is correct here. The
         # version floor matters: pip reports an already-installed torch as
@@ -334,15 +366,17 @@ function Get-RsDependencyPlan {
         # it forever.
         $preInstalls.Add(@{
             Label = $torch.Label
-            Args  = @($torch.Spec, '--index-url', $torch.Index)
+            Args  = @($torch.Spec, '--index-url', $torch.Index, '--upgrade')
+            ExpectedCuda = $torch.Runtime
         })
-        $preInstalls.Add(@{ Label = 'onnxruntime-gpu'; Args = @('onnxruntime-gpu') })
+        $preInstalls.Add(@{ Label = 'onnxruntime-gpu'; Args = @($torch.Onnx, '--upgrade'); Remove = @('onnxruntime') })
     } else {
         $preInstalls.Add(@{
             Label = 'PyTorch (CPU build)'
-            Args  = @('torch', '--index-url', 'https://download.pytorch.org/whl/cpu')
+            Args  = @('torch>=2.5,<3', '--index-url', 'https://download.pytorch.org/whl/cpu', '--upgrade')
+            ExpectedCuda = 'cpu'
         })
-        $preInstalls.Add(@{ Label = 'onnxruntime (CPU)'; Args = @('onnxruntime') })
+        $preInstalls.Add(@{ Label = 'onnxruntime (CPU)'; Args = @('onnxruntime>=1.20,<2', '--upgrade'); Remove = @('onnxruntime-gpu') })
     }
 
     return [pscustomobject]@{
@@ -758,7 +792,7 @@ if (Test-Endpoint -Url "http://127.0.0.1:$Port/api/v1/health") {
     Write-Line "starting the RedSight backend natively on port $Port"
     $StartScript = Join-Path $Root 'scripts\start.py'
     if (Test-Path -LiteralPath $StartScript) {
-        $BackendArgs = @($StartScript, '--host', '127.0.0.1', '--port', "$Port")
+        $BackendArgs = @(('"{0}"' -f $StartScript), '--host', '127.0.0.1', '--port', "$Port")
     } else {
         # Same entry point the container image uses.
         $BackendArgs = @('-m', 'uvicorn', 'app.server:app', '--host', '127.0.0.1', '--port', "$Port")
@@ -821,7 +855,7 @@ if (-not $NoUi) {
         # returns the moment the process is created, leaving $LASTEXITCODE at 0
         # however the UI ends - so the diagnostic re-run below would never fire
         # and a UI that dies on an import error would just silently not appear.
-        $ui = Start-Process -FilePath $Pythonw -ArgumentList @($Launcher) `
+        $ui = Start-Process -FilePath $Pythonw -ArgumentList @(('"{0}"' -f $Launcher)) `
                             -WorkingDirectory $Root -Wait -PassThru
         $UiExit = $ui.ExitCode
         if ($UiExit -ne 0) {

@@ -85,7 +85,11 @@ def main():
                     payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                     calls.append(payload)
                     latest = payload["messages"][-1]
-                    if "local action planner" in payload["messages"][0]["content"]:
+                    if latest.get("content") == "Restart connection test: reply READY.":
+                        assert self.headers.get("Authorization") == "Bearer ci-test-key-not-a-real-credential"
+                        assert payload["model"] == "fixture-agent"
+                        tool, params = None, None
+                    elif "local action planner" in payload["messages"][0]["content"]:
                         tool, params = "filesystem__search", {"root": str(demo), "pattern": "input.txt"}
                     elif latest["role"] == "user":
                         assert str(source).replace("\\", "\\\\") in latest["content"]
@@ -95,7 +99,7 @@ def main():
                         tool, params = "filesystem__write", {"path": str(destination), "content": source.read_text()}
                     else:
                         tool, params = None, None
-                    message = {"content": "Copied the verified file."}
+                    message = {"content": "READY" if latest.get("content") == "Restart connection test: reply READY." else "Copied the verified file."}
                     if tool:
                         message = {"content": None, "tool_calls": [{"id": f"call_{len(calls)}", "type": "function",
                                     "function": {"name": tool, "arguments": json.dumps(params)}}]}
@@ -138,7 +142,29 @@ def main():
             again = json.loads(paths[-1].read_text())
             assert (again["backend_port"], again["gateway_port"]) == (profile["backend_port"], profile["gateway_port"])
             assert client.get(api + "/api/v1/health").json()["pid"] in owned_pids
-        print("NATIVE_LAPTOP_SMOKE=PASS (occupied ports, live settings, memory, real dependent file actions, no replay)")
+
+            old_pids = set(owned_pids)
+            subprocess.run([sys.executable, "-m", "app.runtime_restart", "--root", str(root),
+                            "--wait-pid", "0", "--wait-created", "0", "--no-ui"],
+                           cwd=root, check=True, timeout=360)
+            restarted = json.loads(paths[-1].read_text())
+            api = restarted["environment"]["REDSIGHT_API_BASE_URL"]
+            gateway = restarted["environment"]["REDSIGHT_GATEWAY_URL"]
+            for endpoint in (api + "/api/v1/health", gateway + "/health"):
+                health = client.get(endpoint).json()
+                assert health["instance_id"] == profile["instance_id"]
+                assert health["pid"] not in old_pids, "Restart reused an old service"
+                owned_pids.add(int(health["pid"]))
+            listed = client.post(gateway + "/tool/execute", json={"tool": "skills.list", "params": {}})
+            listed.raise_for_status()
+            assert "consolidate-csv" in listed.text
+            client.get(gateway + "/memory/status").raise_for_status()
+            response = client.post(api + "/api/v1/chat", json={
+                "messages": [{"role": "user", "content": "Restart connection test: reply READY."}],
+            })
+            response.raise_for_status()
+            assert response.json()["message"] == "READY", response.text
+        print("NATIVE_LAPTOP_SMOKE=PASS (occupied ports, live settings, memory, real dependent file actions, no replay, owned-service restart, bundled skills)")
     finally:
         # Terminate only services started by this CI test, verified by identity.
         for pid in owned_pids:

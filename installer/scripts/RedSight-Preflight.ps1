@@ -513,31 +513,60 @@ function Initialize-RsVenv {
     }
 
     $installs = New-Object System.Collections.Generic.List[object]
-    # PreInstalls run first on purpose: pinning torch to the CPU or CUDA wheel
-    # index up front means the later resolution sees it already satisfied and
-    # does not pull the multi-gigabyte default build over the top.
+    # Compute packages are selected first, then held at their installed versions
+    # while the remaining dependency graph is upgraded within project ranges.
     foreach ($pre in $PreInstalls) { $installs.Add($pre) }
-    foreach ($proj in $EditableProjects) { $installs.Add(@{ Label = "editable $proj"; Args = @('-e', $proj) }) }
+    foreach ($proj in $EditableProjects) { $installs.Add(@{ Label = "editable $proj"; Args = @('-e', $proj); UpgradeDependencies = $true }) }
     foreach ($file in $RequirementFiles) {
         if (Test-Path -LiteralPath $file) {
-            $installs.Add(@{ Label = "requirements $(Split-Path -Leaf $file)"; Args = @('-r', $file) })
+            $installs.Add(@{ Label = "requirements $(Split-Path -Leaf $file)"; Args = @('-r', $file); UpgradeDependencies = $true })
         } else {
             Write-RsLog "    requirements file not found, skipping: $file" -Level DEBUG
         }
     }
-    if ($Packages.Count) { $installs.Add(@{ Label = 'explicit packages'; Args = $Packages }) }
+    if ($Packages.Count) { $installs.Add(@{ Label = 'explicit packages'; Args = $Packages; UpgradeDependencies = $true }) }
 
     foreach ($install in $installs) {
         Write-RsLog "    installing $($install.Label) into $Description" -Level STEP
+        $installArgs = @($install.Args)
+        if ($install.ContainsKey('UpgradeDependencies')) {
+            $code = 'import importlib.metadata as m; print("\n".join(d.metadata["Name"]+"==="+d.version for d in m.distributions() if d.metadata["Name"].lower() in {"torch","onnxruntime","onnxruntime-gpu"}))'
+            $frozen = Invoke-RsProcess -FilePath $venvPython -Arguments @('-c', $code) -TimeoutSeconds 60 -Quiet
+            if ($frozen.ExitCode -ne 0) { throw 'Could not record the selected compute packages before upgrading dependencies' }
+            $constraints = Join-Path $VenvPath 'redsight-compute-constraints.txt'
+            [System.IO.File]::WriteAllText($constraints, $frozen.StdOut, (New-Object System.Text.UTF8Encoding($false)))
+            $installArgs += @('--upgrade', '--upgrade-strategy', 'eager', '--constraint', $constraints)
+        }
+        if ($install.ContainsKey('Remove')) {
+            $present = Invoke-RsProcess -FilePath $venvPython -Arguments (@('-m', 'pip', 'show') + $install.Remove) -TimeoutSeconds 60 -Quiet
+            if ($present.ExitCode -eq 0) {
+                $cleanup = Invoke-RsProcess -FilePath $venvPython -Arguments (@('-m', 'pip', 'uninstall', '-y') + $install.Remove) -TimeoutSeconds 120 -Quiet
+                if ($cleanup.ExitCode -ne 0) { throw "Could not remove the conflicting runtime for $($install.Label)" }
+                # The CPU/GPU ONNX packages share files; repair after removal.
+                $installArgs += '--force-reinstall'
+            }
+        }
+        if ($install.ContainsKey('ExpectedCuda')) {
+            $probe = Invoke-RsProcess -FilePath $venvPython -Arguments @('-c', 'import torch; print(torch.version.cuda or "cpu")') -TimeoutSeconds 60 -Quiet
+            if ($probe.ExitCode -eq 0 -and $probe.StdOut.Trim() -ne $install.ExpectedCuda) {
+                $installArgs += '--force-reinstall'
+            }
+        }
         $null = Invoke-RsRetry -Description "pip install $($install.Label)" -MaxAttempts 3 -Action {
             $res = Invoke-RsProcess -FilePath $venvPython `
-                                    -Arguments (@('-m', 'pip', 'install') + $common + $install.Args) `
+                                    -Arguments (@('-m', 'pip', 'install') + $common + $installArgs) `
                                     -TimeoutSeconds $TimeoutSeconds -HeartbeatSeconds 30
             if ($res.TimedOut) { throw "pip install timed out after ${TimeoutSeconds}s" }
             if ($res.ExitCode -ne 0) {
                 $tail = ($res.StdOut + "`n" + $res.StdErr) -split "`r?`n" |
                         Where-Object { $_.Trim() } | Select-Object -Last 8
                 throw "pip exit $($res.ExitCode): $($tail -join ' | ')"
+            }
+        }
+        if ($install.ContainsKey('ExpectedCuda')) {
+            $probe = Invoke-RsProcess -FilePath $venvPython -Arguments @('-c', 'import torch; print(torch.version.cuda or "cpu")') -TimeoutSeconds 60 -Quiet
+            if ($probe.ExitCode -ne 0 -or $probe.StdOut.Trim() -ne $install.ExpectedCuda) {
+                throw "The installed PyTorch runtime does not match the selected $($install.ExpectedCuda) profile"
             }
         }
         Write-RsLog "    installed $($install.Label)" -Level OK

@@ -300,14 +300,14 @@ foreach ($rel in $agentFiles.Keys) {
 }
 
 # The inherited skill catalog is what "advanced workflows" draws on.
-$skillRoot = Join-Path $ProjectRoot 'data\heritage\redsight\skills'
+$skillRoot = Join-Path $ProjectRoot 'app\bundled_skills'
 $skillCount = 0
 if (Test-Path -LiteralPath $skillRoot) {
     $skillCount = @(Get-ChildItem -LiteralPath $skillRoot -Recurse -Filter 'SKILL.md' -File -ErrorAction SilentlyContinue).Count
 }
-Add-RsCheck -Name 'agent: inherited skill catalog' `
+Add-RsCheck -Name 'agent: bundled skill catalog' `
             -Status $(if ($skillCount -gt 0) { 'pass' } else { 'warn' }) `
-            -Detail "$skillCount skill(s) under data\heritage"
+            -Detail "$skillCount bundled skill(s)"
 
 # If the backend is up, confirm the multi-step run API answers. Read-only: the
 # health check must never start an agent run of its own.

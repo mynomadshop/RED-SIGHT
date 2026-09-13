@@ -142,7 +142,8 @@ if (-not $pip) {
         # The heavy desktop stack comes from pyproject rather than a requirements file.
         $groups += @{ Label = 'desktop runtime stack'
                       Packages = @('PySide6', 'qasync', 'httpx', 'pydantic', 'pydantic-settings',
-                                   'fastapi', 'uvicorn[standard]', 'qdrant-client', 'structlog', 'rich')
+                                   'fastapi', 'uvicorn[standard]', 'qdrant-client', 'structlog', 'rich',
+                                   'openpyxl>=3.1,<4', 'python-docx>=1.1,<2', 'pymupdf>=1.24,<2')
                       Files = @() }
     }
 

@@ -523,12 +523,16 @@ if (-not $python) {
         $p = Initialize-RsVenv -PythonExe $python -VenvPath $venv -Description '.venv-actions' `
                                -Packages @('fastapi', 'uvicorn[standard]', 'httpx', 'pydantic', 'apscheduler>=3.11.3,<4',
                                            'sqlalchemy', 'reportlab', 'tzlocal', 'playwright',
+                                           'openpyxl>=3.1,<4', 'python-docx>=1.1,<2', 'pymupdf>=1.24,<2',
                                            'nvidia-ml-py>=13.580,<14') `
                                -RequirementFiles @((Join-Path $ProjectRoot 'requirements-stage111-actions.txt')) `
                                -Wheelhouse $wheelhouse -OfflineOnly:$OfflineOnly -Recreate:$RecreateVenvs
         Set-RsSummary -Key 'venvActions' -Value $p
         $script:RsActionsPython = $p
         Install-RsRuntimeBootstrap -VenvPython $p -ProjectRoot $ProjectRoot | Out-Null
+        if (-not (Test-RsVenvImports -VenvPython $p -Modules @('openpyxl', 'docx', 'pymupdf'))) {
+            throw 'The action environment is missing bundled document/data skill dependencies'
+        }
     } | Out-Null
 
     # ------------------------------------------------------------------

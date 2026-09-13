@@ -13,6 +13,7 @@ in the UI, or placed on a command line.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import ctypes
 import json
@@ -338,8 +339,6 @@ def save_provider_config(
         custom = _normalise_url(custom, "Custom provider URL")
     normalised["base_urls"]["custom"] = custom
     normalised["custom_base_url"] = custom
-    _atomic_json(target, normalised)
-
     if clear_secret or (api_key is not None and api_key.strip()):
         store = load_secret_store(secret_target)
         if clear_secret:
@@ -348,6 +347,7 @@ def save_provider_config(
             store[active] = protect_secret(api_key.strip())
         _atomic_json(secret_target, store)
 
+    _atomic_json(target, normalised)
     return target
 
 
@@ -424,74 +424,46 @@ def _probe_url(provider: str, configured_base_url: str) -> str:
 
 
 def probe_provider(
-    provider: str,
-    api_key: str = "",
-    custom_base_url: str = "",
-    timeout: float = 10.0,
-    models_out: list[str] | None = None,
+    provider: str, api_key: str = "", custom_base_url: str = "", timeout: float = 60,
+    models_out: list[str] | None = None, model: str = "", test_response: bool = True,
 ) -> tuple[bool, str]:
-    """Perform a bounded, read-only provider connection test."""
+    """Run the production adapter's response/tool round trip on a worker thread."""
     if provider == "none":
-        return False, "No provider is selected. RedSight can still open and be configured later."
-    if provider not in PROVIDERS:
-        return False, "Unknown provider."
-    if provider in PROVIDER_KEY_ENV and provider != "custom" and not api_key:
-        return False, "No API key is configured for this provider."
+        return False, "Select an AI provider to test."
+    from app.models.provider_probe import probe_provider as run_probe
 
-    headers = {"Accept": "application/json", "User-Agent": "RedSight/11.6"}
-    if provider not in {"anthropic", "gemini", "none", "lmstudio"} and api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    elif provider == "anthropic":
-        headers["x-api-key"] = api_key
-        headers["anthropic-version"] = "2023-06-01"
-    elif provider == "gemini":
-        headers["x-goog-api-key"] = api_key
-
-    try:
-        request = urllib.request.Request(
-            _probe_url(provider, custom_base_url), headers=headers, method="GET"
-        )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8", "replace") or "{}")
-        entries = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(entries, list) and isinstance(payload, dict):
-            entries = payload.get("models")
-        if models_out is not None and isinstance(entries, list):
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                model = str(entry.get("id") or entry.get("name") or "").removeprefix("models/")
-                methods = entry.get("supportedGenerationMethods", [])
-                if model and (provider != "gemini" or not methods or "generateContent" in methods):
-                    models_out.append(model)
-        count = len(entries) if isinstance(entries, list) else 0
-        return True, f"Connected successfully; {count} model(s) reported."
-    except urllib.error.HTTPError as exc:
-        return False, f"Provider returned HTTP {exc.code}. Check the key and selected endpoint."
-    except Exception as exc:
-        return False, f"Connection failed: {type(exc).__name__}: {exc}"
+    endpoint = _lm_endpoint() if provider == "lmstudio" else custom_base_url or PROVIDER_BASE_URLS.get(provider, "")
+    result = asyncio.run(run_probe(provider, api_key, endpoint, model,
+                                   test_response=test_response, timeout=timeout))
+    if models_out is not None:
+        models_out.extend(result.models)
+    return result.ok, result.message
 
 
 class _ProviderProbe(QThread):
     completed = Signal(bool, str)
 
-    def __init__(
-        self,
-        provider: str,
-        api_key: str,
-        custom_base_url: str,
-        parent: QWidget | None = None,
-    ) -> None:
+    def __init__(self, provider: str, api_key: str, custom_base_url: str,
+                 model: str, test_response: bool, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.provider = provider
         self.api_key = api_key
         self.custom_base_url = custom_base_url
+        self.model = model
+        self.test_response = test_response
         self.models: list[str] = []
+        self.result: tuple[bool, str] = (False, "Test did not finish")
 
-    def run(self) -> None:  # pragma: no cover - exercised through the desktop
-        self.completed.emit(
-            *probe_provider(self.provider, self.api_key, self.custom_base_url, models_out=self.models)
-        )
+    def run(self) -> None:
+        try:
+            self.result = probe_provider(
+                self.provider, self.api_key, self.custom_base_url, models_out=self.models,
+                model=self.model, test_response=self.test_response,
+            )
+        finally:
+            self.api_key = ""
+        # UI consumes the result after QThread.finished: closing the dialog
+        # during a request must never destroy a still-running QThread.
 
 
 class ProviderSettingsTab(QWidget):
@@ -548,7 +520,9 @@ class ProviderSettingsTab(QWidget):
         layout.addWidget(self.remove_key)
 
         actions = QHBoxLayout()
-        self.test_button = QPushButton("Test connection")
+        self.models_button = QPushButton("Refresh models")
+        actions.addWidget(self.models_button)
+        self.test_button = QPushButton("Test response & tools")
         actions.addWidget(self.test_button)
         actions.addStretch(1)
         layout.addLayout(actions)
@@ -563,6 +537,7 @@ class ProviderSettingsTab(QWidget):
         self.provider_combo.setCurrentIndex(selected if selected >= 0 else 0)
         self.provider_combo.currentIndexChanged.connect(self._provider_changed)
         self.test_button.clicked.connect(self._test_connection)
+        self.models_button.clicked.connect(lambda: self._test_connection(test_response=False))
         self.remove_key.toggled.connect(self._remove_toggled)
         self._provider_changed()
 
@@ -588,6 +563,7 @@ class ProviderSettingsTab(QWidget):
         self.remove_key.setChecked(False)
         self.custom_url_edit.setEnabled(provider in PROVIDER_BASE_URLS)
         self.test_button.setEnabled(provider != "none")
+        self.models_button.setEnabled(provider != "none")
         self.key_edit.clear()
         self.key_edit.setPlaceholderText(
             "Stored securely - leave blank to keep"
@@ -618,11 +594,11 @@ class ProviderSettingsTab(QWidget):
     def _remove_toggled(self, checked: bool) -> None:
         self.key_edit.setEnabled(not checked and self._current_provider not in {"none", "lmstudio"})
 
-    def _test_connection(self) -> None:
+    def _test_connection(self, _checked: bool = False, *, test_response: bool = True) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
         provider = self._current_provider
-        key = self.key_edit.text().strip() or configured_secret(provider)
+        key = "" if self.remove_key.isChecked() else self.key_edit.text().strip() or configured_secret(provider)
         custom_url = self.custom_url_edit.text().strip()
         if provider in PROVIDER_BASE_URLS:
             try:
@@ -631,11 +607,12 @@ class ProviderSettingsTab(QWidget):
                 QMessageBox.warning(self, "AI provider", str(exc))
                 return
 
-        self.test_button.setEnabled(False)
-        self.status.setText("Testing the selected provider...")
-        worker = _ProviderProbe(provider, key, custom_url, self)
-        worker.completed.connect(self._test_finished)
-        worker.finished.connect(worker.deleteLater)
+        for widget in (self.test_button, self.models_button, self.provider_combo, self.model_edit,
+                       self.key_edit, self.custom_url_edit, self.remove_key):
+            widget.setEnabled(False)
+        self.status.setText("Testing a real model response and tool round trip..." if test_response else "Fetching available models...")
+        worker = _ProviderProbe(provider, key, custom_url, self.model_edit.currentText().strip(), test_response, self)
+        worker.finished.connect(lambda: self._test_finished(*worker.result))
         self._worker = worker
         worker.start()
 
@@ -645,7 +622,7 @@ class ProviderSettingsTab(QWidget):
         if worker is not None and worker.provider != self._current_provider:
             self.test_button.setEnabled(self._current_provider != "none")
             return
-        if ok and worker is not None and worker.models:
+        if worker is not None and worker.models:
             selected = self.model_edit.currentText().strip()
             self.model_edit.clear()
             self.model_edit.addItems(sorted(set(worker.models)))
@@ -654,7 +631,15 @@ class ProviderSettingsTab(QWidget):
             if selected and selected not in worker.models:
                 message += " The selected model was not listed; choose an available model or verify its ID."
 
+        self.provider_combo.setEnabled(True)
+        self.model_edit.setEnabled(self._current_provider != "none")
+        self.custom_url_edit.setEnabled(self._current_provider in PROVIDER_BASE_URLS)
+        self.key_edit.setEnabled(not self.remove_key.isChecked() and self._current_provider not in {"none", "lmstudio"})
+        self.remove_key.setEnabled(has_stored_secret(self._current_provider))
         self.test_button.setEnabled(self._current_provider != "none")
+        self.models_button.setEnabled(self._current_provider != "none")
+        if worker is not None:
+            worker.deleteLater()
         colour = "#57D68D" if ok else "#FF8A80"
         self.status.setStyleSheet(f"color:{colour};")
         self.status.setText(message)
@@ -845,10 +830,14 @@ class AdvancedSettingsDialog(QDialog):
         self.diagnostics_tab = DiagnosticsTab(self)
         self.tabs.addTab(self.provider_tab, "AI Provider")
         self.tabs.addTab(self.runtime_tab, "Runtime")
+        from app.ui.bundled_skills import BundledSkillsTab
+
+        self.skills_tab = BundledSkillsTab(self)
+        self.tabs.addTab(self.skills_tab, "Skills")
         self.tabs.addTab(self.diagnostics_tab, "Diagnostics")
         layout.addWidget(self.tabs, 1)
 
-        hint = QLabel("Saved changes are used immediately by this window and fully applied after restart.")
+        hint = QLabel("Test the selected model, then Apply & Restart to activate all saved settings.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#9FAAB6;")
         layout.addWidget(hint)
@@ -860,11 +849,45 @@ class AdvancedSettingsDialog(QDialog):
         if save_button is not None:
             save_button.setText("Save & Apply")
             save_button.setObjectName("PrimaryButton")
+        self.restart_button = buttons.addButton("Apply & Restart", QDialogButtonBox.ButtonRole.ActionRole)
+        self.restart_button.setObjectName("RedSightApplyRestartButton")
+        self.restart_button.clicked.connect(self._apply_restart)
         buttons.accepted.connect(self._apply)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _probe_running(self) -> bool:
+        worker = self.provider_tab._worker
+        return worker is not None and worker.isRunning()
+
+    def reject(self) -> None:
+        if self._probe_running():
+            self.provider_tab.status.setText("Wait for the provider test to finish before closing Settings.")
+            return
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        if self._probe_running():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _apply_restart(self) -> None:
+        if self._probe_running():
+            self.provider_tab.status.setText("Wait for the provider test to finish before restarting.")
+            return
+        if any(not task.done() for task in getattr(self.window, "_chat_tasks", ())):
+            QMessageBox.warning(self, "RedSight", "A task is still running. Finish it before restarting.")
+            return
+        self._restart_requested = True
+        try:
+            self._apply()  # Includes the MCP and LM Studio overlay save hooks.
+        finally:
+            self._restart_requested = False
+
     def _apply(self) -> None:
+        if self._probe_running():
+            return
         try:
             self.provider_tab.apply()
             self.runtime_tab.apply()
@@ -872,11 +895,18 @@ class AdvancedSettingsDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "RedSight Settings", f"Settings were not saved:\n\n{exc}")
             return
-        QMessageBox.information(
-            self,
-            "RedSight Settings",
-            "Settings saved. AI provider changes apply to the next request. Restart RedSight for runtime changes.",
-        )
+        if getattr(self, "_restart_requested", False):
+            try:
+                from app.runtime_restart import request_restart
+
+                request_restart(Path(__file__).resolve().parents[2])
+            except Exception as exc:
+                QMessageBox.warning(self, "Restart failed", f"Settings were saved, but restart could not start ({type(exc).__name__}). Open RedSight again from its shortcut.")
+                return
+            self.accept()
+            QTimer.singleShot(0, self.window.close)
+            return
+        QMessageBox.information(self, "RedSight Settings", "Settings saved. AI provider changes apply to the next request.")
         self.accept()
 
 

@@ -56,9 +56,26 @@ def main() -> int:
 
     dialog = settings_ui.AdvancedSettingsDialog(window)
     labels = [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())]
-    expected = {"AI Provider", "Runtime", "MCP Servers", "LM Studio", "Diagnostics"}
+    expected = {"AI Provider", "Runtime", "Skills", "MCP Servers", "LM Studio", "Diagnostics"}
     assert expected.issubset(labels), f"missing Settings tabs: {sorted(expected - set(labels))}"
     assert dialog.provider_tab.provider_combo.currentData() == "none"
+
+    assert dialog.restart_button.text() == "Apply & Restart"
+    assert dialog.provider_tab.test_button.text() == "Test response & tools"
+    assert dialog.skills_tab.list.count() >= 12
+    dialog.skills_tab.search.setText("CSV")
+    app.processEvents()
+    assert 1 <= dialog.skills_tab.list.count() < 12
+    chat = window._tabs.widget(0)
+    chat.message_sent.disconnect()
+    sent = []
+    chat.message_sent.connect(sent.append)
+    dialog.skills_tab.instruction.setPlainText("Inspect the CSV file I select.")
+    selected = dialog.skills_tab.list.currentItem().text()
+    dialog.skills_tab.run_button.click()
+    app.processEvents()
+    assert sent == [f"/skill {selected} | Inspect the CSV file I select."]
+    assert sent[0] in chat._chat_history.toPlainText()
 
     dialog.close()
     window.close()

@@ -1,6 +1,7 @@
 # RedSight - High-Performance Local AI Intelligence Platform
 
 For laptop CPU/API setup, automatic port/resource allocation, live provider configuration, and verified multi-step agents, see [Laptop API runtime](docs/LAPTOP_API_RUNTIME.md).
+For the new Settings response test, Apply & Restart, twelve bundled skills, and CPU/CUDA compatibility details, see [Agent productivity and setup](docs/AGENT_PRODUCTIVITY.md).
 
 ## Overview
 
@@ -61,14 +62,19 @@ run, extract it, and run `RedSight-Setup-11.6.0.exe` as Administrator.
    optional during setup and can be added later from **Settings -> AI Provider**.
 4. Complete setup and open the RedSight shortcut. No NVIDIA GPU or LM Studio is
    required for this profile.
+5. In **Settings → AI Provider**, enter the key, choose a model, and select
+   **Test response & tools**. After it passes, use **Apply & Restart**.
+   **Refresh models** lists available IDs without testing inference.
 
 #### NVIDIA CUDA desktop installation
 
 1. Install a current NVIDIA driver and confirm `nvidia-smi` responds.
 2. Choose **NVIDIA GPU - local inference with CUDA acceleration**. The hardware
    scan detects every NVIDIA GPU and selects the compatible PyTorch build;
-   RTX 50-series/Blackwell devices receive the CUDA 12.8 wheel with `sm_120`
-   support.
+   current drivers and Turing-or-newer devices receive CUDA 13.0. Compatible
+   CUDA 12 builds remain available for older drivers or architectures, including
+   Blackwell support on the CUDA 12.8 index. ONNX Runtime follows the same CUDA
+   major version.
 3. Keep the recommended native backend for the shortest and most reliable
    setup. Docker/WSL2 container mode remains available under **Custom
    installation**, but is not required for CUDA acceleration or LM Studio.
@@ -102,7 +108,8 @@ python -m venv .venv
 source .venv/bin/activate  # Linux/Mac
 
 # Install dependencies
-pip install -e .
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e ".[cpu]"
 
 # Install optional dependencies
 pip install -e ".[dev]"  # Development tools
@@ -172,6 +179,12 @@ In the desktop app, use `/agent GOAL` for a governed tool plan, `/skill NAME |
 INSTRUCTION` to apply a discovered `SKILL.md`, and `/mcp-test SERVER` to verify
 an explicitly configured MCP server. State-changing tool and MCP calls still
 require user approval.
+
+Open **Settings → Skills** to search twelve shipped procedures, customize an
+example request, and run it in chat. The catalog includes document extraction
+and comparison, CSV consolidation, spreadsheet profiling, research, reports,
+knowledge indexing, Windows/CUDA diagnostics, project review, and workflow
+planning. File-changing tools present their proposed actions for approval.
 
 ## Project Structure
 

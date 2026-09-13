@@ -31,16 +31,20 @@ agent bridge, and gateway use the same recorded endpoints. Explicit launcher
 1. Open **Settings → AI Provider**.
 2. Select OpenAI, Anthropic Claude, Google Gemini, xAI, OpenRouter, Groq,
    Mistral, Together, DeepSeek, Cerebras, or a custom OpenAI-compatible endpoint.
-3. Enter the key and use **Test connection** to populate the editable model list.
+3. Enter the key and use **Refresh models** to populate the editable model list.
    Select a chat model that supports tool calling; model access depends on the
    provider account. A custom endpoint also needs its base URL and model ID.
-4. Apply. The backend reads the encrypted saved selection on the next request;
-   changing API provider, key, model, or endpoint requires no service restart.
-   Runtime/LM Studio changes still use the existing restart flow.
+4. Use **Test response & tools**. This tests an actual completion and, when
+   supported, a harmless tool-call/result exchange with the selected model.
+5. Use **Apply & Restart** to save the selection and restart the installed
+   desktop and its services. **Save & Apply** also remains available; provider
+   changes are read by the backend on the next request.
 
 The UI opens before any provider is configured. Keys remain protected with
-Windows CurrentUser DPAPI. Provider discovery is a connection/model-list check;
-it does not spend inference credits or certify a model's action quality.
+Windows CurrentUser DPAPI. Refreshing the model list does not verify inference.
+The response test uses a small amount of provider inference and may incur an
+API charge. Success verifies connectivity and the selected model's response,
+not the quality of every future task. Failed draft tests never save credentials.
 
 ## Agent and skill execution
 
@@ -57,9 +61,15 @@ be enumerated, their tool definitions inspected, and their tools called through
 the existing approval policy. An API key alone does not configure an MCP server,
 its required local executable, or a separate search-service credential.
 
+Twelve ready-to-use skills ship inside the application package. Find them in
+**Settings → Skills**, edit an example request, and run it in chat. See the
+[catalog and tool limits](AGENT_PRODUCTIVITY.md).
+
 The default action budget is 16 steps, with a 540-second execution window per
-resume. `REDSIGHT_AGENT_MAX_STEPS` supports up to 50. Timeouts and failed tools
-produce failure results and stop dependent actions. New state-changing steps
+resume, including time waiting for an execution slot. `REDSIGHT_AGENT_MAX_STEPS`
+supports up to 50. A failed read can trigger up to two recovery attempts based
+on its observed error; remaining actions from the failed batch are skipped.
+Failed writes and exhausted recovery budgets stop the run. New state-changing steps
 require review under the existing tool policy. Approval is tied to the exact
 pending actions; the server retains a run ID and resumes without replaying
 completed changes. Pending runs expire after 30 minutes or a gateway restart.
@@ -82,11 +92,17 @@ dependencies. A second orchestration does not re-execute the first one's tasks.
   That smoke test occupies the default ports, starts both installed services,
   checks memory, saves an encrypted test provider key while services are running,
   and performs a real find/read/write sequence through a loopback API fixture.
-  It also verifies repeat-launch reuse, setup repair, and uninstall.
+  It also verifies repeat-launch reuse, owned-service restart, provider response
+  after restart, bundled skill discovery, setup repair, and uninstall.
+- A second Windows job installs CPU packages, switches that environment to
+  CUDA packages, and verifies the actual Torch runtime, ONNX provider, package
+  exclusivity, and dependency consistency. Physical GPU execution is verified
+  by setup on the user's NVIDIA machine, not by a hosted runner without a GPU.
 
 If startup fails, inspect `%LOCALAPPDATA%\RedSight\logs\native-backend.err.log`
-and `native-gateway.err.log`. If a provider rejects a model, use Test connection
-and choose an available tool-capable model. Live billing, provider credentials,
+and `native-gateway.err.log`; restart failures also appear in `restart.log`.
+If a provider rejects a model, refresh the list, choose an available tool-capable
+model, and test its response. Live billing, provider credentials,
 remote MCP programs, and NVIDIA hardware are not simulated into successful tests.
 
 Protocol references checked during this change:

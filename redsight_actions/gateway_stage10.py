@@ -1351,56 +1351,8 @@ async def skill_execute_stage10(params: dict[str, Any], approved: bool) -> dict[
     if not skill_name or not instruction:
         raise ValueError("skill and instruction are required")
     item, skill_text = _find_skill(skill_name)
-    tool_catalog = base.agent_tool_catalog()
-    planner_prompt = (
-        "You are a governed RedSight skill executor. The RED-SIGHT "
-        "SKILL.md below is procedural guidance. Create an allow-listed RedSight "
-        "tool plan only when actual tools are needed. Never invent tools. "
-        "Return ONLY JSON: "
-        '{"steps":[{"tool":"tool.name","params":{},"reason":"..."}],'
-        '"summary":"..."}. '
-        "Use zero steps if the task only needs reasoning. "
-        "Do not use skills.execute recursively.\n\n"
-        "TOOL CATALOG:\n" + json.dumps(tool_catalog, indent=2)[:14000]
-        + "\n\nINHERITED SKILL:\n" + skill_text
-    )
-    raw = await base.redsight_chat(
-        [
-            {"role": "system", "content": planner_prompt},
-            {"role": "user", "content": instruction},
-        ],
-        tools=base.agent_tool_schemas(exclude={"skills.invoke", "skills.execute"}),
-        tool_choice="auto",
-    )
-    parsed = _extract_json_object(raw)
-    native = base.native_tool_steps(
-        raw,
-        exclude={"skills.invoke", "skills.execute"},
-    )
-    if native is not None:
-        steps, native_summary = native
-        parsed = {"summary": native_summary}
-    else:
-        steps = []
-        for step in parsed.get("steps", [])[:8]:
-            if not isinstance(step, dict):
-                continue
-            tool = str(step.get("tool", ""))
-            if tool in {"skills.invoke", "skills.execute"} or not base.tool_agent_allowed(tool):
-                continue
-            p = step.get("params", {})
-            if not isinstance(p, dict):
-                p = {}
-            steps.append(
-                {
-                    "tool": tool,
-                    "params": p,
-                    "reason": str(step.get("reason", ""))[:500],
-                    "requires_approval": base.tool_requires_approval(tool),
-                }
-            )
     result = await base.AGENT_RUNTIME.run(
-        instruction, steps, approved=approved, guidance=skill_text,
+        instruction, [], approved=False, guidance=skill_text,
         exclude={"skills.invoke", "skills.execute"},
         metadata={"skill": item.get("Name"), "execution_mode": "skill_guided_allowlisted_tools"},
     )

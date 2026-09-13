@@ -31,6 +31,7 @@ from pydantic import Field
 
 from app.security.local_api import auth_headers, configure_local_api_security
 from redsight_actions import mcp_native_stage111 as native_mcp
+from redsight_actions import productivity
 from redsight_actions.tool_planning import (
     build_agent_tool_schemas,
     decode_native_tool_steps,
@@ -312,6 +313,9 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 # ====================================================================
 # MODELS
 # ====================================================================
+
+TOOL_SPECS.update(productivity.TOOL_SPECS)
+
 
 class GatewayRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -1796,6 +1800,7 @@ def filesystem_write(
 def _skill_roots() -> list[Path]:
 
     roots = [
+        ROOT / "app" / "bundled_skills",
         HERITAGE / "skills",
         ROOT / "skills",
     ]
@@ -2754,6 +2759,9 @@ async def execute_tool_core(
             result = await browser_automate(
                 params
             )
+
+        elif tool in productivity.TOOL_SPECS:
+            result = await asyncio.to_thread(productivity.execute, tool, params, validated_path)
 
         elif tool == "pdf.generate":
 

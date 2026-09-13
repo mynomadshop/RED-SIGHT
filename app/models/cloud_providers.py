@@ -193,8 +193,13 @@ class OpenAIProvider(_BaseProvider):
         stream: bool = False,
         **kwargs: Any,
     ) -> AsyncIterator[str] | str:
+        selected_model = model_id or self.models[0].id
+        if self.provider == CloudProvider.OPENAI:
+            budget = kwargs.pop("max_tokens", None)
+            if budget is not None:
+                kwargs["max_completion_tokens"] = budget
         payload = {
-            "model": model_id or self.models[0].id,
+            "model": selected_model,
             "messages": [{key: value for key, value in item.items() if key != "provider_content"}
                          for item in messages],
             **{key: value for key, value in kwargs.items() if value is not None},

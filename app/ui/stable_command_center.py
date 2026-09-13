@@ -66,7 +66,7 @@ class StableCommandCenterMainWindow(CommandCenterMainWindow):
         chat_tab = self._tabs.widget(0)
         try:
             messages = await asyncio.to_thread(_redsight_stage10_messages, message)
-            timeout = httpx.Timeout(30.0, connect=5.0)
+            timeout = httpx.Timeout(180.0, connect=5.0)
             async with httpx.AsyncClient(timeout=timeout, headers=auth_headers(), trust_env=False) as client:
                 response = await client.post(
                     f"{self._api_base_url}/api/v1/chat",

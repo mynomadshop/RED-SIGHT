@@ -106,6 +106,24 @@ jobs:
   # --------------------------------------------------------------------------
   # Build on Windows, then install what we built and verify it.
   # --------------------------------------------------------------------------
+  cuda-packages:
+    needs: logic-tests
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Verify CPU to CUDA package replacement
+        shell: pwsh
+        run: |
+          $python = (Get-Command python -CommandType Application).Source
+          & pwsh -NoLogo -NoProfile -File installer/tests/Test-CudaPackages.ps1 `
+            -PythonExe $python -VenvPath (Join-Path $env:RUNNER_TEMP 'RedSight CUDA Test')
+          if ($LASTEXITCODE -ne 0) { throw 'CPU to CUDA package verification failed' }
+
   build:
     needs: logic-tests
     runs-on: windows-latest
@@ -187,7 +205,7 @@ jobs:
         shell: pwsh
         run: |
           $exe = (Get-ChildItem dist -Filter 'RedSight-Setup-*.exe' | Select-Object -First 1).FullName
-          $dest = 'C:\RedSightTest'
+          $dest = 'C:\RedSight Test'
           $log = 'C:\rs-setup.log'
           Write-Host "installing $exe -> $dest"
 
@@ -278,7 +296,7 @@ jobs:
       - name: Verify the provisioned install
         shell: pwsh
         run: |
-          $dest = 'C:\RedSightTest'
+          $dest = 'C:\RedSight Test'
           $fail = 0
           function Check($name, $ok, $detail = '') {
             if ($ok) { Write-Host "  PASS  $name $detail" -ForegroundColor Green }
@@ -327,6 +345,8 @@ jobs:
               $env:REDSIGHT_TEST_ROOT = $dest
               & $uiPy (Resolve-Path 'installer\tests\Test-SettingsUi.py').Path
               Check 'UI opens unconfigured with complete top Settings' ($LASTEXITCODE -eq 0)
+              & $uiPy (Resolve-Path 'installer\tests\Test-ProviderSettings.py').Path
+              Check 'every provider supports Settings test/apply/restart with encrypted keys' ($LASTEXITCODE -eq 0)
             } finally {
               Remove-Item -LiteralPath 'Env:\REDSIGHT_TEST_ROOT' -ErrorAction SilentlyContinue
               $env:LOCALAPPDATA = $savedLocalAppData
@@ -366,8 +386,8 @@ jobs:
       - name: Verify native laptop startup and dependent agent actions
         shell: pwsh
         run: |
-          & 'C:\RedSightTest\.venv-ui\Scripts\python.exe' `
-            (Resolve-Path 'installer/tests/Test-NativeRuntime.py').Path --root 'C:\RedSightTest'
+          & 'C:\RedSight Test\.venv-ui\Scripts\python.exe' `
+            (Resolve-Path 'installer/tests/Test-NativeRuntime.py').Path --root 'C:\RedSight Test'
           if ($LASTEXITCODE -ne 0) { throw 'Native laptop and agent smoke test failed' }
 
       - name: Verify idempotent re-run
@@ -377,11 +397,11 @@ jobs:
           # shortcut. It must preserve native mode rather than introducing
           # Docker on a laptop/API installation.
           & powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
-              -File 'C:\RedSightTest\scripts\windows\Bootstrap-RedSight.ps1' `
-              -ProjectRoot 'C:\RedSightTest' -SkipShortcut
+              -File 'C:\RedSight Test\scripts\windows\Bootstrap-RedSight.ps1' `
+              -ProjectRoot 'C:\RedSight Test' -SkipShortcut
           Write-Host "second run exit code: $LASTEXITCODE"
           if ($LASTEXITCODE -notin @(0, 2)) { throw "re-run returned $LASTEXITCODE" }
-          if (-not (Test-Path 'C:\RedSightTest\.venv-ui\Scripts\python.exe')) {
+          if (-not (Test-Path 'C:\RedSight Test\.venv-ui\Scripts\python.exe')) {
             throw '.venv-ui disappeared on re-run'
           }
           $s = Get-Content "$env:LOCALAPPDATA\RedSight\setup-summary.json" -Raw | ConvertFrom-Json
@@ -399,13 +419,13 @@ jobs:
       - name: Verify uninstall
         shell: pwsh
         run: |
-          $unins = Get-ChildItem 'C:\RedSightTest' -Filter 'unins*.exe' | Select-Object -First 1
+          $unins = Get-ChildItem 'C:\RedSight Test' -Filter 'unins*.exe' | Select-Object -First 1
           if (-not $unins) { throw 'no uninstaller was created' }
           $p = Start-Process -FilePath $unins.FullName -PassThru `
                  -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
           if (-not $p.WaitForExit(900000)) { $p.Kill($true); throw 'uninstall timed out' }
           Write-Host "uninstall exit code: $($p.ExitCode)"
-          if (Test-Path 'C:\RedSightTest\.venv-ui') { throw '.venv-ui survived the uninstall' }
+          if (Test-Path 'C:\RedSight Test\.venv-ui') { throw '.venv-ui survived the uninstall' }
           Write-Host 'uninstall removed the virtual environments'
 
       - name: Upload release zip

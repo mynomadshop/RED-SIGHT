@@ -10,6 +10,7 @@ import asyncio
 import json
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +30,8 @@ class AgentRun:
     touched: float = field(default_factory=time.monotonic)
     running: bool = False
     signatures: list[str] = field(default_factory=list)
+    recoveries: int = 0
+    unresolved_failure: bool = False
 
 
 def _signature(step: dict) -> str:
@@ -37,7 +40,8 @@ def _signature(step: dict) -> str:
 
 class AgentRuntime:
     def __init__(self, *, chat, execute, tool_specs, allowed, requires_approval,
-                 max_steps: int = 16, concurrency: int = 2, timeout: float = 540):
+                 max_steps: int = 16, concurrency: int = 2, timeout: float = 540,
+                 max_recoveries: int = 2):
         self.chat = chat
         self.execute = execute
         self.tool_specs = tool_specs
@@ -45,12 +49,13 @@ class AgentRuntime:
         self.requires_approval = requires_approval
         self.max_steps = max(1, min(50, max_steps))
         self.timeout = timeout
+        self.max_recoveries = max(0, min(3, max_recoveries))
         self.semaphore = asyncio.Semaphore(max(1, min(4, concurrency)))
         self.runs: dict[str, AgentRun] = {}
 
     def _result(self, run: AgentRun, *, ok: bool, **extra) -> dict:
         return {**run.metadata, "ok": ok, "goal": run.goal, "run_id": run.run_id,
-                "results": run.results, **extra}
+                "results": deepcopy(run.results), "recovery_attempts": run.recoveries, **deepcopy(extra)}
 
     def _parse(self, raw: str, run: AgentRun) -> tuple[list[dict], dict | None, str]:
         specs = self.tool_specs()
@@ -120,14 +125,14 @@ class AgentRuntime:
             )
             run = AgentRun(goal, [{"role": "system", "content": instructions},
                                   {"role": "user", "content": goal}],
-                           list(plan), exclude or set(), metadata or {})
+                           deepcopy(plan), set(exclude or ()), deepcopy(metadata or {}))
             self.runs[run.run_id] = run
         # Authorization is scoped to the exact submitted, reviewed actions.
         authorized = {_signature(step) for step in run.pending} if approved else set()
         run.running = True
         keep = False
         try:
-            async with self.semaphore, asyncio.timeout(self.timeout):
+            async with asyncio.timeout(self.timeout), self.semaphore:
                 result = await self._advance(run, authorized)
                 keep = bool(result.get("requires_approval"))
                 return result
@@ -155,20 +160,38 @@ class AgentRuntime:
                 return self._result(run, ok=False, requires_approval=True,
                                     plan=run.pending, completed=run.results, pending_step=len(run.results) + 1)
             batch = []
+            failed_read = False
             for step in run.pending:
+                if failed_read:
+                    batch.append({"tool": step["tool"], "result": {
+                        "ok": False, "skipped": True,
+                        "error": "Skipped because an earlier action failed; select the next action from the observed error."}})
+                    continue
                 signature = _signature(step)
                 repetitions = run.signatures.count(signature)
                 if repetitions >= (1 if self.requires_approval(step["tool"]) else 3):
                     return self._result(run, ok=False, error="Repeated action stopped to prevent duplicate changes or a loop")
-                result = await self.execute(step["tool"], step.get("params", {}),
-                                            approved=signature in authorized)
+                try:
+                    result = await self.execute(step["tool"], step.get("params", {}),
+                                                approved=signature in authorized)
+                except Exception as exc:
+                    result = {"ok": False, "error": f"Tool failed ({type(exc).__name__})"}
                 record = {"step": len(run.results) + 1, "tool": step["tool"],
                           "reason": step.get("reason", ""), "result": result}
                 run.results.append(record)
                 run.signatures.append(signature)
                 batch.append(record)
                 if not isinstance(result, dict) or not result.get("ok", False):
-                    return self._result(run, ok=False, error="A tool failed; dependent actions were stopped")
+                    # Only declared read operations may recover. A failed write
+                    # can have partially completed and must never be replayed.
+                    read_only = self.tool_specs().get(step["tool"], {}).get("risk") == "read"
+                    if (not read_only or self.requires_approval(step["tool"])
+                            or run.recoveries >= self.max_recoveries):
+                        return self._result(run, ok=False, error="A tool failed; dependent actions were stopped")
+                    run.recoveries += 1
+                    run.unresolved_failure = failed_read = True
+                else:
+                    run.unresolved_failure = False
             if run.pending:
                 if run.native_message:
                     run.messages.append(run.native_message)
@@ -188,5 +211,8 @@ class AgentRuntime:
             if not pending:
                 if not response.strip():
                     return self._result(run, ok=False, error="The provider returned an empty answer")
+                if run.unresolved_failure:
+                    return self._result(run, ok=False, response=response,
+                                        error="The last tool failure was not resolved")
                 return self._result(run, ok=True, response=response)
             run.pending, run.native_message = pending, message

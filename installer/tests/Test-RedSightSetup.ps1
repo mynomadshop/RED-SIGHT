@@ -896,6 +896,22 @@ Assert-True -Name 'native mode prefers the native launcher' `
 Assert-True -Name 'container mode prefers the gateway launcher' `
             -Condition ($dispatchText -match "'START-REDSIGHT\.ps1', 'LAUNCH-REDSIGHT-DESKTOP\.ps1'")
 
+# Execute the real dispatch decision without starting an installed process.
+$dispatchAst = [System.Management.Automation.Language.Parser]::ParseInput($dispatchText, [ref]$null, [ref]$null)
+$modeFunction = $dispatchAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RuntimeMode' }, $true)
+. ([scriptblock]::Create($modeFunction.Extent.Text))
+$savedDispatchLocal = $env:LOCALAPPDATA
+try {
+    $env:LOCALAPPDATA = Join-Path $tmpRoot 'dispatch-user'
+    $settingsDir = Join-Path $env:LOCALAPPDATA 'RedSight\settings'
+    New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $dispatchRoot '.env') -Value 'REDSIGHT_RUNTIME_MODE=container'
+    Set-Content -LiteralPath (Join-Path $settingsDir 'lmstudio.json') -Value '{"runtime_mode":"native"}'
+    Assert-Equal -Name 'saved runtime mode overrides the installation default on restart' -Expected 'native' -Actual (Get-RuntimeMode -Root $dispatchRoot)
+    Set-Content -LiteralPath (Join-Path $settingsDir 'lmstudio.json') -Value '{"runtime_mode":""}'
+    Assert-Equal -Name 'automatic runtime mode uses the installation default' -Expected 'container' -Actual (Get-RuntimeMode -Root $dispatchRoot)
+} finally { $env:LOCALAPPDATA = $savedDispatchLocal }
+
 # ==========================================================================
 Write-Host "`n== Runtime bootstrap installation ==" -ForegroundColor Cyan
 # ==========================================================================
@@ -965,7 +981,7 @@ Write-Host "`n== PyTorch wheel selection by GPU architecture ==" -ForegroundColo
 # imports, reports CUDA as available, and then fails on the first operation.
 $t120 = Get-RsTorchPlan -ComputeCapability '12.0'
 Assert-Equal -Name 'Blackwell gets the CUDA 12.8 index' -Expected 'https://download.pytorch.org/whl/cu128' -Actual $t120.Index
-Assert-Equal -Name 'Blackwell gets a version floor so a wrong build is replaced' -Expected 'torch>=2.7' -Actual $t120.Spec
+Assert-Equal -Name 'Blackwell gets a version floor so a wrong build is replaced' -Expected 'torch>=2.7,<2.12' -Actual $t120.Spec
 Assert-True  -Name 'the Blackwell label names the architecture' -Condition ($t120.Label -match 'sm_120')
 
 foreach ($cap in @('9.0', '8.9', '8.6', '7.5', '6.1')) {
@@ -989,8 +1005,8 @@ Assert-Equal -Name 'the plan carries the Blackwell index' `
 Assert-Equal -Name 'the plan reports the capability it decided from' -Expected '12.0' -Actual $planBlackwell.ComputeCap
 $blackwellArgs = ($planBlackwell.PreInstalls[0].Args -join ' ')
 Assert-True -Name 'the pre-install pins the version and the index' `
-            -Condition ($blackwellArgs -eq 'torch>=2.7 --index-url https://download.pytorch.org/whl/cu128')
-Assert-Equal -Name 'the GPU ONNX runtime is still chosen' -Expected 'onnxruntime-gpu' -Actual $planBlackwell.PreInstalls[1].Args[0]
+            -Condition ($blackwellArgs -eq 'torch>=2.7,<2.12 --index-url https://download.pytorch.org/whl/cu128 --upgrade')
+Assert-Equal -Name 'the GPU ONNX runtime is still chosen' -Expected 'onnxruntime-gpu>=1.21,<1.27' -Actual $planBlackwell.PreInstalls[1].Args[0]
 
 $hwAda = [pscustomobject]@{
     gpu = [pscustomobject]@{
@@ -1012,6 +1028,25 @@ $planApi = Get-RsDependencyPlan -SetupProfile 'api' -Hardware $hwBlackwell
 Assert-True -Name 'the api profile installs no CUDA wheel' `
             -Condition (($planApi.PreInstalls[0].Args -join ' ') -match '/whl/cpu')
 Assert-Equal -Name 'the api profile records no torch index' -Expected '' -Actual $planApi.TorchIndex
+
+# Modern drivers get the current CUDA 13 family; old drivers retain a
+# compatible package family, including ONNX Runtime's CUDA-major boundary.
+$modernTorch = Get-RsTorchPlan -ComputeCapability '12.0' -DriverCuda '13.3'
+Assert-Equal -Name 'current Blackwell drivers select CUDA 13.0' -Expected 'https://download.pytorch.org/whl/cu130' -Actual $modernTorch.Index
+Assert-Equal -Name 'CUDA 13 selects matching ONNX packages' -Expected 'onnxruntime-gpu>=1.27,<2' -Actual $modernTorch.Onnx
+$olderTorch = Get-RsTorchPlan -ComputeCapability '8.9' -DriverCuda '12.8'
+Assert-Equal -Name 'older drivers retain CUDA 12 compatibility' -Expected '12.6' -Actual $olderTorch.Runtime
+Assert-Equal -Name 'CUDA 12 excludes CUDA 13 ONNX packages' -Expected 'onnxruntime-gpu>=1.21,<1.27' -Actual $olderTorch.Onnx
+Assert-Equal -Name 'CPU profile removes conflicting GPU ONNX' -Expected 'onnxruntime-gpu' -Actual $planApi.PreInstalls[1].Remove[0]
+Assert-Equal -Name 'CUDA profile removes conflicting CPU ONNX' -Expected 'onnxruntime' -Actual $planBlackwell.PreInstalls[1].Remove[0]
+Assert-Equal -Name 'CPU profile verifies actual torch runtime' -Expected 'cpu' -Actual $planApi.PreInstalls[0].ExpectedCuda
+$mixedGpu = [pscustomobject]@{ gpu = [pscustomobject]@{
+    cudaCapable = $true; maxVramGB = 24; maxComputeCap = '8.9'; cudaVersion = '13.3'
+    nvidia = @([pscustomobject]@{ ComputeCap = '8.9' }, [pscustomobject]@{ ComputeCap = '6.1' })
+} }
+Assert-Equal -Name 'mixed pre-Turing GPUs keep CUDA 12' -Expected '12.6' -Actual (Get-RsDependencyPlan -SetupProfile cuda -Hardware $mixedGpu).PreInstalls[0].ExpectedCuda
+$mixedGpu.gpu.nvidia = @([pscustomobject]@{ ComputeCap = '' }, [pscustomobject]@{ ComputeCap = 'N/A' })
+Assert-Equal -Name 'missing per-device capability does not crash selection' -Expected '13.0' -Actual (Get-RsDependencyPlan -SetupProfile cuda -Hardware $mixedGpu).PreInstalls[0].ExpectedCuda
 
 # ==========================================================================
 Write-Host "`n== PyTorch GPU verification ==" -ForegroundColor Cyan

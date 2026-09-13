@@ -37,6 +37,18 @@ if (-not $ProjectRoot) {
 
 function Get-RuntimeMode {
     param([Parameter(Mandatory)][string]$Root)
+    # Settings is the user override; .env records the installation default.
+    if ($env:LOCALAPPDATA) {
+        $settingsFile = Join-Path $env:LOCALAPPDATA 'RedSight\settings\lmstudio.json'
+        if (Test-Path -LiteralPath $settingsFile) {
+            try {
+                $settings = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
+                if ($settings.PSObject.Properties['runtime_mode'] -and $settings.runtime_mode -in @('native', 'container')) {
+                    return $settings.runtime_mode
+                }
+            } catch { Write-Warning 'Could not read runtime Settings; using the installation default.' }
+        }
+    }
     $envFile = Join-Path $Root '.env'
     if (Test-Path -LiteralPath $envFile) {
         foreach ($line in @(Get-Content -LiteralPath $envFile -ErrorAction SilentlyContinue)) {

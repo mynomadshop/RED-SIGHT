@@ -90,14 +90,14 @@ second copy cannot be created by changing the path.
 
 | | CUDA profile | API / laptop profile |
 | --- | --- | --- |
-| PyTorch | CUDA 12.8 for Blackwell/RTX 50-series; CUDA 12.4 for earlier supported GPUs | CPU-only index |
-| ONNX Runtime | `onnxruntime-gpu` | `onnxruntime` |
+| PyTorch | CUDA 13.0 on supported current drivers; CUDA 12 compatibility builds for older combinations | CPU-only index |
+| ONNX Runtime | `onnxruntime-gpu`, matched to the Torch CUDA major | `onnxruntime` only |
 | Default backend | Native, no Docker/WSL2 | Native, no Docker/WSL2 |
 
-On a machine with no working NVIDIA driver the CUDA build is not merely wasted
-download - it fails to load. `PreInstalls` are installed before anything else so
-the chosen torch is already satisfied when the rest of the dependency graph
-resolves, and nothing pulls the default build over the top.
+`PreInstalls` select Torch and ONNX first. Their installed versions are then
+constrained while the remaining dependencies are upgraded within project
+ranges. Profile changes replace conflicting compute packages and verify the
+actual Torch runtime. Each environment must pass `pip check`.
 
 ### Hardware detection
 
@@ -177,14 +177,18 @@ RTX 50-series card (Blackwell, `sm_120`) the whole CUDA profile was decoration.
 The wheel index is now chosen from the compute capability the hardware scan
 reports:
 
-| Compute capability | Index | Requirement |
+| Architecture and driver | Index | Requirement |
 | --- | --- | --- |
-| ≥ 12.0 (Blackwell, RTX 50-series) | `.../whl/cu128` | `torch>=2.7` |
-| anything else, or unknown | `.../whl/cu124` | `torch` |
+| ≥ 7.5, driver CUDA ≥ 13.0 | `.../whl/cu130` | `torch>=2.12,<3` |
+| < 12.0, driver CUDA ≥ 12.6 | `.../whl/cu126` | `torch>=2.6,<3` |
+| Blackwell, older/unknown driver capability | `.../whl/cu128` | `torch>=2.7,<2.12` |
+| other older/unknown combinations | `.../whl/cu124` | `torch>=2.5,<2.7` |
 
 The version floor matters as much as the index: pip reports an
 already-installed torch as satisfied, so without it a machine that once got the
-wrong build would keep it through every repair run.
+wrong build would keep it through every repair run. CUDA 13 uses ONNX Runtime
+1.27 or later; CUDA 12 retains an ONNX version below 1.27. Mixed GPU generations
+are checked before selecting a build. See [compatibility details](../docs/AGENT_PRODUCTIVITY.md).
 
 `Test-RsTorchCuda` then asks the question that actually matters — it compares
 each device's capability against `torch.cuda.get_arch_list()` **and** runs a
@@ -432,12 +436,12 @@ snapshot; that class of leftover is now removed by pattern rather than by hand.
 ## Testing
 
 ```bash
-pwsh -File installer/tests/Test-RedSightSetup.ps1   # 380 assertions
-pwsh -File installer/tests/Test-IssScript.ps1       #  76 static checks
-python3 installer/tests/test_app_overlay.py         #  96 assertions
+pwsh -File installer/tests/Test-RedSightSetup.ps1
+pwsh -File installer/tests/Test-IssScript.ps1
+python3 installer/tests/test_app_overlay.py
 ```
 
-515 assertions covering version parsing and gating, the install-path rewriter
+These checks cover version parsing and gating, the install-path rewriter
 (plain, JSON-escaped and forward-slash forms, exclusions, idempotency), `.env`
 seeding, retry/backoff behaviour, process timeout and exit-code handling, the
 venv import probe, bundled-Python provisioning (hash verification, tamper
