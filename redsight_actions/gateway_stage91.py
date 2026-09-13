@@ -557,9 +557,9 @@ base.execute_tool_core = (
 )
 
 
-async def plan_stage91(goal):
+async def plan_stage91(goal, *, context: str = ""):
 
-    plan = await OLD_PLAN(goal)
+    plan = await OLD_PLAN(goal, context=context)
 
     if not isinstance(plan, dict):
 

@@ -1372,6 +1372,14 @@ function Repair-RsHardcodedPaths {
         )
     }
 
+    # Protect complete target roots before trying any migration pattern. A
+    # legacy root can be a prefix of the target (e.g. a product directory with
+    # a space and suffix), and user-profile rewrites can overlap it too.
+    # Repeat this protection for each pattern so newly rewritten paths are
+    # also preserved by subsequent patterns and by later repair runs.
+    $targetPattern = '(?i)(?<installedRoot>' + ((@($targetEscaped, $target, $targetForward) |
+        Select-Object -Unique | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')'
+
     # Lines assigning a user-chosen directory keep their value verbatim.
     $protectedLine = '^\s*(' + (($script:RsUserPathKeys | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\s*='
 
@@ -1417,7 +1425,11 @@ function Repair-RsHardcodedPaths {
                     if ($updatedLine -notmatch $p.Regex) { continue }
                     # A literal replacement: the target path may contain $ or \
                     # which would otherwise be read as regex substitutions.
-                    $updatedLine = [regex]::Replace($updatedLine, $p.Regex, { param($m) $p.Replacement })
+                    $updatedLine = [regex]::Replace($updatedLine, ($targetPattern + '|(?:' + $p.Regex + ')'), {
+                        param($m)
+                        if ($m.Groups['installedRoot'].Success) { return $m.Value }
+                        return $p.Replacement
+                    })
                 }
                 if ($updatedLine -ne $line) { $lines[$i] = $updatedLine; $changed = $true }
             }

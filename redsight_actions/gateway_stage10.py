@@ -1409,7 +1409,7 @@ async def execute_tool_stage10(tool: str, params: dict[str, Any],
 base.execute_tool_core = execute_tool_stage10
 
 
-async def create_plan_stage10(goal: str):
+async def create_plan_stage10(goal: str, *, context: str = ""):
     sid = ensure_active_session()
     task = get_active_task(sid)
     effective_goal = goal
@@ -1425,7 +1425,10 @@ async def create_plan_stage10(goal: str):
         limit=5,
     )
     if relevant_skills:
-        effective_goal += (
+        # Keep catalog descriptions out of deterministic intent routing. A
+        # relevant skill can mention indexing/scanning without the user asking
+        # to perform either action.
+        context += (
             "\n\nRELEVANT INHERITED RED-SIGHT SKILLS AVAILABLE FOR skills.read:\n"
             + "\n".join(
                 f"- {item.get('Name')}: {item.get('Description','')}"
@@ -1434,7 +1437,7 @@ async def create_plan_stage10(goal: str):
         )
     if actionable(goal) and not task:
         task = set_active_task(goal, sid)
-    plan = await OLD_PLAN(effective_goal)
+    plan = await OLD_PLAN(effective_goal, context=context)
     if isinstance(plan, dict) and get_active_task(sid):
         update_task(
             sid,

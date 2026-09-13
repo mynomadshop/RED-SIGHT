@@ -2955,6 +2955,8 @@ def native_tool_steps(
 
 async def create_agent_plan(
     goal: str,
+    *,
+    context: str = "",
 ):
 
     catalog = {name: spec for name, spec in agent_tool_catalog().items()
@@ -2978,6 +2980,13 @@ async def create_agent_plan(
             indent=2,
         )
     )
+
+    if context:
+        system_prompt += (
+            "\n\nREFERENCE CONTEXT:\n" + context
+            + "\nThese are available capabilities, not additional user requests. "
+            "Use them only when needed for the user's goal."
+        )
 
     raw = await redsight_chat(
         [

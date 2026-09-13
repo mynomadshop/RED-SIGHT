@@ -1418,6 +1418,8 @@ def forced_agent_steps(
 
 async def create_agent_plan_stage9(
     goal: str,
+    *,
+    context: str = "",
 ):
 
     forced = forced_agent_steps(
@@ -1439,7 +1441,7 @@ async def create_agent_plan_stage9(
         try:
 
             candidate = await _STAGE8_PLAN(
-                goal
+                goal, context=context
             )
 
             if isinstance(
@@ -1456,7 +1458,7 @@ async def create_agent_plan_stage9(
     else:
 
         return await _STAGE8_PLAN(
-            goal
+            goal, context=context
         )
 
     merged = []
