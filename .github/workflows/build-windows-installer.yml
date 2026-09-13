@@ -212,7 +212,7 @@ jobs:
           # core only: Docker Desktop cannot run on a hosted runner.
           $p = Start-Process -FilePath $exe -PassThru -ArgumentList @(
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCANCEL',
-            "/DIR=$dest", '/COMPONENTS=core', "/LOG=$log"
+            ('/DIR="{0}"' -f $dest), '/COMPONENTS=core', "/LOG=$log"
           )
 
           # A stalled hardware utility or package manager used to leave this
