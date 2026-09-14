@@ -10,6 +10,17 @@ name: Build Windows installer
 # only. Everything else is genuinely executed.
 
 on:
+  pull_request:
+    paths:
+      - 'installer/**'
+      - 'scripts/windows/**'
+      - '.github/workflows/build-windows-installer.yml'
+      - 'app/**'
+      - 'redsight/**'
+      - 'redsight_actions/**'
+      - 'ui/**'
+      - 'launch_redsight*.py'
+      - 'pyproject.toml'
   workflow_dispatch:
     inputs:
       version:
@@ -137,6 +148,10 @@ jobs:
           Write-Host "OS   : $([System.Environment]::OSVersion.VersionString)"
           Write-Host "PWSH : $($PSVersionTable.PSVersion)"
           Write-Host "Ver  : ${{ env.RS_VERSION }}"
+
+      - name: Verify Windows install-path repair is idempotent
+        shell: powershell
+        run: .\installer\tests\Test-InstallPathRewrite.ps1
 
       - name: Install Inno Setup
         shell: pwsh
@@ -373,11 +388,12 @@ jobs:
             Check 'native install did not touch the Docker engine' (-not $s.PSObject.Properties['dockerRunning'])
           }
 
-          # The health check must run and classify Docker's absence, not crash.
+          # Native mode does not require Docker. Required health checks must
+          # actually pass, including the second, read-only path repair check.
           & powershell -NoLogo -NoProfile -ExecutionPolicy Bypass `
               -File "$dest\scripts\windows\Verify-RedSightSetup.ps1"
           Write-Host "health check exit code: $LASTEXITCODE (Docker is not required in native mode)"
-          Check 'health check ran to completion' ($LASTEXITCODE -in @(0, 1))
+          Check 'native installation passes required health checks' ($LASTEXITCODE -eq 0)
 
           if ($fail) { throw "$fail install verification check(s) failed" }
           Write-Host 'all install verification checks passed' -ForegroundColor Green
